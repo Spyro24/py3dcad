@@ -11,12 +11,7 @@ from .layout import Rect
 class TabBar:
     """Draws the top bar with the brand and one tab per open document."""
 
-    def __init__(
-        self,
-        on_select: Callable[[int], None],
-        on_close: Callable[[int], None],
-        on_new: Callable[[], None],
-    ) -> None:
+    def __init__(self, on_select: Callable[[int], None], on_close: Callable[[int], None], on_new: Callable[[], None]) -> None:
         self.on_select = on_select
         self.on_close = on_close
         self.on_new = on_new
@@ -90,13 +85,7 @@ class TabBar:
 
         return False
 
-    def draw(
-        self,
-        surface: pygame.Surface,
-        region: Rect,
-        documents: List[Document],
-        active_id: Optional[int],
-    ) -> None:
+    def draw(self, surface: pygame.Surface, region: Rect, documents: List[Document], active_id: Optional[int],) -> None:
         self._init_fonts()
         pygame.draw.rect(surface, self.bg_color, region.rect)
         pygame.draw.line(
@@ -118,10 +107,7 @@ class TabBar:
 
         if not documents:
             page = self._font_page.render("Start", True, self.text_muted)
-            surface.blit(
-                page,
-                page.get_rect(x=tabs_x - self._s(4), centery=region.centery),
-            )
+            surface.blit(page, page.get_rect(x=tabs_x - self._s(4), centery=region.centery))
         else:
             for index, tab_rect, close_rect in tabs:
                 document = documents[index]

@@ -945,34 +945,13 @@ class SceneRenderer:
             overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
             self._face_surface = overlay
         overlay.fill((0, 0, 0, 0))
-        local_faces = [
-            (
-                [
-                    (point[0] - rect.x, point[1] - rect.y)
-                    for point in polygon
-                ],
-                [
-                    [
-                        (point[0] - rect.x, point[1] - rect.y)
-                        for point in hole
-                    ]
-                    for hole in holes
-                ],
-            )
-            for polygon, holes in faces
-        ]
+        local_faces = [([(point[0] - rect.x, point[1] - rect.y) for point in polygon], [[(point[0] - rect.x, point[1] - rect.y) for point in hole] for hole in holes]) for polygon, holes in faces]
         for local_polygon, _ in local_faces:
-            pygame.draw.polygon(
-                overlay, (*self.palette.active, 62), local_polygon
-            )
+            pygame.draw.polygon(overlay, (*self.palette.active, 62), local_polygon)
         for _, local_holes in local_faces:
             for local_hole in local_holes:
-                pygame.draw.polygon(
-                    overlay, (0, 0, 0, 0), local_hole
-                )
-        for loop in union_profiles(
-            [polygon for polygon, _ in local_faces]
-        ):
+                pygame.draw.polygon(overlay, (0, 0, 0, 0), local_hole)
+        for loop in union_profiles([polygon for polygon, _ in local_faces]):
             pygame.draw.polygon(
                 overlay, (*self.palette.active, 245), loop,
                 max(1, self._s(2)),
@@ -1019,15 +998,7 @@ class SceneRenderer:
                     surface, color, frame, circle, camera, center
                 )
 
-    def _draw_sketch_circle(
-        self,
-        surface: pygame.Surface,
-        color: Color,
-        frame: PlaneFrame,
-        circle: Circle,
-        camera: OrbitCamera,
-        center: Tuple[int, int],
-    ) -> None:
+    def _draw_sketch_circle(self, surface: pygame.Surface, color: Color, frame: PlaneFrame, circle: Circle, camera: OrbitCamera, center: Tuple[int, int]) -> None:
         local_points = circle_polygon(circle)
         if not local_points:
             return
@@ -1074,26 +1045,13 @@ class SceneRenderer:
             )
             frame = sketch.frame()
             for x, y in sketch.points:
-                self._draw_sketch_point(
-                    surface, color, camera, frame, (x, y), center, radius
-                )
+                self._draw_sketch_point(surface, color, camera, frame, (x, y), center, radius)
 
-    def _draw_sketch_point(
-        self,
-        surface: pygame.Surface,
-        color: Color,
-        camera: OrbitCamera,
-        frame: PlaneFrame,
-        point: Point2,
-        center: Tuple[int, int],
-        radius: int,
-    ) -> None:
+    def _draw_sketch_point(self, surface: pygame.Surface, color: Color, camera: OrbitCamera, frame: PlaneFrame, point: Point2, center: Tuple[int, int], radius: int) -> None:
         projected = camera.project(point_on_plane(frame, point), center)
         center_point = (int(projected[0]), int(projected[1]))
         pygame.draw.circle(surface, color, center_point, radius)
-        pygame.draw.circle(
-            surface, self.palette.edge, center_point, radius, 1
-        )
+        pygame.draw.circle(surface, self.palette.edge, center_point, radius, 1)
 
     @staticmethod
     def _visible_sketches(document: Document) -> Iterator[Sketch]:

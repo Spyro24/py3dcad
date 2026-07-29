@@ -58,6 +58,9 @@ from .ui import (
 from .ui.layout import Rect
 
 SCALE_STEPS = (0.75, 0.875, 1.0, 1.125, 1.25, 1.5, 1.75, 2.0)
+UI_SCALE_MIN = 0.75
+UI_SCALE_MAX = 2.0
+UI_SCALE_STEP = 0.125
 
 
 def _plane_offset(point, frame) -> float:
@@ -1277,10 +1280,6 @@ class Application:
         else:
             self.start_page.draw(surface, self._content_region())
 
-        self.tab_bar.draw(
-            surface, self.layout.tab_bar, self.documents, self.active_id
-        )
+        self.tab_bar.draw(surface, self.layout.tab_bar, self.documents, self.active_id)
         self.save_dialog.draw(surface, Rect(0, 0, *self.window.get_size()))
-        self.settings_dialog.draw(
-            surface, Rect(0, 0, *self.window.get_size())
-        )
+        self.settings_dialog.draw(surface, Rect(0, 0, *self.window.get_size()))

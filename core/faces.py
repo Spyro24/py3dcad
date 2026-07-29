@@ -151,7 +151,10 @@ def _clamp_fillet_loops(
     for index, loop in enumerate(loops):
         zero = fillets[0][index] if index < len(fillets[0]) else ()
         top = fillets[1][index] if index < len(fillets[1]) else ()
-        zero, top = _clamp_rim_radii(loop, zero, top, height)
+        bounds = _cap_run_bounds(loop, points) if index > 0 else None
+        zero, top = _clamp_rim_radii(
+            loop, zero, top, height, index > 0, bounds
+        )
         clamped[0].append(_even_corner_radii(zero))
         clamped[1].append(_even_corner_radii(top))
     return clamped
@@ -1088,72 +1091,80 @@ def _append_point(points: List[Point2], point: Point2) -> None:
     points.append(point)
 
 
-def _offset_radius_limit(
-    points: Sequence[Point2],
-    lengths: Sequence[float],
-    index: int,
-) -> float:
-    """Return the largest radius whose miters still fit in one segment.
-
-    A tessellated arc has short chords but a large curvature radius, so the
-    chord length alone must not cap the fillet.  The miter at a joint is
-    ``r * tan(turn / 2)``; requiring both miters to fit leaves a smooth arc
-    with almost its curvature radius of room, while a sharp corner keeps the
-    old ``0.45 * length`` bound.
-    """
-    count = len(points)
-    start = _turn_angle(points, index)
-    end = _turn_angle(points, (index + 1) % count)
-    spread = (
-        math.tan(min(start, math.pi * 0.5) * 0.5)
-        + math.tan(min(end, math.pi * 0.5) * 0.5)
-    )
-    if spread <= 1e-9:
-        # A straight segment has no curvature to pay for; keep the classic
-        # chord bound so a short edge cannot take an oversized round.
-        return 0.45 * lengths[index]
-    return 0.9 * lengths[index] / spread
-
-
 def _clamp_rim_radii(
     points: Sequence[Point2],
     zero_radii: Sequence[float],
     height_radii: Sequence[float],
     height: float,
+    inward_loop: bool = False,
+    bounds: Optional[Sequence[float]] = None,
 ) -> Tuple[List[float], List[float]]:
-    """Keep cap fillets small enough for the loop and the extrusion."""
+    """Keep cap fillets inside the cap edges and the extrusion height."""
+    available = abs(height)
+    clamped_zero = _clamp_cap_radii(
+        points, zero_radii, available, inward_loop, bounds
+    )
+    clamped_height = _clamp_cap_radii(
+        points, height_radii, available, inward_loop, bounds
+    )
+    return _fit_cap_heights(
+        clamped_zero, clamped_height, available
+    )
+
+
+def _clamp_cap_radii(
+    points: Sequence[Point2],
+    values: Sequence[float],
+    available: float,
+    inward_loop: bool = False,
+    bounds: Optional[Sequence[float]] = None,
+) -> List[float]:
+    """Shrink cap fillet radii until every inset loop stays valid."""
     count = len(points)
-    lengths = [
-        math.hypot(
-            points[(index + 1) % count][0] - points[index][0],
-            points[(index + 1) % count][1] - points[index][1],
-        )
+    radii = [
+        float(values[index])
+        if index < len(values) and values[index] > 1e-9 else 0.0
         for index in range(count)
     ]
-    limit = 0.45 * abs(height)
-    spans = [
-        _offset_radius_limit(points, lengths, index)
-        for index in range(count)
-    ]
-    clamped_zero: List[float] = []
-    clamped_height: List[float] = []
-    for index in range(count):
-        local = min(
-            limit,
-            spans[index],
-            spans[index - 1],
-            spans[(index + 1) % count],
+    if not any(radii):
+        return radii
+    if (
+        max(radii) <= available + 1e-9
+        and _cap_inset_valid(points, radii, inward_loop)
+    ):
+        return radii
+    for run in _radius_runs(radii):
+        target = min(radii[index] for index in run)
+        for index in run:
+            radii[index] = target
+        limit = _cap_run_max_radius(
+            points, radii, run, available, inward_loop, bounds
         )
-        local = max(0.0, local)
-        clamped_zero.append(
-            min(float(zero_radii[index]), local)
-            if index < len(zero_radii) else 0.0
-        )
-        clamped_height.append(
-            min(float(height_radii[index]), local)
-            if index < len(height_radii) else 0.0
-        )
-    return clamped_zero, clamped_height
+        limit = min(target, limit)
+        for index in run:
+            radii[index] = limit
+    return radii
+
+
+def _fit_cap_heights(
+    zero: List[float], top: List[float], available: float
+) -> Tuple[List[float], List[float]]:
+    """Scale opposing cap fillets so their bands cannot overlap."""
+    zero_max = max(zero) if zero else 0.0
+    top_max = max(top) if top else 0.0
+    if zero_max + top_max <= available:
+        return zero, top
+    if abs(zero_max - top_max) <= 1e-9:
+        total = zero_max + top_max
+        scale = available / total if total > 1e-9 else 0.0
+        return [value * scale for value in zero], [
+            value * scale for value in top
+        ]
+    if zero_max > top_max:
+        scale = max(0.0, available - top_max) / zero_max
+        return [value * scale for value in zero], top
+    scale = max(0.0, available - zero_max) / top_max
+    return zero, [value * scale for value in top]
 
 
 def _even_corner_radii(radii: Sequence[float]) -> List[float]:
@@ -2271,6 +2282,122 @@ def _apply_fillets(
     return rounded_outer, rounded_holes
 
 
+def _edge_clearance(length: float) -> float:
+    """Keep a tangent just short of the edge so no face collapses."""
+    return max(0.0, length - max(1e-6, abs(length) * 1e-6))
+
+
+def _corner_angle(
+    points: Sequence[Point2], index: int, orientation: float
+) -> Optional[float]:
+    """Return the interior angle of one convex loop corner, if any."""
+    count = len(points)
+    previous = points[(index - 1) % count]
+    corner = points[index]
+    following = points[(index + 1) % count]
+    incoming = (corner[0] - previous[0], corner[1] - previous[1])
+    outgoing = (following[0] - corner[0], following[1] - corner[1])
+    incoming_length = math.hypot(*incoming)
+    outgoing_length = math.hypot(*outgoing)
+    if incoming_length < 1e-9 or outgoing_length < 1e-9:
+        return None
+    u = (incoming[0] / incoming_length, incoming[1] / incoming_length)
+    v = (outgoing[0] / outgoing_length, outgoing[1] / outgoing_length)
+    cross = u[0] * v[1] - u[1] * v[0]
+    if cross * orientation <= 1e-9:
+        return None
+    dot = max(-1.0, min(1.0, -(u[0] * v[0] + u[1] * v[1])))
+    angle = math.acos(dot)
+    if angle <= 1e-6 or angle >= math.pi - 1e-6:
+        return None
+    return angle
+
+
+def _straight_runs(
+    points: Sequence[Point2],
+) -> List[Tuple[int, int, float]]:
+    """Return ``(start, end, length)`` for every straight loop run."""
+    count = len(points)
+    directions: List[Optional[Point2]] = []
+    lengths: List[float] = []
+    turns = [False] * count
+    for index in range(count):
+        start = points[index]
+        end = points[(index + 1) % count]
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy)
+        lengths.append(length)
+        directions.append(
+            (dx / length, dy / length) if length > 1e-9 else None
+        )
+    for index in range(count):
+        previous = directions[(index - 1) % count]
+        following = directions[index]
+        if previous is None or following is None:
+            turns[index] = True
+            continue
+        cross = previous[0] * following[1] - previous[1] * following[0]
+        dot = previous[0] * following[0] + previous[1] * following[1]
+        if abs(cross) > 1e-6 or dot <= 0.0:
+            turns[index] = True
+    if not any(turns):
+        return []
+    runs: List[Tuple[int, int, float]] = []
+    for start in (index for index in range(count) if turns[index]):
+        index = start
+        total = 0.0
+        while True:
+            total += lengths[index]
+            end = (index + 1) % count
+            if turns[end]:
+                break
+            index = end
+        runs.append((start, end, total))
+    return runs
+
+
+def _fillet_tangents(
+    points: Sequence[Point2], radii: Dict[int, float]
+) -> Dict[int, float]:
+    """Return how much edge each rounded corner may consume."""
+    if not radii:
+        return {}
+    orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
+    desired: Dict[int, float] = {}
+    for index, radius in radii.items():
+        angle = _corner_angle(points, index, orientation)
+        if angle is not None:
+            desired[index] = radius / math.tan(angle * 0.5)
+    if not desired:
+        return {}
+    shares = {index: float("inf") for index in desired}
+    for start, end, length in _straight_runs(points):
+        first = desired.get(start)
+        last = desired.get(end)
+        if first is None and last is None:
+            continue
+        if first is not None:
+            first = min(first, _edge_clearance(length))
+        if last is not None:
+            last = min(last, _edge_clearance(length))
+        if (
+            first is not None and last is not None
+            and first + last > length
+        ):
+            scale = length / (first + last)
+            first *= scale
+            last *= scale
+        if first is not None:
+            shares[start] = min(shares[start], first)
+        if last is not None:
+            shares[end] = min(shares[end], last)
+    return {
+        index: min(desired[index], shares[index])
+        for index in desired
+    }
+
+
 def _round_loop(
     points: Sequence[Point2], fillets: Sequence["Fillet"]
 ) -> List[Point2]:
@@ -2279,6 +2406,7 @@ def _round_loop(
     if not radii:
         return list(points)
     orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
+    tangents = _fillet_tangents(points, radii)
     result: List[Point2] = []
     count = len(points)
     for index in range(count):
@@ -2292,6 +2420,7 @@ def _round_loop(
             points[(index + 1) % count],
             radius,
             orientation,
+            tangents.get(index, 0.0),
         )
         result.extend(arc if arc is not None else [points[index]])
     return result
@@ -2597,14 +2726,12 @@ def max_fillet_radius(
         if kind == "vertical":
             return _vertical_radius_limit(_stack_loops(entries), point)
         return _cap_stack_radius_limit(entries, kind, point)
-    loops = _feature_loops(document, feature)
-    if loops is None:
-        return None
     if kind == "vertical":
-        return _vertical_radius_limit(loops, point)
-    return _loops_cap_radius_limit(
-        loops, point, feature.height, feature.fillets
-    )
+        loops = _feature_loops(document, feature)
+        if loops is None:
+            return None
+        return _vertical_radius_limit(loops, point, feature.fillets)
+    return _feature_cap_radius_limit(document, feature, kind, point)
 
 
 def _stack_loops(
@@ -2619,76 +2746,98 @@ def _stack_loops(
     ]
 
 
-def _feature_loops(
+def _feature_regions(
     document: "Document", feature: "Extrude",
-) -> Optional[List[Sequence[Point2]]]:
-    """Return the original profile loops of an unsliced feature."""
+) -> Optional[List[Tuple[List[Point2], List[List[Point2]]]]]:
+    """Return the original profile regions of an unsliced feature."""
     sketch = document.sketch(feature.sketch_id)
     if sketch is None:
         return None
     profiles = feature.resolve_profiles(sketch)
     if not profiles:
         return None
+    return build_regions(profiles, feature.resolve_cuts(sketch))
+
+
+def _feature_loops(
+    document: "Document", feature: "Extrude",
+) -> Optional[List[Sequence[Point2]]]:
+    """Return the original profile loops of an unsliced feature."""
+    regions = _feature_regions(document, feature)
+    if regions is None:
+        return None
     return [
         loop
-        for outer, holes in build_regions(
-            profiles, feature.resolve_cuts(sketch)
-        )
+        for outer, holes in regions
         for loop in (outer, *holes)
     ]
 
 
-def _loops_cap_radius_limit(
-    loops: Sequence[Sequence[Point2]],
-    point: Point2,
-    height: float,
-    fillets: Sequence["Fillet"],
-) -> Optional[float]:
-    """Return the tightest cap-fillet limit across several profile loops."""
-    limits = [
-        limit for limit in (
-            _cap_loop_radius_limit(loop, point, height, fillets)
-            for loop in loops
-        )
-        if limit is not None
+def _profile_cap_available(feature: "Extrude", kind: str) -> float:
+    """Return the wall height left before the opposite cap fillet."""
+    opposite = "bottom" if kind == "top" else "top"
+    occupied = [
+        fillet.radius for fillet in feature.fillets
+        if fillet.kind == opposite and fillet.radius > 0.0
     ]
+    used = max(occupied) if occupied else 0.0
+    return max(0.0, abs(feature.height) - used)
+
+
+def _feature_cap_radius_limit(
+    document: "Document",
+    feature: "Extrude",
+    kind: str,
+    point: Point2,
+) -> Optional[float]:
+    """Return the tightest cap limit over every profile region."""
+    regions = _feature_regions(document, feature)
+    if regions is None:
+        return None
+    available = _profile_cap_available(feature, kind)
+    limits: List[float] = []
+    for outer, holes in regions:
+        for index, loop in enumerate((outer, *holes)):
+            limit = _cap_loop_radius_limit(
+                loop, point, available,
+                rim_fillet_radii(loop, feature.fillets, kind),
+                index > 0,
+                _cap_run_bounds(loop, outer) if index > 0 else None,
+                _vertical_radius_limits(loop, feature.fillets),
+            )
+            if limit is not None:
+                limits.append(limit)
     return min(limits) if limits else None
 
 
-def _corner_radius_limit(
-    points: Sequence[Point2], index: int
+def _vertical_corner_radius_limit(
+    points: Sequence[Point2],
+    index: int,
+    fillets: Sequence["Fillet"],
 ) -> float:
-    """Return the largest radius one convex loop corner can carry."""
-    count = len(points)
-    previous = points[(index - 1) % count]
-    corner = points[index]
-    following = points[(index + 1) % count]
-    incoming = (corner[0] - previous[0], corner[1] - previous[1])
-    outgoing = (following[0] - corner[0], following[1] - corner[1])
-    incoming_length = math.hypot(*incoming)
-    outgoing_length = math.hypot(*outgoing)
-    if incoming_length < 1e-9 or outgoing_length < 1e-9:
-        return 0.0
-    u = (incoming[0] / incoming_length, incoming[1] / incoming_length)
-    v = (outgoing[0] / outgoing_length, outgoing[1] / outgoing_length)
-    cross = u[0] * v[1] - u[1] * v[0]
+    """Return the radius at which one corner reaches the next real edges."""
     orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
-    if cross * orientation <= 1e-9:
+    angle = _corner_angle(points, index, orientation)
+    if angle is None:
         return 0.0
-    dot = max(-1.0, min(1.0, -(u[0] * v[0] + u[1] * v[1])))
-    angle = math.acos(dot)
-    if angle <= 1e-6 or angle >= math.pi - 1e-6:
-        return 0.0
-    # ``_corner_arc`` caps the tangent length at half the shorter neighbour.
-    return (
-        0.5 * min(incoming_length, outgoing_length)
-        * math.tan(angle * 0.5)
+    existing = _fillet_tangents(
+        points, _corner_radii(points, fillets)
     )
+    runs = _straight_runs(points)
+    incoming = next((run for run in runs if run[1] == index), None)
+    outgoing = next((run for run in runs if run[0] == index), None)
+    if incoming is None or outgoing is None:
+        return 0.0
+    free_in = incoming[2] - existing.get(incoming[0], 0.0)
+    free_out = outgoing[2] - existing.get(outgoing[1], 0.0)
+    tangent = min(_edge_clearance(free_in), _edge_clearance(free_out))
+    return max(0.0, tangent) * math.tan(angle * 0.5)
 
 
 def _vertical_radius_limit(
     loops: Sequence[Sequence[Point2]],
     point: Point2,
+    fillets: Sequence["Fillet"] = (),
     tolerance: float = 1e-4,
 ) -> Optional[float]:
     """Return the smallest corner limit across every loop with the corner."""
@@ -2699,95 +2848,266 @@ def _vertical_radius_limit(
                 abs(x - point[0]) <= tolerance
                 and abs(y - point[1]) <= tolerance
             ):
-                limit = _corner_radius_limit(loop, index)
+                limit = _vertical_corner_radius_limit(
+                    loop, index, fillets
+                )
                 if limit > 1e-9:
                     limits.append(limit)
                 break
     return min(limits) if limits else None
 
 
-def _loop_segment_lengths(loop: Sequence[Point2]) -> List[float]:
-    """Return the length of every segment around a closed loop."""
-    count = len(loop)
-    return [
-        math.hypot(
-            loop[(index + 1) % count][0] - loop[index][0],
-            loop[(index + 1) % count][1] - loop[index][1],
+def _loop_span(points: Sequence[Point2]) -> float:
+    """Return the diagonal of a loop's bounding box."""
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    if not xs or not ys:
+        return 0.0
+    return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def _cap_inset_valid(
+    points: Sequence[Point2],
+    radii: Sequence[float],
+    inward_loop: bool = False,
+) -> bool:
+    """Return whether a cap inset still forms a non-degenerate loop."""
+    original = _loop_area(points)
+    if abs(original) <= 1e-12:
+        return False
+    inset = _cap_loop(points, radii, inward_loop)
+    if len(inset) < 3:
+        return False
+    area = _loop_area(inset)
+    if area * original <= 0.0 or abs(area) <= abs(original) * 1e-6:
+        return False
+    return not _loop_self_intersects(inset)
+
+
+def _segments_cross(
+    first: Point2, second: Point2, third: Point2, fourth: Point2
+) -> bool:
+    """Return whether two segments cross away from their endpoints."""
+    def cross(origin: Point2, start: Point2, end: Point2) -> float:
+        return (
+            (start[0] - origin[0]) * (end[1] - origin[1])
+            - (start[1] - origin[1]) * (end[0] - origin[0])
         )
+
+    first_side = cross(first, second, third)
+    second_side = cross(first, second, fourth)
+    third_side = cross(third, fourth, first)
+    fourth_side = cross(third, fourth, second)
+    return (
+        (
+            (first_side > 1e-9 and second_side < -1e-9)
+            or (first_side < -1e-9 and second_side > 1e-9)
+        )
+        and (
+            (third_side > 1e-9 and fourth_side < -1e-9)
+            or (third_side < -1e-9 and fourth_side > 1e-9)
+        )
+    )
+
+
+def _loop_self_intersects(points: Sequence[Point2]) -> bool:
+    """Return whether a closed loop crosses itself between edges."""
+    count = len(points)
+    for index in range(count):
+        second = (index + 1) % count
+        for other in range(index + 1, count):
+            if other in (index, second):
+                continue
+            fourth = (other + 1) % count
+            if fourth == index:
+                continue
+            if _segments_cross(
+                points[index], points[second],
+                points[other], points[fourth],
+            ):
+                return True
+    return False
+
+
+def _radius_runs(values: Sequence[float]) -> List[List[int]]:
+    """Return contiguous groups of loop segments that carry a fillet."""
+    count = len(values)
+    taken = [value > 1e-9 for value in values]
+    if not any(taken):
+        return []
+    if all(taken):
+        return [list(range(count))]
+    runs: List[List[int]] = []
+    seen = [False] * count
+    for start in range(count):
+        if not taken[start] or seen[start]:
+            continue
+        run: List[int] = []
+        index = start
+        while taken[index] and not seen[index]:
+            seen[index] = True
+            run.append(index)
+            index = (index + 1) % count
+        runs.append(run)
+    return runs
+
+
+def _cap_run_max_radius(
+    loop: Sequence[Point2],
+    radii: Sequence[float],
+    run: Sequence[int],
+    available: float,
+    inward_loop: bool = False,
+    bounds: Optional[Sequence[float]] = None,
+) -> float:
+    """Return the largest radius a cap run can carry before an edge."""
+    count = len(loop)
+    base = [
+        float(radii[index]) if index < len(radii) else 0.0
         for index in range(count)
     ]
-
-
-def _run_end_segments(
-    segments: Sequence[int], count: int,
-) -> Optional[Tuple[int, int]]:
-    """Return the first and last segment of a contiguous loop run."""
-    starts = [
-        index for index in segments
-        if (index - 1) % count not in segments
-    ]
-    if not starts:
-        return None
-    start = starts[0]
-    last = start
-    index = start
-    while index in segments:
-        last = index
-        index = (index + 1) % count
-        if index == start:
-            break
-    return start, last
-
-
-def _cap_run_radius_limit(
-    loop: Sequence[Point2],
-    segments: Sequence[int],
-    height: float,
-) -> float:
-    """Return the largest radius a straight cap run can carry.
-
-    A run is a chain of collinear segments, so it behaves like one long edge:
-    only its two end miters and the neighbouring segments consume room.
-    """
-    count = len(loop)
-    ends = _run_end_segments(segments, count)
-    if ends is None:
+    upper = max(0.0, available)
+    if bounds is not None:
+        run_bounds = [
+            bounds[index] for index in run if index < len(bounds)
+        ]
+        if run_bounds:
+            upper = min(upper, min(run_bounds))
+    if upper <= 1e-9:
         return 0.0
-    start, last = ends
-    lengths = _loop_segment_lengths(loop)
-    run_length = sum(lengths[index] for index in segments)
-    start_turn = _turn_angle(loop, start)
-    end_turn = _turn_angle(loop, (last + 1) % count)
-    spread = (
-        math.tan(min(start_turn, math.pi * 0.5) * 0.5)
-        + math.tan(min(end_turn, math.pi * 0.5) * 0.5)
-    )
-    limit = (
-        0.9 * run_length / spread
-        if spread > 1e-9 else 0.45 * run_length
-    )
-    limit = min(limit, 0.45 * abs(height))
-    for neighbour in ((start - 1) % count, (last + 1) % count):
-        limit = min(limit, _offset_radius_limit(loop, lengths, neighbour))
-    return max(0.0, limit)
+
+    def candidate(value: float) -> List[float]:
+        result = list(base)
+        for index in run:
+            result[index] = value
+        return result
+
+    if _cap_inset_valid(loop, candidate(upper), inward_loop):
+        return upper
+    low, high = 0.0, upper
+    for _ in range(32):
+        middle = (low + high) * 0.5
+        if _cap_inset_valid(loop, candidate(middle), inward_loop):
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+def _loop_clearances(
+    loop: Sequence[Point2], outer: Sequence[Point2]
+) -> List[float]:
+    """Return how far each hole segment can move before the outer edge."""
+    count = len(loop)
+    outer_count = len(outer)
+    if count < 3 or outer_count < 3:
+        return []
+    clearances: List[float] = []
+    for index in range(count):
+        start = loop[index]
+        end = loop[(index + 1) % count]
+        middle = ((start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5)
+        distance = min(
+            _point_segment_distance(
+                point, outer[edge], outer[(edge + 1) % outer_count]
+            )
+            for point in (start, middle, end)
+            for edge in range(outer_count)
+        )
+        clearances.append(_edge_clearance(distance))
+    return clearances
+
+
+def _cap_run_bounds(
+    loop: Sequence[Point2],
+    outer: Optional[Sequence[Point2]],
+) -> Optional[List[float]]:
+    """Return per-segment wall clearance for a hole loop."""
+    if outer is None:
+        return None
+    return _loop_clearances(loop, outer)
 
 
 def _cap_loop_radius_limit(
     loop: Sequence[Point2],
     point: Point2,
-    height: float,
-    fillets: Sequence["Fillet"] = (),
+    available: float,
+    radii: Sequence[float],
+    inward_loop: bool = False,
+    bounds: Optional[Sequence[float]] = None,
+    limits: Optional[Sequence[float]] = None,
 ) -> Optional[float]:
     """Return the cap-fillet limit for the run under ``point``."""
     segments = _fillet_run_segments(loop, point)
     if not segments:
         return None
-    limit = _cap_run_radius_limit(loop, segments, height)
-    if fillets:
-        vertical = _vertical_radius_limits(loop, fillets)
-        for segment in segments:
-            limit = min(limit, vertical[segment])
-    return limit
+    if limits is not None:
+        run_limits = [
+            limits[index] for index in segments if index < len(limits)
+        ]
+        if run_limits:
+            wall = min(run_limits)
+            if bounds is None:
+                bounds = [wall] * len(loop)
+            else:
+                bounds = [min(value, wall) for value in bounds]
+    if not inward_loop:
+        available = min(available, _loop_span(loop))
+    return _cap_run_max_radius(
+        loop, radii, sorted(segments), available, inward_loop, bounds
+    )
+
+
+def _stack_area(entry: ExtrudeSlice) -> float:
+    """Return the material cross-section area of one slice."""
+    total = 0.0
+    for group in entry.regions:
+        if not group:
+            continue
+        total += abs(_loop_area(group[0]))
+        total -= sum(
+            abs(_loop_area(hole)) for hole in group[1:]
+        )
+    return abs(total)
+
+
+def _cap_stack_band(
+    entries: Sequence[ExtrudeSlice], cap_z: float, opposite_z: float
+) -> float:
+    """Return the height an existing opposite cap fillet already uses."""
+    ordered = sorted(entries, key=lambda entry: entry.z0)
+    reversed_order = opposite_z > cap_z
+    if reversed_order:
+        ordered = list(reversed(ordered))
+    if not ordered:
+        return 0.0
+    first = ordered[0]
+    inner_smooth = (
+        first.smooth_z1 if opposite_z < cap_z else first.smooth_z0
+    )
+    if not inner_smooth:
+        return 0.0
+    largest = max(_stack_area(entry) for entry in ordered)
+    tolerance = max(1e-6, abs(largest) * 1e-6)
+    for entry in ordered:
+        if _stack_area(entry) >= largest - tolerance:
+            edge = entry.z1 if reversed_order else entry.z0
+            return abs(edge - opposite_z)
+    last = ordered[-1]
+    edge = last.z0 if reversed_order else last.z1
+    return abs(edge - opposite_z)
+
+
+def _cap_stack_available(
+    entries: Sequence[ExtrudeSlice], kind: str
+) -> float:
+    """Return the wall height left at a stack's cap."""
+    zmin = min(entry.z0 for entry in entries)
+    zmax = max(entry.z1 for entry in entries)
+    cap_z = zmax if kind == "top" else zmin
+    opposite_z = zmin if kind == "top" else zmax
+    used = _cap_stack_band(entries, cap_z, opposite_z)
+    return max(0.0, abs(zmax - zmin) - used)
 
 
 def _cap_stack_radius_limit(
@@ -2797,6 +3117,7 @@ def _cap_stack_radius_limit(
     zmin = min(entry.z0 for entry in entries)
     zmax = max(entry.z1 for entry in entries)
     cap_z = zmax if kind == "top" else zmin
+    available = _cap_stack_available(entries, kind)
     limits: List[float] = []
     for entry in entries:
         if (
@@ -2805,9 +3126,15 @@ def _cap_stack_radius_limit(
         ):
             continue
         for group in entry.regions:
-            for loop in group:
+            outer = group[0] if group else None
+            for index, loop in enumerate(group):
+                bounds = (
+                    _cap_run_bounds(loop, outer)
+                    if index > 0 else None
+                )
                 limit = _cap_loop_radius_limit(
-                    loop, point, zmax - zmin
+                    loop, point, available, [0.0] * len(loop),
+                    index > 0, bounds,
                 )
                 if limit is not None:
                     limits.append(limit)
@@ -2840,6 +3167,7 @@ def _corner_arc(
     following: Point2,
     radius: float,
     orientation: float,
+    tangent_limit: Optional[float] = None,
 ) -> Optional[List[Point2]]:
     """Build a tangent arc replacing one convex loop corner."""
     incoming = (corner[0] - previous[0], corner[1] - previous[1])
@@ -2860,9 +3188,9 @@ def _corner_arc(
         return None
 
     tangent = radius / math.tan(angle * 0.5)
-    tangent = min(
-        tangent, 0.5 * min(incoming_length, outgoing_length)
-    )
+    if tangent_limit is None:
+        tangent_limit = min(incoming_length, outgoing_length)
+    tangent = min(tangent, tangent_limit)
     if tangent <= 1e-9:
         return None
     actual_radius = tangent * math.tan(angle * 0.5)
@@ -2950,13 +3278,21 @@ def _fillet_profile(
     end_kind = "top" if height >= 0 else "bottom"
     base_radii: List[List[float]] = []
     end_radii: List[List[float]] = []
-    for original, rounded in zip(original_loops, rounded_loops):
+    for loop_index, (original, rounded) in enumerate(
+        zip(original_loops, rounded_loops)
+    ):
         sources = _rounded_segment_sources(original, rounded)
         base = rim_fillet_radii(original, fillets, base_kind)
         end = rim_fillet_radii(original, fillets, end_kind)
         # Clamp against the original profile so tiny tessellation segments
         # of a rounded vertical corner do not shrink it.
-        base, end = _clamp_rim_radii(original, base, end, height)
+        bounds = (
+            _cap_run_bounds(original, original_loops[0])
+            if loop_index > 0 else None
+        )
+        base, end = _clamp_rim_radii(
+            original, base, end, height, loop_index > 0, bounds
+        )
         limits = _vertical_radius_limits(original, fillets)
         base = [
             min(value, limit)

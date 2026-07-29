@@ -100,20 +100,10 @@ class OrientationCube:
     def _init_fonts(self) -> None:
         if self._font is not None:
             return
-        self._font = pygame.font.SysFont(
-            "Segoe UI", max(7, self._s(8)), bold=True
-        )
-        self._font_tiny = pygame.font.SysFont(
-            "Segoe UI", max(6, self._s(7)), bold=True
-        )
+        self._font = pygame.font.SysFont("Segoe UI", max(7, self._s(8)), bold=True)
+        self._font_tiny = pygame.font.SysFont("Segoe UI", max(6, self._s(7)), bold=True)
 
-    def draw(
-        self,
-        surface: pygame.Surface,
-        rect: pygame.Rect,
-        camera: OrbitCamera,
-        palette: "ScenePalette",
-    ) -> None:
+    def draw(self, surface: pygame.Surface, rect: pygame.Rect, camera: OrbitCamera, palette: "ScenePalette") -> None:
         if rect.w < self._s(150) or rect.h < self._s(120):
             return
         self._init_fonts()
@@ -123,10 +113,7 @@ class OrientationCube:
         half_w = size * 0.36
         half_h = size * 0.42
         margin = self._s(12)
-        center = (
-            rect.right - margin - half_w,
-            rect.top + margin + half_h,
-        )
+        center = (rect.right - margin - half_w, rect.top + margin + half_h,)
 
         # Use the camera's view direction for face visibility
         view_x, view_y, view_z = camera.view_direction()
@@ -205,18 +192,8 @@ class OrientationCube:
         ) * scale
         return screen_x, screen_y
 
-    def _draw_axes(
-        self,
-        surface: pygame.Surface,
-        center: Tuple[float, float],
-        camera: OrbitCamera,
-        palette: "ScenePalette",
-        size: int,
-    ) -> None:
-        origin = (
-            center[0] - size * 0.44,
-            center[1] + size * 0.43,
-        )
+    def _draw_axes(self, surface: pygame.Surface, center: Tuple[float, float], camera: OrbitCamera, palette: "ScenePalette", size: int) -> None:
+        origin = (center[0] - size * 0.44, center[1] + size * 0.43)
         length = size * 0.19
 
         # Project world axes using the same projection as the camera
@@ -236,23 +213,3 @@ class OrientationCube:
                 int(end[1] + (end[1] - origin[1]) * 0.3),
             )
             surface.blit(text, text.get_rect(center=text_center))
-
-    def set_scale(self, scale: float) -> None:
-        if abs(scale - self.ui_scale) < 1e-6:
-            return
-        self.ui_scale = scale
-        self._font = None
-        self._font_tiny = None
-
-    def _s(self, value: float) -> int:
-        return max(1, int(round(value * self.ui_scale)))
-
-    def _init_fonts(self) -> None:
-        if self._font is not None:
-            return
-        self._font = pygame.font.SysFont(
-            "Segoe UI", max(7, self._s(8)), bold=True
-        )
-        self._font_tiny = pygame.font.SysFont(
-            "Segoe UI", max(6, self._s(7)), bold=True
-        )

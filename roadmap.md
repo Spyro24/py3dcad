@@ -12,6 +12,7 @@ workspaces/design/sketch/create
 [x] Point
 [x] Line
 [ ] Midpoint Line
+[ ] Poly line
 [x] 2 Point Rectangle
 [ ] Center Rectangle
 [ ] 3 Point Rectangle
