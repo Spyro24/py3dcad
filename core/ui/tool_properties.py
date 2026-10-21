@@ -333,42 +333,50 @@ class ToolPropertiesWindow:
         )
 
 
-class SketchModeAction(Enum):
+class SketchPaletteAction(Enum):
     NONE = "none"
     CONSUMED = "consumed"
-    LINE_TYPE_CHANGED = "line_type_changed"
-    LOOK_AT_SKETCH = "look_at_sketch"
+    MINIMIZE = "minimize"
+    LINETYPE_CHANGED = "linetype_changed"
+    LOOK_AT = "look_at"
     FINISH_SKETCH = "finish_sketch"
 
 
-class SketchModeWindow:
-    """Compact tool window shown while a sketch is being edited.
+class SketchPaletteWindow:
+    """Sketch Palette window shown while a sketch is being edited.
 
     Anchored below the orientation cube. Contains:
-    - Line type selector: three icon-only buttons (Normal / Construction / Centerline)
-    - Action buttons: [Look at sketch] [Finish Sketch]
+    - Title bar: "SKETCH PALETTE" with minimize button on the left
+    - Options: collapsible section header
+    - Linetype: three icon buttons (solid, dash-dot, dashed)
+    - Look At: label with icon button on the right
+    - Sketch Status: read-only field "Fully constrained"
+    - Finish Sketch: primary button at bottom right
     """
 
     CUBE_SIZE = 92
     CUBE_MARGIN = 12
     PANEL_WIDTH = 322
-    PANEL_HEIGHT = 120
+    PANEL_HEIGHT = 280
     CUBE_GAP = 12
 
     # Line type: key, tooltip
     LINE_TYPES = [
-        ("normal", "Normal"),
-        ("construction", "Construction"),
-        ("centerline", "Centerline"),
+        ("normal", "Solid"),
+        ("dashdot", "Dash-dot"),
+        ("dashed", "Dashed"),
     ]
 
     def __init__(self) -> None:
         self.visible = False
+        self.minimized = False
         self.scale = 1.0
         self.current_line_type = "normal"
+        self._hover_minimize = False
+        self._hover_options = False
+        self._hover_linetype = -1
         self._hover_look = False
         self._hover_finish = False
-        self._hover_line_type = -1
         self._font_title: Optional[pygame.font.Font] = None
         self._font_text: Optional[pygame.font.Font] = None
         self._font_small: Optional[pygame.font.Font] = None
@@ -385,6 +393,8 @@ class SketchModeWindow:
         self.field_active_bg = pygame.Color(49, 77, 115)
         self.button_bg = pygame.Color(44, 47, 57)
         self.button_hover_bg = pygame.Color(58, 61, 72)
+        self.header_bg = pygame.Color(42, 44, 52)
+        self.header_hover_bg = pygame.Color(50, 52, 60)
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.scale) < 1e-6:
@@ -393,22 +403,29 @@ class SketchModeWindow:
         self._font_title = None
         self._font_text = None
         self._font_small = None
+        self._hover_minimize = False
+        self._hover_options = False
+        self._hover_linetype = -1
         self._hover_look = False
         self._hover_finish = False
-        self._hover_line_type = -1
 
     def open(self, line_type: str = "normal") -> None:
         self.visible = True
+        self.minimized = False
         self.current_line_type = line_type
+        self._hover_minimize = False
+        self._hover_options = False
+        self._hover_linetype = -1
         self._hover_look = False
         self._hover_finish = False
-        self._hover_line_type = -1
 
     def close(self) -> None:
         self.visible = False
+        self._hover_minimize = False
+        self._hover_options = False
+        self._hover_linetype = -1
         self._hover_look = False
         self._hover_finish = False
-        self._hover_line_type = -1
 
     def _s(self, value: float) -> int:
         return max(1, int(round(value * self.scale)))
@@ -432,7 +449,7 @@ class SketchModeWindow:
             self._s(self.PANEL_WIDTH),
             max(1, region.w - margin * 2),
         )
-        height = self._s(self.PANEL_HEIGHT)
+        height = self._s(self.PANEL_HEIGHT if not self.minimized else 40)
         return pygame.Rect(
             region.right - margin - width,
             region.y + margin + self._s(self.CUBE_SIZE) + self._s(
@@ -442,6 +459,27 @@ class SketchModeWindow:
             height,
         )
 
+    def minimize_rect(self, region: Rect) -> pygame.Rect:
+        """Minimize button on the left of title bar."""
+        panel = self.panel_rect(region)
+        size = self._s(20)
+        return pygame.Rect(
+            panel.x + self._s(8),
+            panel.y + (self._s(34) - size) // 2,
+            size,
+            size,
+        )
+
+    def options_rect(self, region: Rect) -> pygame.Rect:
+        """Options collapsible header."""
+        panel = self.panel_rect(region)
+        return pygame.Rect(
+            panel.x,
+            panel.y + self._s(34),
+            panel.w,
+            self._s(30),
+        )
+
     def line_type_rects(self, region: Rect) -> List[pygame.Rect]:
         """Three equal icon buttons in a row."""
         panel = self.panel_rect(region)
@@ -449,7 +487,7 @@ class SketchModeWindow:
         gap = self._s(8)
         total_w = 3 * btn_size + 2 * gap
         start_x = panel.x + (panel.w - total_w) // 2
-        y = panel.y + self._s(34) + self._s(8)
+        y = panel.y + self._s(34) + self._s(30) + self._s(12)
         rects = []
         for i in range(3):
             rects.append(pygame.Rect(
@@ -460,26 +498,47 @@ class SketchModeWindow:
             ))
         return rects
 
-    def action_rects(self, region: Rect) -> Tuple[pygame.Rect, pygame.Rect]:
-        """Returns (look_rect, finish_rect) - two equal buttons below line types."""
+    def look_at_rect(self, region: Rect) -> Tuple[pygame.Rect, pygame.Rect]:
+        """Returns (label_rect, button_rect) for Look At row."""
         panel = self.panel_rect(region)
-        btn_width = self._s(140)
-        btn_height = self._s(28)
-        gap = self._s(12)
-        total_w = 2 * btn_width + gap
-        start_x = panel.x + (panel.w - total_w) // 2
-        y = panel.bottom - self._s(16) - btn_height
-        look_rect = pygame.Rect(start_x, y, btn_width, btn_height)
-        finish_rect = pygame.Rect(
-            start_x + btn_width + gap, y, btn_width, btn_height
+        y = panel.y + self._s(34) + self._s(30) + self._s(12) + self._s(36) + self._s(16)
+        label_rect = pygame.Rect(
+            panel.x + self._s(16),
+            y,
+            panel.w - self._s(16) * 2 - self._s(40),
+            self._s(28),
         )
-        return look_rect, finish_rect
+        btn_rect = pygame.Rect(
+            panel.right - self._s(16) - self._s(28),
+            y,
+            self._s(28),
+            self._s(28),
+        )
+        return label_rect, btn_rect
 
-    def look_rect(self, region: Rect) -> pygame.Rect:
-        return self.action_rects(region)[0]
+    def status_rect(self, region: Rect) -> pygame.Rect:
+        """Sketch Status read-only field."""
+        panel = self.panel_rect(region)
+        label_rect, _ = self.look_at_rect(region)
+        y = label_rect.bottom + self._s(8)
+        return pygame.Rect(
+            panel.x + self._s(16),
+            y,
+            panel.w - self._s(32),
+            self._s(28),
+        )
 
     def finish_rect(self, region: Rect) -> pygame.Rect:
-        return self.action_rects(region)[1]
+        """Finish Sketch button at bottom right."""
+        panel = self.panel_rect(region)
+        btn_width = self._s(120)
+        btn_height = self._s(32)
+        return pygame.Rect(
+            panel.right - self._s(16) - btn_width,
+            panel.bottom - self._s(16) - btn_height,
+            btn_width,
+            btn_height,
+        )
 
     # ------------------------------------------------------------------
     # Events
@@ -487,60 +546,84 @@ class SketchModeWindow:
 
     def update_hover(self, pos: Tuple[int, int], region: Rect) -> bool:
         if not self.visible:
+            self._hover_minimize = False
+            self._hover_options = False
+            self._hover_linetype = -1
             self._hover_look = False
             self._hover_finish = False
-            self._hover_line_type = -1
             return False
         panel = self.panel_rect(region)
         if not panel.collidepoint(pos):
+            self._hover_minimize = False
+            self._hover_options = False
+            self._hover_linetype = -1
             self._hover_look = False
             self._hover_finish = False
-            self._hover_line_type = -1
             return False
-        look_rect, finish_rect = self.action_rects(region)
-        self._hover_look = look_rect.collidepoint(pos)
-        self._hover_finish = finish_rect.collidepoint(pos)
-        self._hover_line_type = -1
+
+        if self.minimized:
+            self._hover_minimize = self.minimize_rect(region).collidepoint(pos)
+            return self._hover_minimize
+
+        self._hover_minimize = self.minimize_rect(region).collidepoint(pos)
+        self._hover_options = self.options_rect(region).collidepoint(pos)
+        self._hover_linetype = -1
         for i, rect in enumerate(self.line_type_rects(region)):
             if rect.collidepoint(pos):
-                self._hover_line_type = i
+                self._hover_linetype = i
                 break
+        _, look_btn = self.look_at_rect(region)
+        self._hover_look = look_btn.collidepoint(pos)
+        self._hover_finish = self.finish_rect(region).collidepoint(pos)
         return True
 
     def handle_event(
         self, event: pygame.event.Event, region: Rect
-    ) -> SketchModeAction:
+    ) -> SketchPaletteAction:
         if not self.visible:
-            return SketchModeAction.NONE
+            return SketchPaletteAction.NONE
 
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.close()
-                return SketchModeAction.FINISH_SKETCH
-            return SketchModeAction.NONE
+                return SketchPaletteAction.FINISH_SKETCH
+            return SketchPaletteAction.NONE
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             panel = self.panel_rect(region)
             if not panel.collidepoint(event.pos):
-                return SketchModeAction.NONE
+                return SketchPaletteAction.NONE
 
-            look_rect, finish_rect = self.action_rects(region)
+            if self.minimized:
+                if self.minimize_rect(region).collidepoint(event.pos):
+                    self.minimized = False
+                    return SketchPaletteAction.MINIMIZE
+                return SketchPaletteAction.CONSUMED
 
-            if look_rect.collidepoint(event.pos):
-                return SketchModeAction.LOOK_AT_SKETCH
+            if self.minimize_rect(region).collidepoint(event.pos):
+                self.minimized = True
+                return SketchPaletteAction.MINIMIZE
 
-            if finish_rect.collidepoint(event.pos):
-                self.close()
-                return SketchModeAction.FINISH_SKETCH
+            if self.options_rect(region).collidepoint(event.pos):
+                # Toggle options collapse (placeholder)
+                return SketchPaletteAction.CONSUMED
 
             for i, rect in enumerate(self.line_type_rects(region)):
                 if rect.collidepoint(event.pos):
                     self.current_line_type = self.LINE_TYPES[i][0]
-                    return SketchModeAction.LINE_TYPE_CHANGED
+                    return SketchPaletteAction.LINETYPE_CHANGED
 
-            return SketchModeAction.CONSUMED
+            _, look_btn = self.look_at_rect(region)
+            if look_btn.collidepoint(event.pos):
+                return SketchPaletteAction.LOOK_AT
 
-        return SketchModeAction.NONE
+            if self.finish_rect(region).collidepoint(event.pos):
+                self.close()
+                return SketchPaletteAction.FINISH_SKETCH
+
+            return SketchPaletteAction.CONSUMED
+
+        return SketchPaletteAction.NONE
 
     # ------------------------------------------------------------------
     # Drawing
@@ -553,6 +636,8 @@ class SketchModeWindow:
 
         panel = self.panel_rect(region)
         title_height = self._s(34)
+
+        # Panel background
         pygame.draw.rect(
             surface, self.panel_bg, panel, border_radius=self._s(6)
         )
@@ -572,29 +657,71 @@ class SketchModeWindow:
             (panel.right, panel.y + title_height),
         )
 
-        minus_y = panel.y + title_height // 2
+        # Minimize button (left)
+        min_rect = self.minimize_rect(region)
+        min_fill = self.header_hover_bg if self._hover_minimize else self.title_bg
+        pygame.draw.rect(
+            surface, min_fill, min_rect, border_radius=self._s(3)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, min_rect,
+            width=1, border_radius=self._s(3),
+        )
+        # Minimize icon: horizontal line
+        cx, cy = min_rect.center
         pygame.draw.line(
             surface, self.text_primary,
-            (panel.x + self._s(14), minus_y),
-            (panel.x + self._s(22), minus_y),
-            self._s(2),
+            (cx - self._s(5), cy), (cx + self._s(5), cy),
+            self._s(2)
         )
+
+        # Title
         title = self._font_title.render(
-            "SKETCH MODE", True, self.text_primary
+            "SKETCH PALETTE", True, self.text_primary
         )
         surface.blit(
             title,
             title.get_rect(
-                midleft=(panel.x + self._s(30), minus_y)
+                midleft=(panel.x + self._s(36), panel.y + title_height // 2)
             ),
         )
 
-        # Line type selector: three icon buttons in a row
+        if self.minimized:
+            return
+
+        # Options header (collapsible)
+        opt_rect = self.options_rect(region)
+        opt_fill = self.header_hover_bg if self._hover_options else self.header_bg
+        pygame.draw.rect(
+            surface, opt_fill, opt_rect, border_radius=0
+        )
+        pygame.draw.line(
+            surface, self.border_color,
+            (opt_rect.x, opt_rect.bottom),
+            (opt_rect.right, opt_rect.bottom),
+        )
+        opt_text = self._font_text.render(
+            "Options", True, self.text_secondary
+        )
+        surface.blit(
+            opt_text,
+            opt_text.get_rect(midleft=(opt_rect.x + self._s(16), opt_rect.centery))
+        )
+        # Chevron down
+        cx = opt_rect.right - self._s(20)
+        cy = opt_rect.centery
+        pygame.draw.polygon(surface, self.text_muted, [
+            (cx - self._s(4), cy - self._s(2)),
+            (cx + self._s(4), cy - self._s(2)),
+            (cx, cy + self._s(3)),
+        ])
+
+        # Linetype: three icon buttons
         line_type_rects = self.line_type_rects(region)
         for i, (key, tooltip) in enumerate(self.LINE_TYPES):
             rect = line_type_rects[i]
             is_active = key == self.current_line_type
-            is_hovered = i == self._hover_line_type
+            is_hovered = i == self._hover_linetype
 
             if is_active:
                 fill = self.field_active_bg
@@ -611,32 +738,53 @@ class SketchModeWindow:
                 surface, border_color, rect,
                 width=border_width, border_radius=self._s(4)
             )
-            # Draw line type symbol
             self._draw_line_type_symbol(surface, rect.center, key, self.text_primary)
 
-        # Action buttons row: [Look at sketch] [Finish Sketch]
-        look_rect, finish_rect = self.action_rects(region)
-
-        # Look at sketch button
-        look_fill = self.button_hover_bg if self._hover_look else self.button_bg
-        pygame.draw.rect(
-            surface, look_fill, look_rect, border_radius=self._s(4)
-        )
-        pygame.draw.rect(
-            surface, self.border_color, look_rect,
-            width=1, border_radius=self._s(4),
-        )
-        self._draw_view_icon(
-            surface, (look_rect.centerx - self._s(22), look_rect.centery), self.text_primary
-        )
+        # Look At row
+        label_rect, look_btn = self.look_at_rect(region)
         look_text = self._font_text.render(
-            "Look at sketch", True, self.text_primary
+            "Look At", True, self.text_secondary
         )
         surface.blit(
-            look_text, look_text.get_rect(midleft=(look_rect.x + self._s(16), look_rect.centery))
+            look_text, look_text.get_rect(midleft=(label_rect.x, label_rect.centery))
+        )
+        # Look At icon button
+        look_fill = self.button_hover_bg if self._hover_look else self.button_bg
+        pygame.draw.rect(
+            surface, look_fill, look_btn, border_radius=self._s(4)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, look_btn,
+            width=1, border_radius=self._s(4),
+        )
+        self._draw_view_icon(surface, look_btn.center, self.text_primary)
+
+        # Sketch Status read-only field
+        status_rect = self.status_rect(region)
+        pygame.draw.rect(
+            surface, self.field_bg, status_rect, border_radius=self._s(4)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, status_rect,
+            width=1, border_radius=self._s(4),
+        )
+        status_label = self._font_small.render(
+            "Status", True, self.text_muted
+        )
+        surface.blit(
+            status_label,
+            status_label.get_rect(midleft=(status_rect.x + self._s(8), status_rect.y + self._s(6)))
+        )
+        status_val = self._font_text.render(
+            "Fully constrained", True, self.text_primary
+        )
+        surface.blit(
+            status_val,
+            status_val.get_rect(midleft=(status_rect.x + self._s(8), status_rect.bottom - self._s(8)))
         )
 
-        # Finish Sketch button
+        # Finish Sketch button (bottom right)
+        finish_rect = self.finish_rect(region)
         finish_fill = self.field_active_bg if self._hover_finish else self.button_bg
         pygame.draw.rect(
             surface, finish_fill, finish_rect, border_radius=self._s(4)
@@ -659,8 +807,6 @@ class SketchModeWindow:
         """Draw a line type symbol (icon) at center."""
         cx, cy = center
         w = self._s(18)
-        h = self._s(2)
-        gap = self._s(4)
 
         if line_type == "normal":
             # Solid horizontal line
@@ -669,82 +815,24 @@ class SketchModeWindow:
                 (cx - w // 2, cy), (cx + w // 2, cy),
                 max(2, self._s(2))
             )
-        elif line_type == "construction":
-            # Dashed line: three dashes
+        elif line_type == "dashdot":
+            # Dash-dot pattern: long - dot - long
+            pygame.draw.line(surface, color,
+                (cx - w // 2, cy), (cx - w // 6, cy), max(2, self._s(2)))
+            pygame.draw.circle(surface, color, (cx, cy), max(1, self._s(2)))
+            pygame.draw.line(surface, color,
+                (cx + w // 6, cy), (cx + w // 2, cy), max(2, self._s(2)))
+        elif line_type == "dashed":
+            # Dashed: three dashes
             dash_w = w // 3
+            gap = self._s(3)
             for i in range(3):
-                x0 = cx - w // 2 + i * (dash_w + gap // 2)
+                x0 = cx - w // 2 + i * (dash_w + gap)
                 pygame.draw.line(
                     surface, color,
                     (x0, cy), (x0 + dash_w, cy),
                     max(2, self._s(2))
                 )
-        elif line_type == "centerline":
-            # Centerline: long dash - short gap - short dash - short gap - long dash
-            long_dash = w * 3 // 5
-            short_dash = w // 5
-            g = gap
-            x = cx - w // 2
-            # long dash
-            pygame.draw.line(surface, color, (x, cy), (x + long_dash, cy), max(2, self._s(2)))
-            x += long_dash + g
-            # short dash
-            pygame.draw.line(surface, color, (x, cy), (x + short_dash, cy), max(2, self._s(2)))
-            x += short_dash + g
-            # long dash
-            pygame.draw.line(surface, color, (x, cy), (x + long_dash, cy), max(2, self._s(2)))
-
-    def _draw_view_icon(
-        self, surface: pygame.Surface, center: Tuple[int, int],
-        color: pygame.Color,
-    ) -> None:
-        cx, cy = center
-        s = self._s(6)
-        # Camera body
-        pygame.draw.rect(
-            surface, color,
-            (cx - s, cy - s // 2, self._s(12), s),
-            max(1, self._s(1))
-        )
-        # Lens
-        pygame.draw.circle(
-            surface, color, (cx + self._s(5), cy), s // 2 + 1,
-            max(1, self._s(1))
-        )
-
-    def _draw_cursor_icon(
-        self, surface: pygame.Surface, center: Tuple[int, int],
-        color: pygame.Color,
-    ) -> None:
-        cx, cy = center
-        points = [
-            (cx - self._s(3), cy - self._s(6)),
-            (cx + self._s(5), cy + self._s(2)),
-            (cx + self._s(1), cy + self._s(2)),
-            (cx + self._s(3), cy + self._s(6)),
-            (cx + self._s(1), cy + self._s(7)),
-            (cx - self._s(1), cy + self._s(3)),
-            (cx - self._s(4), cy + self._s(5)),
-        ]
-        pygame.draw.polygon(surface, color, points)
-
-    def _draw_info_icon(
-        self, surface: pygame.Surface, center: Tuple[int, int],
-        color: pygame.Color,
-    ) -> None:
-        cx, cy = center
-        radius = self._s(8)
-        pygame.draw.circle(
-            surface, color, center, radius, max(1, self._s(1))
-        )
-        pygame.draw.circle(
-            surface, color, (cx, cy - self._s(3)), self._s(1)
-        )
-        pygame.draw.line(
-            surface, color,
-            (cx, cy - self._s(1)), (cx, cy + self._s(4)),
-            max(1, self._s(1)),
-        )
 
     def _draw_view_icon(
         self, surface: pygame.Surface, center: Tuple[int, int],

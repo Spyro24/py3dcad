@@ -210,7 +210,7 @@ class Application:
             and document.sketch(document.active_sketch_id) is None
         ):
             document.active_sketch_id = None
-            self.workspace.sketch_mode_window.close()
+            self.workspace.sketch_palette_window.close()
         if (
             document.selected_face is not None
             and face_for_ref(document, document.selected_face) is None
@@ -230,7 +230,7 @@ class Application:
             document.active_sketch_id = editable[-1].id
             self._align_camera_to_active_sketch(document)
             sketch = document.sketch(document.active_sketch_id)
-            self.workspace.sketch_mode_window.open(sketch.line_type if sketch else "normal")
+            self.workspace.sketch_palette_window.open(sketch.line_type if sketch else "normal")
 
     # ------------------------------------------------------------------
     # Editing (all in memory, saving is never required)
@@ -266,7 +266,7 @@ class Application:
         if command.sketch is not None:
             document.active_sketch_id = command.sketch.id
             self._align_camera_to_active_sketch(document)
-            self.workspace.sketch_mode_window.open(command.sketch.line_type)
+            self.workspace.sketch_palette_window.open(command.sketch.line_type)
 
     def add_point(self, point: Point) -> None:
         self._playing = False
@@ -291,7 +291,7 @@ class Application:
         stack.execute(AddExtrudeCommand(document, sketch))
         # The sketch is now consumed by the feature; hide it until selected again.
         document.active_sketch_id = None
-        self.workspace.sketch_mode_window.close()
+        self.workspace.sketch_palette_window.close()
 
     def select_sketch(self, sketch_id: int) -> None:
         document = self.active_document()
@@ -304,7 +304,7 @@ class Application:
                     None if sketch.is_custom_plane else sketch.plane
                 )
                 self._align_camera_to_active_sketch(document)
-                self.workspace.sketch_mode_window.open(sketch.line_type)
+                self.workspace.sketch_palette_window.open(sketch.line_type)
 
     def _align_camera_to_active_sketch(self, document: Document) -> None:
         sketch = document.sketch(document.active_sketch_id)
@@ -529,7 +529,7 @@ class Application:
             return True
         if key == pygame.K_ESCAPE and document.active_sketch_id is not None:
             document.active_sketch_id = None
-            self.workspace.sketch_mode_window.close()
+            self.workspace.sketch_palette_window.close()
             return True
         return False
 

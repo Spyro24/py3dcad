@@ -9,7 +9,7 @@ import pygame
 from ..document import Document
 from ..sketch import Point
 from .layout import Rect, UILayout
-from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchModeWindow, SketchModeAction
+from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchPaletteWindow, SketchPaletteAction
 from .viewport import Viewport
 
 
@@ -70,7 +70,7 @@ class Workspace:
             title="CREATE SKETCH",
             property_label="Plane",
         )
-        self.sketch_mode_window = SketchModeWindow()
+        self.sketch_palette_window = SketchPaletteWindow()
         self._history_document: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
 
@@ -103,7 +103,7 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self.create_sketch_window.set_scale(scale)
-        self.sketch_mode_window.set_scale(scale)
+        self.sketch_palette_window.set_scale(scale)
         self._font_label = None
         self._font_small = None
         self._font_tab = None
@@ -180,7 +180,7 @@ class Workspace:
         )
         active_sketch = document.sketch(document.active_sketch_id)
         if active_sketch is not None:
-            self.sketch_mode_window.draw(surface, layout.viewport)
+            self.sketch_palette_window.draw(surface, layout.viewport)
         else:
             self.create_sketch_window.draw(surface, layout.viewport)
 
@@ -1190,21 +1190,24 @@ class Workspace:
 
         active_sketch = document.sketch(document.active_sketch_id)
 
-        # Handle sketch mode window when a sketch is being edited
+        # Handle sketch palette window when a sketch is being edited
         if active_sketch is not None:
-            action = self.sketch_mode_window.handle_event(
+            action = self.sketch_palette_window.handle_event(
                 event, layout.viewport
             )
-            if action is not SketchModeAction.NONE:
-                if action == SketchModeAction.LOOK_AT_SKETCH:
+            if action is not SketchPaletteAction.NONE:
+                if action == SketchPaletteAction.LOOK_AT:
                     self.viewport.camera.align_to_plane(active_sketch.frame())
-                elif action == SketchModeAction.FINISH_SKETCH:
+                elif action == SketchPaletteAction.FINISH_SKETCH:
                     document.active_sketch_id = None
-                    self.sketch_mode_window.close()
-                elif action == SketchModeAction.LINE_TYPE_CHANGED:
+                    self.sketch_palette_window.close()
+                elif action == SketchPaletteAction.LINETYPE_CHANGED:
                     if active_sketch is not None:
-                        active_sketch.line_type = self.sketch_mode_window.current_line_type
+                        active_sketch.line_type = self.sketch_palette_window.current_line_type
                         document.dirty = True
+                elif action == SketchPaletteAction.MINIMIZE:
+                    # Minimize/expand handled internally
+                    pass
                 return True
 
         # Handle create sketch dialog when no active sketch
