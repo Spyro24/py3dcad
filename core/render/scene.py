@@ -442,10 +442,16 @@ class SceneRenderer:
         camera: OrbitCamera,
     ) -> None:
         center = rect.center
+        view_dir = camera.view_direction()
         faces: List[
             Tuple[float, int, int, List[Point2], Color]
         ] = []
         for feature_id, face_index, face in iter_solid_faces(document):
+            # Backface culling: skip faces facing away from camera
+            if (face.normal[0] * view_dir[0] +
+                face.normal[1] * view_dir[1] +
+                face.normal[2] * view_dir[2]) <= 0:
+                continue
             polygon = [
                 camera.project(vertex, center)
                 for vertex in face.vertices
