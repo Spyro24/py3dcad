@@ -315,7 +315,7 @@ class SceneRenderer:
         if not hits:
             return None
         hits.sort(key=lambda item: item[0])
-        _, feature_id, face_index, face = hits[0]
+        _, feature_id, face_index, face = hits[-1]
         return feature_id, face_index, face
 
     @staticmethod

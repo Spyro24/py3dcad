@@ -156,11 +156,11 @@ class OrbitCamera:
     def depth(self, points: Sequence[Sequence[float]]) -> float:
         """Average camera-depth of a polygon; larger is closer to the camera.
 
-        view_direction points from camera to scene. Points farther along the view
-        direction are farther from the camera. Negate so larger depth = closer.
+        view_direction points from scene to camera. Points with larger dot product
+        along view_direction are closer to the camera.
         """
         view_x, view_y, view_z = self.view_direction()
-        return -sum(
+        return sum(
             point[0] * view_x + point[1] * view_y + point[2] * view_z
             for point in points
         ) / max(1, len(points))
@@ -176,7 +176,7 @@ class OrbitCamera:
 
     def orbit(self, dx: float, dy: float) -> None:
         """Rotate the camera by a mouse drag in pixels."""
-        self.yaw = (self.yaw + dx * ORBIT_SPEED) % (2 * math.pi)
+        self.yaw = (self.yaw - dx * ORBIT_SPEED) % (2 * math.pi)
         self.pitch = clamp(
             self.pitch + dy * ORBIT_SPEED, MIN_PITCH, MAX_PITCH
         )
