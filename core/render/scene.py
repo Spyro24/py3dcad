@@ -298,8 +298,14 @@ class SceneRenderer:
     ) -> Optional[Tuple[int, int, Face]]:
         """Return the frontmost extruded-solid face under a screen position."""
         center = rect.center
+        view_dir = camera.view_direction()
         hits: List[Tuple[float, int, int, Face]] = []
         for feature_id, face_index, face in iter_solid_faces(document):
+            # Back-face culling: face is front-facing if its normal points opposite
+            # to the view direction (view_dir points from camera to scene).
+            # Standard test: normal · view_dir < 0 means front-facing.
+            if face.normal[0] * view_dir[0] + face.normal[1] * view_dir[1] + face.normal[2] * view_dir[2] >= 0:
+                continue
             polygon = [
                 camera.project(vertex, center) for vertex in face.vertices
             ]
