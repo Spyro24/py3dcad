@@ -109,8 +109,10 @@ class OrientationCube:
             rect.top + margin + half_h,
         )
 
-        visible = []
+        # Use the camera's view direction for face visibility
         view_x, view_y, view_z = camera.view_direction()
+
+        visible = []
         for face in CUBE_FACES:
             facing = (
                 face.normal[0] * view_x
@@ -195,5 +197,8 @@ class OrientationCube:
             )
             pygame.draw.line(surface, color, origin, end, max(1, self._s(1)))
             text = self._font_tiny.render(label, True, color)
-            text_center = (int(end[0] + (end[0] - origin[0]) * 0.3), int(end[1] + (end[1] - origin[1]) * 0.3))
+            text_center = (
+                int(end[0] + (end[0] - origin[0]) * 0.3),
+                int(end[1] + (end[1] - origin[1]) * 0.3),
+            )
             surface.blit(text, text.get_rect(center=text_center))
