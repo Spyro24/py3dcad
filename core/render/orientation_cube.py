@@ -184,7 +184,6 @@ class OrientationCube:
         length = size * 0.19
 
         # Project world axes using the same projection as the camera
-        axes = []
         for axis, color, label in (
             ((1, 0, 0), palette.x_axis, "X"),
             ((0, 1, 0), palette.y_axis, "Y"),
@@ -192,19 +191,9 @@ class OrientationCube:
         ):
             end = self._project(
                 (axis[0] * length, axis[1] * length, axis[2] * length),
-                center, camera, 1.0
+                origin, camera, 1.0
             )
-            dx = end[0] - center[0]
-            dy = end[1] - center[1]
-            axes.append(((dx, dy), color, label))
-
-        width = max(1, self._s(1))
-        for (dx, dy), color, label in axes:
-            end = (origin[0] + dx, origin[1] + dy)
-            pygame.draw.line(surface, color, origin, end, width)
+            pygame.draw.line(surface, color, origin, end, max(1, self._s(1)))
             text = self._font_tiny.render(label, True, color)
-            text_center = (
-                int(end[0] + dx * self._s(6) / length),
-                int(end[1] + dy * self._s(6) / length),
-            )
+            text_center = (int(end[0] + (end[0] - origin[0]) * 0.3), int(end[1] + (end[1] - origin[1]) * 0.3))
             surface.blit(text, text.get_rect(center=text_center))
