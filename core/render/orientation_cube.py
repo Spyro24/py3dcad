@@ -46,13 +46,13 @@ CUBE_FACES = (
         "cube_side",
     ),
     _CubeFace(
-        (0, 1, 0),
-        ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1)),
+        (0, -1, 0),
+        ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)),
         "BACK",
         "cube_side_dark",
     ),
     _CubeFace(
-        (0, -1, 0),
+        (0, 1, 0),
         ((-1, -1, -1), (-1, -1, 1), (1, -1, 1), (1, -1, -1)),
         "FRONT",
         "cube_side_dark",
@@ -155,14 +155,17 @@ class OrientationCube:
         camera: OrbitCamera,
         scale: float,
     ) -> Tuple[float, float]:
+        """Project a point using the same projection as the main camera."""
         x, y, z = point
         sin_yaw = math.sin(camera.yaw)
         cos_yaw = math.cos(camera.yaw)
         sin_pitch = math.sin(camera.pitch)
         cos_pitch = math.cos(camera.pitch)
-        screen_x = center[0] + (x * sin_yaw - y * cos_yaw) * scale
-        screen_y = center[1] + (
-            (x * cos_yaw + y * sin_yaw) * sin_pitch - z * cos_pitch
+        # Match camera.project(): screen_x = cx + (-x*sin_yaw + y*cos_yaw) * scale
+        # screen_y = cy - (-x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch + z*cos_pitch) * scale
+        screen_x = center[0] + (-x * sin_yaw + y * cos_yaw) * scale
+        screen_y = center[1] - (
+            -x * cos_yaw * sin_pitch - y * sin_yaw * sin_pitch + z * cos_pitch
         ) * scale
         return screen_x, screen_y
 
@@ -179,35 +182,29 @@ class OrientationCube:
             center[1] + size * 0.43,
         )
         length = size * 0.19
-        sin_yaw = math.sin(camera.yaw)
-        cos_yaw = math.cos(camera.yaw)
-        sin_pitch = math.sin(camera.pitch)
-        cos_pitch = math.cos(camera.pitch)
-        axes = (
-            (
-                (sin_yaw, cos_yaw * sin_pitch),
-                palette.x_axis,
-                "X",
-            ),
-            (
-                (-cos_yaw, sin_yaw * sin_pitch),
-                palette.y_axis,
-                "Y",
-            ),
-            (
-                (0.0, -cos_pitch),
-                palette.z_axis,
-                "Z",
-            ),
-        )
+
+        # Project world axes using the same projection as the camera
+        axes = []
+        for axis, color, label in (
+            ((1, 0, 0), palette.x_axis, "X"),
+            ((0, 1, 0), palette.y_axis, "Y"),
+            ((0, 0, 1), palette.z_axis, "Z"),
+        ):
+            end = self._project(
+                (axis[0] * length, axis[1] * length, axis[2] * length),
+                center, camera, 1.0
+            )
+            dx = end[0] - center[0]
+            dy = end[1] - center[1]
+            axes.append(((dx, dy), color, label))
 
         width = max(1, self._s(1))
         for (dx, dy), color, label in axes:
-            end = (origin[0] + dx * length, origin[1] + dy * length)
+            end = (origin[0] + dx, origin[1] + dy)
             pygame.draw.line(surface, color, origin, end, width)
             text = self._font_tiny.render(label, True, color)
             text_center = (
-                int(end[0] + dx * self._s(6)),
-                int(end[1] + dy * self._s(6)),
+                int(end[0] + dx * self._s(6) / length),
+                int(end[1] + dy * self._s(6) / length),
             )
             surface.blit(text, text.get_rect(center=text_center))
