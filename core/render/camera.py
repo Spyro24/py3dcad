@@ -38,7 +38,10 @@ class OrbitCamera:
         self.pan_y = 0.0
 
     def project(self, point: Sequence[float], center: Point2) -> Point2:
-        """Project a world-space point to screen pixels."""
+        """Project a world-space point to screen pixels.
+
+        Screen axes: X right, Y up. World axes: X right, Y up, Z toward viewer.
+        """
         x, y, z = point
         cx = center[0] + self.pan_x
         cy = center[1] + self.pan_y
@@ -49,11 +52,11 @@ class OrbitCamera:
         scale = PROJECTION_SCALE * self.zoom
         # Camera right vector R = (-sin_yaw, cos_yaw, 0)
         # Camera up vector U = (-cos_yaw*sin_pitch, -sin_yaw*sin_pitch, cos_pitch)
-        # screen_x = (P - center) · R = -x*sin_yaw + y*cos_yaw
-        # screen_y = (P - center) · U = -x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch + z*cos_pitch
+        # screen_x = (P - center) · R
+        # screen_y = -(P - center) · U  [negate so +Y world = up on screen]
         screen_x = cx + (-x * sin_yaw + y * cos_yaw) * scale
-        screen_y = cy + (
-            - (x * cos_yaw + y * sin_yaw) * sin_pitch + z * cos_pitch
+        screen_y = cy - (
+            -x * cos_yaw * sin_pitch - y * sin_yaw * sin_pitch + z * cos_pitch
         ) * scale
         return screen_x, screen_y
 
@@ -66,17 +69,13 @@ class OrbitCamera:
             return (0.0, 0.0)
 
         scale = PROJECTION_SCALE * self.zoom
-        # screen_x = -x*sin_yaw + y*cos_yaw
-        # screen_y = -x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch
-        # Solve for x,y given screen_x, screen_y:
-        # [screen_x]   [ -sin_yaw   cos_yaw ] [x]
-        # [screen_y] = [ -cos_yaw*sin_pitch  -sin_yaw*sin_pitch ] [y]
+        # screen_x = cx + (-x*sin_yaw + y*cos_yaw) * scale
+        # screen_y = cy - (-x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch) * scale
         # 
-        # Determinant = sin_yaw*sin_yaw*sin_pitch + cos_yaw*cos_yaw*sin_pitch = sin_pitch
-        # x = (-screen_x*sin_yaw*sin_pitch - screen_y*cos_yaw) / sin_pitch
-        # y = (screen_x*cos_yaw*sin_pitch - screen_y*sin_yaw) / sin_pitch
+        # right = (pos[0] - cx) / scale = -x*sin_yaw + y*cos_yaw
+        # forward = (cy - pos[1]) / scale = -x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch
         right = (pos[0] - cx) / scale
-        forward = (pos[1] - cy) / scale
+        forward = (cy - pos[1]) / scale
         sin_yaw = math.sin(self.yaw)
         cos_yaw = math.cos(self.yaw)
         x = -right * sin_yaw - forward * cos_yaw / sin_pitch
@@ -120,9 +119,12 @@ class OrbitCamera:
         cy = center[1] + self.pan_y
 
         # Point on the image plane (orthographic: all rays parallel to V).
-        # P0 = R * ((sx - cx) / scale) + U * ((sy - cy) / scale)
+        # screen_x = cx + (P0·R)*scale
+        # screen_y = cy - (P0·U)*scale
+        # P0·R = (sx - cx)/scale
+        # P0·U = (cy - sy)/scale
         rx = (pos[0] - cx) / scale
-        uy = (pos[1] - cy) / scale
+        uy = (cy - pos[1]) / scale
         p0 = (
             R[0] * rx + U[0] * uy,
             R[1] * rx + U[1] * uy,
