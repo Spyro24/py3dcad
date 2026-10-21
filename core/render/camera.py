@@ -47,9 +47,13 @@ class OrbitCamera:
         sin_pitch = math.sin(self.pitch)
         cos_pitch = math.cos(self.pitch)
         scale = PROJECTION_SCALE * self.zoom
-        screen_x = cx + (x * sin_yaw - y * cos_yaw) * scale
+        # Camera right vector R = (-sin_yaw, cos_yaw, 0)
+        # Camera up vector U = (-cos_yaw*sin_pitch, -sin_yaw*sin_pitch, cos_pitch)
+        # screen_x = (P - center) · R = -x*sin_yaw + y*cos_yaw
+        # screen_y = (P - center) · U = -x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch + z*cos_pitch
+        screen_x = cx + (-x * sin_yaw + y * cos_yaw) * scale
         screen_y = cy + (
-            (x * cos_yaw + y * sin_yaw) * sin_pitch - z * cos_pitch
+            - (x * cos_yaw + y * sin_yaw) * sin_pitch + z * cos_pitch
         ) * scale
         return screen_x, screen_y
 
@@ -62,12 +66,21 @@ class OrbitCamera:
             return (0.0, 0.0)
 
         scale = PROJECTION_SCALE * self.zoom
+        # screen_x = -x*sin_yaw + y*cos_yaw
+        # screen_y = -x*cos_yaw*sin_pitch - y*sin_yaw*sin_pitch
+        # Solve for x,y given screen_x, screen_y:
+        # [screen_x]   [ -sin_yaw   cos_yaw ] [x]
+        # [screen_y] = [ -cos_yaw*sin_pitch  -sin_yaw*sin_pitch ] [y]
+        # 
+        # Determinant = sin_yaw*sin_yaw*sin_pitch + cos_yaw*cos_yaw*sin_pitch = sin_pitch
+        # x = (-screen_x*sin_yaw*sin_pitch - screen_y*cos_yaw) / sin_pitch
+        # y = (screen_x*cos_yaw*sin_pitch - screen_y*sin_yaw) / sin_pitch
         right = (pos[0] - cx) / scale
-        forward = (pos[1] - cy) / (scale * sin_pitch)
+        forward = (pos[1] - cy) / scale
         sin_yaw = math.sin(self.yaw)
         cos_yaw = math.cos(self.yaw)
-        x = right * sin_yaw + forward * cos_yaw
-        y = -right * cos_yaw + forward * sin_yaw
+        x = -right * sin_yaw - forward * cos_yaw / sin_pitch
+        y = right * cos_yaw / sin_pitch - forward * sin_yaw / sin_pitch
         return (x, y)
 
     def unproject_on_plane(
@@ -87,19 +100,19 @@ class OrbitCamera:
         )
 
         # Camera basis vectors (orthonormal), matching the projection matrix.
-        # R: world direction mapping to +screen X (right)
-        # U: world direction mapping to +screen Y (up)
-        # V: view direction (world direction mapping to -screen depth)
+        # R: world direction mapping to +screen X (right) = (-sin_yaw, cos_yaw, 0)
+        # U: world direction mapping to +screen Y (up) = (-cos_yaw*sin_pitch, -sin_yaw*sin_pitch, cos_pitch)
+        # V: view direction (world direction from scene to camera) = (cos_yaw*cos_pitch, sin_yaw*cos_pitch, sin_pitch)
         sin_yaw = math.sin(self.yaw)
         cos_yaw = math.cos(self.yaw)
         sin_pitch = math.sin(self.pitch)
         cos_pitch = math.cos(self.pitch)
         V = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
-        R = (sin_yaw, -cos_yaw, 0.0)
+        R = (-sin_yaw, cos_yaw, 0.0)
         U = (
-            cos_yaw * sin_pitch,
-            sin_yaw * sin_pitch,
-            -cos_pitch,
+            -cos_yaw * sin_pitch,
+            -sin_yaw * sin_pitch,
+            cos_pitch,
         )
 
         scale = PROJECTION_SCALE * self.zoom
