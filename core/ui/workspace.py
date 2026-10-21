@@ -9,7 +9,7 @@ import pygame
 from ..document import Document
 from ..sketch import Point
 from .layout import Rect, UILayout
-from .tool_properties import ToolPropertiesWindow, ToolWindowAction
+from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchModeWindow, SketchModeAction
 from .viewport import Viewport
 
 
@@ -70,6 +70,7 @@ class Workspace:
             title="CREATE SKETCH",
             property_label="Plane",
         )
+        self.sketch_mode_window = SketchModeWindow()
         self._history_document: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
 
@@ -102,6 +103,7 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self.create_sketch_window.set_scale(scale)
+        self.sketch_mode_window.set_scale(scale)
         self._font_label = None
         self._font_small = None
         self._font_tab = None
@@ -176,7 +178,11 @@ class Workspace:
         self._draw_timeline(
             surface, layout.timeline, history, full_history, position, playing
         )
-        self.create_sketch_window.draw(surface, layout.viewport)
+        active_sketch = document.sketch(document.active_sketch_id)
+        if active_sketch is not None:
+            self.sketch_mode_window.draw(surface, layout.viewport)
+        else:
+            self.create_sketch_window.draw(surface, layout.viewport)
 
     def _sync_history_document(self, document: Document) -> None:
         if document.id != self._history_document:
@@ -1182,11 +1188,32 @@ class Workspace:
         self._init_fonts()
         self._sync_history_document(document)
 
-        action = self.create_sketch_window.handle_event(
-            event, layout.viewport
-        )
-        if action is not ToolWindowAction.NONE:
-            return True
+        active_sketch = document.sketch(document.active_sketch_id)
+
+        # Handle sketch mode window when a sketch is being edited
+        if active_sketch is not None:
+            action = self.sketch_mode_window.handle_event(
+                event, layout.viewport
+            )
+            if action is not SketchModeAction.NONE:
+                if action == SketchModeAction.LOOK_AT_SKETCH:
+                    self.viewport.camera.align_to_plane(active_sketch.frame())
+                elif action == SketchModeAction.FINISH_SKETCH:
+                    document.active_sketch_id = None
+                    self.sketch_mode_window.close()
+                elif action == SketchModeAction.LINE_TYPE_CHANGED:
+                    if active_sketch is not None:
+                        active_sketch.line_type = self.sketch_mode_window.current_line_type
+                        document.dirty = True
+                return True
+
+        # Handle create sketch dialog when no active sketch
+        if active_sketch is None:
+            action = self.create_sketch_window.handle_event(
+                event, layout.viewport
+            )
+            if action is not ToolWindowAction.NONE:
+                return True
 
         if event.type == pygame.MOUSEMOTION:
             self._update_hover(
@@ -1266,7 +1293,7 @@ class Workspace:
         handled = self.viewport.handle_event(
             event, layout.viewport, document, self.on_add_point
         )
-        if self.create_sketch_window.visible:
+        if self.create_sketch_window.visible and active_sketch is None:
             if document.selected_face is not None:
                 self._finish_create_sketch(
                     document, face_ref=document.selected_face

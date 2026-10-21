@@ -124,6 +124,7 @@ class Sketch:
     plane_u: Optional[Point3] = None
     plane_v: Optional[Point3] = None
     plane_normal: Optional[Point3] = None
+    line_type: str = "normal"
 
     @property
     def is_custom_plane(self) -> bool:
@@ -160,6 +161,7 @@ class Sketch:
             "name": self.name,
             "plane": normalize_plane(self.plane),
             "points": [[x, y] for x, y in self.points],
+            "line_type": self.line_type,
         }
         if self.is_custom_plane:
             data["plane_frame"] = self.frame().to_dict()
@@ -196,6 +198,8 @@ class Sketch:
                     data.get("plane_label") or frame.label or "Face"
                 )
 
+        line_type = str(data.get("line_type", "normal"))
+
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Sketch")),
@@ -206,6 +210,7 @@ class Sketch:
             plane_u=plane_u,
             plane_v=plane_v,
             plane_normal=plane_normal,
+            line_type=line_type,
         )
 
 
