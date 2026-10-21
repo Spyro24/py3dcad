@@ -20,41 +20,60 @@ class _CubeFace:
     color_key: str
 
 
+# Cube vertices: (±1, ±1, ±1) with winding such that normal points outward
+# Cube vertices indexed:
+# 0: (-1, -1, -1)  1: (1, -1, -1)  2: (1, 1, -1)  3: (-1, 1, -1)
+# 4: (-1, -1, 1)   5: (1, -1, 1)   6: (1, 1, 1)   7: (-1, 1, 1)
+
+# Face vertices in CCW order when viewed from outside
+# +X (RIGHT): vertices 1, 5, 6, 2
+# -X (LEFT):  vertices 3, 7, 4, 0
+# +Y (FRONT): vertices 5, 1, 2, 6
+# -Y (BACK):  vertices 0, 3, 7, 4
+# +Z (TOP):   vertices 4, 5, 6, 7
+# -Z (BOTTOM): vertices 0, 1, 5, 4 (viewed from below)
+
 CUBE_FACES = (
+    # TOP (+Z)
     _CubeFace(
         (0, 0, 1),
         ((-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)),
         "TOP",
         "cube_top",
     ),
+    # BOTTOM (-Z)
     _CubeFace(
         (0, 0, -1),
-        ((-1, -1, -1), (-1, 1, -1), (1, 1, -1), (1, -1, -1)),
+        ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)),
         "BOTTOM",
         "cube_bottom",
     ),
+    # RIGHT (+X)
     _CubeFace(
         (1, 0, 0),
         ((1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)),
         "RIGHT",
         "cube_side",
     ),
+    # LEFT (-X)
     _CubeFace(
         (-1, 0, 0),
         ((-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1)),
         "LEFT",
         "cube_side",
     ),
-    _CubeFace(
-        (0, -1, 0),
-        ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)),
-        "BACK",
-        "cube_side_dark",
-    ),
+    # FRONT (+Y)
     _CubeFace(
         (0, 1, 0),
-        ((-1, -1, -1), (-1, -1, 1), (1, -1, 1), (1, -1, -1)),
+        ((1, 1, -1), (-1, 1, -1), (-1, 1, 1), (1, 1, 1)),
         "FRONT",
+        "cube_side_dark",
+    ),
+    # BACK (-Y)
+    _CubeFace(
+        (0, -1, 0),
+        ((-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)),
+        "BACK",
         "cube_side_dark",
     ),
 )
@@ -114,6 +133,7 @@ class OrientationCube:
 
         visible = []
         for face in CUBE_FACES:
+            # Backface culling: only render faces facing the camera
             facing = (
                 face.normal[0] * view_x
                 + face.normal[1] * view_y
@@ -121,21 +141,35 @@ class OrientationCube:
             )
             if facing <= 0.01:
                 continue
+            
+            # Compute face center depth for proper depth sorting
+            face_center = (
+                sum(v[0] for v in face.vertices) / 4.0,
+                sum(v[1] for v in face.vertices) / 4.0,
+                sum(v[2] for v in face.vertices) / 4.0,
+            )
+            depth = (
+                face_center[0] * view_x
+                + face_center[1] * view_y
+                + face_center[2] * view_z
+            )
+            
             points = [
                 self._project(vertex, center, camera, scale)
                 for vertex in face.vertices
             ]
             color = getattr(palette, face.color_key)
-            visible.append((facing, points, face, color))
+            visible.append((depth, facing, points, face, color))
 
-        visible.sort(key=lambda item: item[0])
+        # Sort by depth (farther first for painter's algorithm)
+        visible.sort(key=lambda item: item[0], reverse=True)
         edge_width = max(1, self._s(1))
-        for _, points, _, color in visible:
+        for _, _, points, _, color in visible:
             pygame.draw.polygon(surface, color, points)
-        for _, points, _, _ in visible:
+        for _, _, points, _, _ in visible:
             pygame.draw.polygon(surface, palette.cube_edge, points, edge_width)
 
-        for facing, points, face, _ in visible:
+        for _, facing, points, face, _ in visible:
             if facing < 0.28:
                 continue
             label = self._font.render(face.label, True, palette.cube_text)
@@ -202,3 +236,23 @@ class OrientationCube:
                 int(end[1] + (end[1] - origin[1]) * 0.3),
             )
             surface.blit(text, text.get_rect(center=text_center))
+
+    def set_scale(self, scale: float) -> None:
+        if abs(scale - self.ui_scale) < 1e-6:
+            return
+        self.ui_scale = scale
+        self._font = None
+        self._font_tiny = None
+
+    def _s(self, value: float) -> int:
+        return max(1, int(round(value * self.ui_scale)))
+
+    def _init_fonts(self) -> None:
+        if self._font is not None:
+            return
+        self._font = pygame.font.SysFont(
+            "Segoe UI", max(7, self._s(8)), bold=True
+        )
+        self._font_tiny = pygame.font.SysFont(
+            "Segoe UI", max(6, self._s(7)), bold=True
+        )
