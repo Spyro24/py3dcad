@@ -1,4 +1,4 @@
-# Roadmap - Parametric CAD (Python + pygame-ce)
+# Roadmap - PY3DCAD (Python + pygame-ce)
 
 ## M1 - Foundation
 - Window, main loop, event handling

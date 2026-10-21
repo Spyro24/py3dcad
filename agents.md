@@ -1,7 +1,7 @@
-# AGENTS.md - Parametric CAD (Python + pygame-ce)
+# AGENTS.md - PY3DCAD (Python + pygame-ce)
 
 ## Goal
-Parametric CAD: sketches and features driven by named parameters. UI in pygame-ce only.
+PY3DCAD: sketches and features driven by named parameters. UI in pygame-ce only.
 
 ## Stack
 - Python 3.11+, `pygame-ce` (`import pygame`). No Qt/Tk. Numpy only if approved.
@@ -19,6 +19,7 @@ Parametric CAD: sketches and features driven by named parameters. UI in pygame-c
 ## Workflow
 - Run: `python main.py`
 - Done = app runs without errors and the change works as described.
+- commit your changes as the system user before a new feature is requested
 
 ## Don'ts
 - No new dependencies without asking.
