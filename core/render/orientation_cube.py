@@ -62,17 +62,17 @@ CUBE_FACES = (
         "LEFT",
         "cube_side",
     ),
-    # FRONT (+Y)
+    # FRONT (-Y) - the face you see when looking from +Y toward origin
     _CubeFace(
-        (0, 1, 0),
-        ((1, 1, -1), (-1, 1, -1), (-1, 1, 1), (1, 1, 1)),
+        (0, -1, 0),
+        ((1, -1, -1), (-1, -1, -1), (-1, -1, 1), (1, -1, 1)),
         "FRONT",
         "cube_side_dark",
     ),
-    # BACK (-Y)
+    # BACK (+Y)
     _CubeFace(
-        (0, -1, 0),
-        ((-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)),
+        (0, 1, 0),
+        ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1)),
         "BACK",
         "cube_side_dark",
     ),
