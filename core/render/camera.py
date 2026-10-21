@@ -205,7 +205,7 @@ class OrbitCamera:
         normal = frame.normal
         u_axis = frame.u
 
-        # Desired view direction points along the plane normal (front view).
+        # Desired view direction points along the plane's normal (front view).
         view_x, view_y, view_z = normal[0], normal[1], normal[2]
 
         # Clamp view_z to avoid exactly +/-1 which would make pitch +/-90 and
