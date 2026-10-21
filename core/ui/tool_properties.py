@@ -352,13 +352,13 @@ class SketchModeWindow:
     CUBE_SIZE = 92
     CUBE_MARGIN = 12
     PANEL_WIDTH = 322
-    PANEL_HEIGHT = 158
+    PANEL_HEIGHT = 220
     CUBE_GAP = 12
 
     LINE_TYPES = [
-        ("normal", "Normal", "Solid line"),
-        ("construction", "Construction", "Dashed, infinite extent"),
-        ("centerline", "Centerline", "Long-dash short-dash"),
+        ("normal", "Normal"),
+        ("construction", "Construction"),
+        ("centerline", "Centerline"),
     ]
 
     def __init__(self) -> None:
@@ -445,8 +445,8 @@ class SketchModeWindow:
         panel = self.panel_rect(region)
         rects = []
         row_height = self._s(24)
-        start_y = panel.y + self._s(34) + self._s(12)
-        # Only use top portion for line types, leaving space for buttons below
+        # Start after title + small gap
+        start_y = panel.y + self._s(34) + self._s(8)
         for i in range(len(self.LINE_TYPES)):
             rects.append(pygame.Rect(
                 panel.x + self._s(16),
@@ -458,26 +458,26 @@ class SketchModeWindow:
 
     def look_rect(self, region: Rect) -> pygame.Rect:
         panel = self.panel_rect(region)
-        width = self._s(120)
-        height = self._s(28)
-        # Place above finish button
-        finish_rect = self.finish_rect(region)
+        btn_width = self._s(140)
+        btn_height = self._s(28)
+        # Left button in the bottom button row
         return pygame.Rect(
-            panel.right - self._s(16) - width,
-            finish_rect.top - self._s(6) - height,
-            width,
-            height,
+            panel.x + self._s(16),
+            panel.bottom - self._s(16) - btn_height,
+            btn_width,
+            btn_height,
         )
 
     def finish_rect(self, region: Rect) -> pygame.Rect:
         panel = self.panel_rect(region)
-        width = self._s(100)
-        height = self._s(30)
+        btn_width = self._s(140)
+        btn_height = self._s(28)
+        # Right button in the bottom button row
         return pygame.Rect(
-            panel.right - self._s(16) - width,
-            panel.bottom - self._s(16) - height,
-            width,
-            height,
+            panel.right - self._s(16) - btn_width,
+            panel.bottom - self._s(16) - btn_height,
+            btn_width,
+            btn_height,
         )
 
     # ------------------------------------------------------------------
@@ -522,12 +522,10 @@ class SketchModeWindow:
             if not panel.collidepoint(event.pos):
                 return SketchModeAction.NONE
 
-            # Check buttons first to avoid overlap with line type area
-            # Look at sketch button
+            # Check buttons first (they're at the bottom, non-overlapping)
             if self.look_rect(region).collidepoint(event.pos):
                 return SketchModeAction.LOOK_AT_SKETCH
 
-            # Finish sketch button
             if self.finish_rect(region).collidepoint(event.pos):
                 self.close()
                 return SketchModeAction.FINISH_SKETCH
@@ -589,7 +587,7 @@ class SketchModeWindow:
             ),
         )
 
-        # Line type rows
+        # Line type label
         line_type_rects = self.line_type_rects(region)
         label = self._font_text.render(
             "Line type", True, self.text_secondary
@@ -597,10 +595,12 @@ class SketchModeWindow:
         surface.blit(
             label,
             label.get_rect(
-                midleft=(panel.x + self._s(16), line_type_rects[0].centery)
+                midleft=(panel.x + self._s(16), line_type_rects[0].centery - self._s(16))
             ),
         )
-        for i, (key, display, tooltip) in enumerate(self.LINE_TYPES):
+
+        # Line type rows
+        for i, (key, display) in enumerate(self.LINE_TYPES):
             rect = line_type_rects[i]
             is_active = key == self.current_line_type
             is_hovered = i == self._hover_line_type
@@ -626,7 +626,7 @@ class SketchModeWindow:
                 text, text.get_rect(midleft=(rect.x + self._s(10), rect.centery))
             )
 
-        # Look at sketch button
+        # Look at sketch button (left)
         look_rect = self.look_rect(region)
         look_fill = self.button_hover_bg if self._hover_look else self.button_bg
         pygame.draw.rect(
@@ -646,7 +646,7 @@ class SketchModeWindow:
             look_text, look_text.get_rect(center=look_rect.center)
         )
 
-        # Finish sketch button
+        # Finish sketch button (right)
         finish_rect = self.finish_rect(region)
         finish_fill = self.field_active_bg if self._hover_finish else self.button_bg
         pygame.draw.rect(
