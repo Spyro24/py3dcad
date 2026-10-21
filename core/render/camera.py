@@ -196,17 +196,15 @@ class OrbitCamera:
     def align_to_plane(self, frame: PlaneFrame, scale: float = 1.0, zoom: Optional[float] = None) -> None:
         """Orient the camera to look directly at a sketch plane.
 
-        The view direction points opposite to the plane's normal (front view:
-        camera on the positive side of the plane looking toward the origin).
+        The view direction points along the plane's normal (front of plane).
         The camera's pan is set so the plane's origin appears at the screen centre.
         If ``zoom`` is provided it is used directly; otherwise the current zoom is kept.
         """
         normal = frame.normal
         u_axis = frame.u
 
-        # Desired view direction points opposite to the plane normal
-        # (camera on the positive side looking toward the plane).
-        view_x, view_y, view_z = -normal[0], -normal[1], -normal[2]
+        # Desired view direction points along the plane normal (front view).
+        view_x, view_y, view_z = normal[0], normal[1], normal[2]
 
         # Clamp view_z to avoid exactly +/-1 which would make pitch +/-90 and
         # lose yaw definition.
