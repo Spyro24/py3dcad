@@ -15,9 +15,11 @@ class TabBar:
         self,
         on_select: Callable[[int], None],
         on_close: Callable[[int], None],
+        on_new: Callable[[], None],
     ) -> None:
         self.on_select = on_select
         self.on_close = on_close
+        self.on_new = on_new
         self.scale = 1.0
 
         self._font_brand: Optional[pygame.font.Font] = None
@@ -27,6 +29,7 @@ class TabBar:
 
         self._hover_tab: int = -1
         self._hover_close: int = -1
+        self._hover_new: bool = False
 
         self.bg_color = pygame.Color(24, 24, 29)
         self.tab_bg = pygame.Color(34, 34, 40)
@@ -65,17 +68,17 @@ class TabBar:
         active_id: Optional[int],
     ) -> bool:
         """Handle tab interactions. Returns True if the event was consumed."""
-        if not documents:
-            return False
-
         self._init_fonts()
-        tabs = self._layout(region, documents)
+        tabs, plus_rect = self._layout(region, documents)
 
         if event.type == pygame.MOUSEMOTION:
-            self._update_hover(event.pos, tabs)
+            self._update_hover(event.pos, tabs, plus_rect)
             return False
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if plus_rect.collidepoint(event.pos):
+                self.on_new()
+                return True
             for index, tab_rect, close_rect in tabs:
                 if close_rect.collidepoint(event.pos):
                     self.on_close(documents[index].id)
@@ -104,17 +107,6 @@ class TabBar:
         brand = self._font_brand.render("PY3DCAD", True, self.text_primary)
         surface.blit(brand, brand.get_rect(x=region.x + self._s(16), centery=region.centery))
 
-        if not documents:
-            page = self._font_page.render("Start", True, self.text_muted)
-            surface.blit(
-                page,
-                page.get_rect(
-                    x=region.x + self._s(16) + brand.get_width() + self._s(12),
-                    centery=region.centery,
-                ),
-            )
-            return
-
         tabs_x = region.x + self._s(16) + brand.get_width() + self._s(16)
         pygame.draw.line(
             surface, self.border_color,
@@ -122,35 +114,51 @@ class TabBar:
             (tabs_x - self._s(8), region.bottom - self._s(8)),
         )
 
-        for index, tab_rect, close_rect in self._layout(region, documents):
-            document = documents[index]
-            active = document.id == active_id
-            hovered = index == self._hover_tab
+        tabs, plus_rect = self._layout(region, documents)
 
-            if active:
-                bg = self.tab_active
-            elif hovered:
-                bg = self.tab_hover
-            else:
-                bg = self.tab_bg
+        if not documents:
+            page = self._font_page.render("Start", True, self.text_muted)
+            surface.blit(
+                page,
+                page.get_rect(x=tabs_x - self._s(4), centery=region.centery),
+            )
+        else:
+            for index, tab_rect, close_rect in tabs:
+                document = documents[index]
+                active = document.id == active_id
+                hovered = index == self._hover_tab
 
-            pygame.draw.rect(surface, bg, tab_rect, border_top_left_radius=5,
-                             border_top_right_radius=5)
-            if active:
-                pygame.draw.rect(
-                    surface, self.accent,
-                    pygame.Rect(tab_rect.x, tab_rect.bottom - self._s(2),
-                                tab_rect.w, self._s(2)),
+                if active:
+                    bg = self.tab_active
+                elif hovered:
+                    bg = self.tab_hover
+                else:
+                    bg = self.tab_bg
+
+                pygame.draw.rect(surface, bg, tab_rect, border_top_left_radius=5,
+                                 border_top_right_radius=5)
+                if active:
+                    pygame.draw.rect(
+                        surface, self.accent,
+                        pygame.Rect(tab_rect.x, tab_rect.bottom - self._s(2),
+                                    tab_rect.w, self._s(2)),
+                    )
+
+                text_color = self.text_primary if active else self.text_muted
+                available = tab_rect.w - self._s(34)
+                label = document.name + (" *" if document.dirty else "")
+                text = self._fit_text(self._font_tab, label, text_color, available)
+                surface.blit(
+                    text,
+                    text.get_rect(x=tab_rect.x + self._s(12), centery=tab_rect.centery),
                 )
 
-            text_color = self.text_primary if active else self.text_muted
-            available = tab_rect.w - self._s(34)
-            label = document.name + (" *" if document.dirty else "")
-            text = self._fit_text(self._font_tab, label, text_color, available)
-            surface.blit(text, text.get_rect(x=tab_rect.x + self._s(12), centery=tab_rect.centery))
+                close_color = (
+                    self.text_primary if index == self._hover_close else self.text_muted
+                )
+                self._draw_close(surface, close_rect, close_color)
 
-            close_color = self.text_primary if index == self._hover_close else self.text_muted
-            self._draw_close(surface, close_rect, close_color)
+        self._draw_plus(surface, plus_rect, self._hover_new)
 
         pygame.draw.line(
             surface, self.border_color,
@@ -159,21 +167,28 @@ class TabBar:
 
     def _layout(
         self, region: Rect, documents: List[Document]
-    ) -> List[Tuple[int, pygame.Rect, pygame.Rect]]:
-        """Compute tab and close-button rectangles."""
+    ) -> Tuple[List[Tuple[int, pygame.Rect, pygame.Rect]], pygame.Rect]:
+        """Compute tab and close-button rectangles plus the new-tab button."""
         self._init_fonts()
         brand_width = self._font_brand.size("PY3DCAD")[0]
         x = region.x + self._s(16) + brand_width + self._s(16)
-        available = region.right - x - self._s(8)
         gap = self._s(4)
-        count = max(1, len(documents))
-        tab_w = (available - gap * (count - 1)) // count
-        tab_w = min(self._s(220), max(self._s(96), tab_w))
+        plus_w = self._s(30)
         tab_h = region.h - self._s(8)
         y = region.y + self._s(4)
 
+        if not documents:
+            page_width = self._font_page.size("Start")[0]
+            plus_x = x - self._s(4) + page_width + self._s(10)
+            return [], pygame.Rect(plus_x, y, plus_w, tab_h)
+
+        available = region.right - x - self._s(8) - plus_w - gap
+        count = len(documents)
+        tab_w = (available - gap * (count - 1)) // count
+        tab_w = min(self._s(220), max(self._s(96), tab_w))
+
         tabs: List[Tuple[int, pygame.Rect, pygame.Rect]] = []
-        for index in range(len(documents)):
+        for index in range(count):
             tab_rect = pygame.Rect(x + index * (tab_w + gap), y, tab_w, tab_h)
             close_size = self._s(14)
             close_rect = pygame.Rect(
@@ -182,20 +197,43 @@ class TabBar:
                 close_size, close_size,
             )
             tabs.append((index, tab_rect, close_rect))
-        return tabs
+
+        plus_rect = pygame.Rect(x + count * (tab_w + gap), y, plus_w, tab_h)
+        return tabs, plus_rect
 
     def _update_hover(
         self, pos: Tuple[int, int],
         tabs: List[Tuple[int, pygame.Rect, pygame.Rect]],
+        plus_rect: pygame.Rect,
     ) -> None:
         self._hover_tab = -1
         self._hover_close = -1
+        self._hover_new = plus_rect.collidepoint(pos)
         for index, tab_rect, close_rect in tabs:
             if tab_rect.collidepoint(pos):
                 self._hover_tab = index
                 if close_rect.collidepoint(pos):
                     self._hover_close = index
                 return
+
+    def _draw_plus(
+        self, surface: pygame.Surface, rect: pygame.Rect, hovered: bool
+    ) -> None:
+        if hovered:
+            pygame.draw.rect(
+                surface, self.tab_hover, rect, border_radius=self._s(5)
+            )
+        color = self.text_primary if hovered else self.text_muted
+        pad = self._s(9)
+        thickness = max(1, self._s(2))
+        pygame.draw.line(
+            surface, color,
+            (rect.x + pad, rect.centery), (rect.right - pad, rect.centery), thickness,
+        )
+        pygame.draw.line(
+            surface, color,
+            (rect.centerx, rect.y + pad), (rect.centerx, rect.bottom - pad), thickness,
+        )
 
     def _draw_close(
         self, surface: pygame.Surface, rect: pygame.Rect, color: pygame.Color

@@ -41,7 +41,9 @@ class Application:
             on_open_recent=self.open_recent,
             on_open_example=self.open_example,
         )
-        self.tab_bar = TabBar(self.select_document, self.close_document)
+        self.tab_bar = TabBar(
+            self.select_document, self.close_document, self.new_document
+        )
         self.workspace = Workspace(
             on_new_sketch=self.new_sketch,
             on_extrude=self.extrude_active,
@@ -488,11 +490,11 @@ class Application:
                 return
             if self.documents and self._handle_edit_key(event.key):
                 return
+        if self.tab_bar.handle_event(
+            event, self.layout.tab_bar, self.documents, self.active_id
+        ):
+            return
         if self.documents:
-            if self.tab_bar.handle_event(
-                event, self.layout.tab_bar, self.documents, self.active_id
-            ):
-                return
             document = self.active_document()
             if document is not None:
                 stack = self._active_stack()
