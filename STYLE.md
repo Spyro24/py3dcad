@@ -170,6 +170,7 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 | Toolbar mode tab | 24 high |
 | Toolbar action button | 40 x 38, 6 gap |
 | Grouped sketch tool button | 30 high, 22-62 wide; labels under `CREATE` |
+| Line-style menu | 190 wide, 28 px rows, radius 6 |
 | Settings button | 28 x 28 |
 | Tree root row | 34 high, radius 3 |
 | Tree child row | 28 high, radius 3, 22 indent |
@@ -224,7 +225,8 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Mode tabs are clickable. Hover adds the raised surface. Switching modes while
   a sketch is open only changes the visible tool group: the sketch stays
   active, its palette stays visible, and the `SKETCH` tab remains available.
-  Use `Finish Sketch` to end sketch editing.
+  Leaving `SKETCH` disarms the current sketch tool so a hidden tool cannot draw
+  from another mode. Use `Finish Sketch` to end sketch editing.
 - While a sketch is being edited, a `SKETCH` tab is prepended and becomes the
   active mode. It uses the green `sketch` kind colour for its label and
   underline; the normal mode tabs remain muted.
@@ -233,17 +235,21 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Sketch editing uses a full grouped command bar: `CREATE`, `MODIFY`, `PATTERN`,
   `CONSTRAINTS`, `INSPECT`, `INSERT`, `SELECT`, `FINISH SKETCH`. Groups are
   separated by 1 px vertical rules and carry a bold uppercase caption at the
-  bottom. `CREATE` shows labelled tools with dropdown carets; the other groups
-  use icon buttons. `FINISH SKETCH` stays at the far right with a green check
-  and two-line green caption.
-- Point is selected when sketch editing begins. Only Point and Finish Sketch
-  are active; the remaining grouped tools are neutral placeholders for future
-  tools. Hover adds the raised surface plus a 1 px border; the selected tool
-  gets a 2 px accent border.
-- `Esc` only deselects the current sketch tool. It does not leave sketch mode
-  or close the sketch palette. Click Point to draw again; viewport clicks place
-  points only while Point is selected. Clicking `Finish Sketch` ends sketch
-  editing and restores the solid tools.
+  bottom. Group captions are plain labels, not dropdown menus. `CREATE` shows
+  labelled tools with dropdown carets; `Line` and `Point` are active. Other
+  grouped tools are neutral placeholders for future tools. `FINISH SKETCH`
+  stays at the far right with a green check and two-line green caption.
+- The `Line` caret opens a compact line-style menu (`Line`,
+  `Construction Line`, `Centerline`). Choosing a style selects the Line tool,
+  updates the sketch and palette line type, and closes the menu. Clicking
+  outside the menu dismisses it.
+- Point is selected when sketch editing begins. Point places points; Line
+  draws chained two-click segments from the sketch plane. Hover adds the raised
+  surface plus a 1 px border; the selected tool gets a 2 px accent border.
+- `Esc` only deselects the current sketch tool and clears an in-progress line.
+  It does not leave sketch mode or close the sketch palette. Click Point or Line
+  to draw again. Clicking `Finish Sketch` ends sketch editing and restores the
+  solid tools.
 - Right: gear icon button, 28 x 28. Tooltips use `field`-dark background,
   1 px border and 8 px horizontal / 4 px vertical padding.
 
@@ -349,8 +355,9 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Hints explain the next action and the relevant shortcut:
   `Click a plane or face to select it  ·  then press S to sketch`.
   In sketch mode, `Esc` means deselect: use
-  `Click to place points  ·  E to extrude  ·  Esc to deselect`, and
-  `No tool selected  ·  click Point to draw` when no tool is active.
+  `Click to place points  ·  E to extrude  ·  Esc to deselect`,
+  `Click to draw a line  ·  Esc to deselect`, and
+  `No tool selected  ·  click Point or Line to draw` when no tool is active.
 - Use `·` between facts and `—` only for a longer pause in hints.
 - Keep empty-state copy calm and instructive; never use exclamation marks.
 - Units are millimetres, with Y up. Do not show unit suffixes in chrome labels

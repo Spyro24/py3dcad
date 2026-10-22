@@ -125,6 +125,7 @@ class Sketch:
     plane_v: Optional[Point3] = None
     plane_normal: Optional[Point3] = None
     line_type: str = "normal"
+    lines: List[Tuple[Point, Point]] = field(default_factory=list)
 
     @property
     def is_custom_plane(self) -> bool:
@@ -162,6 +163,10 @@ class Sketch:
             "plane": normalize_plane(self.plane),
             "points": [[x, y] for x, y in self.points],
             "line_type": self.line_type,
+            "lines": [
+                [[start[0], start[1]], [end[0], end[1]]]
+                for start, end in self.lines
+            ],
         }
         if self.is_custom_plane:
             data["plane_frame"] = self.frame().to_dict()
@@ -199,6 +204,19 @@ class Sketch:
                 )
 
         line_type = str(data.get("line_type", "normal"))
+        lines: List[Tuple[Point, Point]] = []
+        raw_lines = data.get("lines", [])
+        if not isinstance(raw_lines, (list, tuple)):
+            raw_lines = []
+        for raw in raw_lines:
+            if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                continue
+            try:
+                start = (float(raw[0][0]), float(raw[0][1]))
+                end = (float(raw[1][0]), float(raw[1][1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            lines.append((start, end))
 
         return cls(
             id=int(data.get("id", 0)),
@@ -211,6 +229,7 @@ class Sketch:
             plane_v=plane_v,
             plane_normal=plane_normal,
             line_type=line_type,
+            lines=lines,
         )
 
 

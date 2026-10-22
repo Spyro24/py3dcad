@@ -122,7 +122,7 @@ class Viewport:
         surface: pygame.Surface,
         region: Rect,
         document: Document,
-        point_tool_active: bool = True,
+        active_tool: Optional[str] = None,
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -137,13 +137,13 @@ class Viewport:
             self.renderer.draw_orientation_cube(
                 surface, region.rect, self.camera
             )
-        self._draw_hud(surface, region, document, point_tool_active)
+        self._draw_hud(surface, region, document, active_tool)
 
         surface.set_clip(previous_clip)
 
     def _draw_hud(
         self, surface: pygame.Surface, region: Rect, document: Document,
-        point_tool_active: bool = True,
+        active_tool: Optional[str] = None,
     ) -> None:
         active = document.sketch(document.active_sketch_id)
         if active is not None:
@@ -151,15 +151,20 @@ class Viewport:
                 f"{active.name}  ·  {active.display_plane}  ·  "
                 f"{len(active.points)} points"
             )
-            if not point_tool_active:
+            if active.lines:
+                line_word = "line" if len(active.lines) == 1 else "lines"
+                status += f"  ·  {len(active.lines)} {line_word}"
+            if active_tool == "line":
+                hint = "Click to draw a line  ·  Esc to deselect"
+            elif active_tool != "point":
                 if len(active.points) < 3:
                     hint = (
-                        "No tool selected  ·  click Point to draw"
+                        "No tool selected  ·  click Point or Line to draw"
                         "  ·  3+ points needed to extrude"
                     )
                 else:
                     hint = (
-                        "No tool selected  ·  click Point to draw"
+                        "No tool selected  ·  click Point or Line to draw"
                         "  ·  E to extrude"
                     )
             elif len(active.points) < 3:

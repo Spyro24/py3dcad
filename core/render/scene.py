@@ -534,6 +534,35 @@ class SceneRenderer:
                 pygame.draw.lines(
                     surface, color, len(points) >= 3, points, self._s(2)
                 )
+            for start, end in sketch.lines:
+                start_point = camera.project(
+                    point_on_plane(frame, start), center
+                )
+                end_point = camera.project(
+                    point_on_plane(frame, end), center
+                )
+                self._draw_sketch_segment(
+                    surface, color, start_point, end_point,
+                    sketch.line_type,
+                )
+
+    def _draw_sketch_segment(
+        self, surface: pygame.Surface, color: Color,
+        start: Point2, end: Point2, line_type: str,
+    ) -> None:
+        width = self._s(2)
+        if line_type == "construction":
+            self._draw_dashed_line(
+                surface, color, start, end, width,
+                dash=self._s(5), gap=self._s(3),
+            )
+        elif line_type == "center":
+            self._draw_dashed_line(
+                surface, color, start, end, width,
+                dash=self._s(12), gap=self._s(4),
+            )
+        else:
+            pygame.draw.line(surface, color, start, end, width)
 
     def _draw_sketch_points(
         self,

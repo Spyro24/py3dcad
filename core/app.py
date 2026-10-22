@@ -6,7 +6,13 @@ from typing import Dict, List, Optional
 
 import pygame
 
-from .commands import AddExtrudeCommand, AddPointCommand, AddSketchCommand, CommandStack
+from .commands import (
+    AddExtrudeCommand,
+    AddLineCommand,
+    AddPointCommand,
+    AddSketchCommand,
+    CommandStack,
+)
 from .config import Config, format_opened
 from .document import Document
 from .faces import face_for_ref
@@ -48,6 +54,7 @@ class Application:
             on_new_sketch=self.new_sketch,
             on_extrude=self.extrude_active,
             on_add_point=self.add_point,
+            on_add_line=self.add_line,
             on_select_sketch=self.select_sketch,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
@@ -282,6 +289,17 @@ class Application:
         if sketch is None:
             return
         stack.execute(AddPointCommand(document, sketch, point))
+
+    def add_line(self, start: Point, end: Point) -> None:
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        stack.execute(AddLineCommand(document, sketch, start, end))
 
     def extrude_active(self) -> None:
         self._playing = False

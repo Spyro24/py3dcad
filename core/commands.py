@@ -121,6 +121,45 @@ class AddPointCommand(Command):
         self.document.dirty = True
 
 
+class AddLineCommand(Command):
+    """Add a straight line segment to a sketch."""
+
+    kind = "line"
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        start: Point,
+        end: Point,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.start = start
+        self.end = end
+        self.index: Optional[int] = None
+
+    @property
+    def label(self) -> str:
+        return "Line"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self.index is None:
+            self.index = len(self.sketch.lines)
+        self.index = min(self.index, len(self.sketch.lines))
+        self.sketch.lines.insert(self.index, (self.start, self.end))
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.index is not None and self.index < len(self.sketch.lines):
+            self.sketch.lines.pop(self.index)
+            self.document.dirty = True
+
+
 class AddExtrudeCommand(Command):
     """Extrude a sketch into a solid feature."""
 

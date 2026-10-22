@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..sketch import Point
+from ..sketch import Point, point_on_plane
 from .layout import Rect, UILayout
 from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchPaletteWindow, SketchPaletteAction
 from .viewport import Viewport
@@ -47,6 +47,7 @@ class Workspace:
 
     TOOL_LABELS = {
         "sketch": "Sketch",
+        "line": "Line",
         "point": "Point",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
@@ -101,13 +102,19 @@ class Workspace:
             ("finish_sketch", None, False),
         )),
     )
-    ACTIVE_SKETCH_TOOLS = ("point", "finish_sketch")
+    ACTIVE_SKETCH_TOOLS = ("line", "point", "finish_sketch")
+    LINE_MENU_ITEMS = (
+        ("normal", "Line"),
+        ("construction", "Construction Line"),
+        ("center", "Centerline"),
+    )
 
     def __init__(
         self,
         on_new_sketch: Callable[[], None],
         on_extrude: Callable[[], None],
         on_add_point: Callable[[Point], None],
+        on_add_line: Callable[[Point, Point], None],
         on_select_sketch: Callable[[int], None],
         on_history_jump: Callable[[int], None],
         on_history_delete: Callable[[int], None],
@@ -117,6 +124,7 @@ class Workspace:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
         self.on_add_point = on_add_point
+        self.on_add_line = on_add_line
         self.on_select_sketch = on_select_sketch
         self.on_history_jump = on_history_jump
         self.on_history_delete = on_history_delete
@@ -129,6 +137,10 @@ class Workspace:
         self._hover_mode: Optional[str] = None
         self._active_mode_name = self.ACTIVE_MODE
         self._selected_tool: Optional[str] = None
+        self._line_start: Optional[Point] = None
+        self._line_preview: Optional[Point] = None
+        self._line_menu_open = False
+        self._line_menu_hover = -1
         self._hover_sketch: Optional[int] = None
         self._hover_plane: Optional[int] = None
         self._hover_control: Optional[str] = None
@@ -197,10 +209,22 @@ class Workspace:
         """Start sketch editing with the point tool selected."""
         self._active_mode_name = self.SKETCH_MODE
         self._selected_tool = "point"
+        self._reset_line_state()
 
     def deselect_tool(self) -> None:
         """Clear the current sketch tool without leaving sketch mode."""
         self._selected_tool = None
+        self._reset_line_state()
+
+    def _reset_line_state(self) -> None:
+        self._line_start = None
+        self._line_preview = None
+        self._line_menu_open = False
+        self._line_menu_hover = -1
+
+    def _select_tool(self, tool: Optional[str]) -> None:
+        self._selected_tool = tool
+        self._reset_line_state()
 
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
@@ -259,8 +283,9 @@ class Workspace:
             surface,
             layout.viewport,
             document,
-            self._selected_tool == "point",
+            self._selected_tool,
         )
+        self._draw_line_preview(surface, layout.viewport, document)
         if layout.command_bar.w > 0:
             self._draw_command_bar(
                 surface, layout.command_bar, position, len(history)
@@ -273,6 +298,7 @@ class Workspace:
             self.sketch_palette_window.draw(surface, layout.viewport)
         else:
             self.create_sketch_window.draw(surface, layout.viewport)
+        self._draw_line_menu(surface, layout.toolbar, document)
 
     def _sync_history_document(self, document: Document) -> None:
         if document.id != self._history_document:
@@ -288,9 +314,11 @@ class Workspace:
             self._hover_control = None
             self._hover_sketches_folder = False
             self._sketches_expanded = True
+            self._reset_line_state()
             self.close_create_sketch_dialog()
         if document.sketch(document.active_sketch_id) is None:
             self._selected_tool = None
+            self._reset_line_state()
             if self._active_mode_name == self.SKETCH_MODE:
                 self._active_mode_name = self.ACTIVE_MODE
 
@@ -522,6 +550,94 @@ class Workspace:
             self._s(46),
         )
 
+    def _toolbar_dropdown_rect(
+        self, item: ToolbarItem
+    ) -> Optional[pygame.Rect]:
+        if item.label is None or not item.dropdown:
+            return None
+        self._init_fonts()
+        label_width = self._font_small.size(item.label)[0]
+        label_right = item.rect.centerx + label_width // 2
+        caret_y = (
+            item.rect.bottom + self._s(8)
+            + self._font_small.get_height() // 2
+        )
+        return pygame.Rect(
+            label_right + self._s(2) - self._s(5),
+            caret_y - self._s(8),
+            self._s(15),
+            self._s(16),
+        )
+
+    def _line_menu_geometry(
+        self, region: Rect, document: Document
+    ) -> Optional[
+        Tuple[pygame.Rect, List[pygame.Rect], Optional[pygame.Rect]]
+    ]:
+        if not self._sketch_toolbar_visible(document):
+            return None
+        line_item: Optional[ToolbarItem] = None
+        for group in self._sketch_toolbar_groups(region, document):
+            for item in group.items:
+                if item.action == "line":
+                    line_item = item
+                    break
+            if line_item is not None:
+                break
+        if line_item is None:
+            return None
+        padding = self._s(4)
+        row_height = self._s(28)
+        width = self._s(190)
+        panel = pygame.Rect(
+            line_item.rect.x - padding,
+            region.bottom + self._s(2),
+            width,
+            row_height * len(self.LINE_MENU_ITEMS) + padding * 2,
+        )
+        panel.x = max(
+            region.x + self._s(8),
+            min(panel.x, region.right - panel.w - self._s(8)),
+        )
+        rows = [
+            pygame.Rect(
+                panel.x + padding,
+                panel.y + padding + index * row_height,
+                panel.w - padding * 2,
+                row_height,
+            )
+            for index in range(len(self.LINE_MENU_ITEMS))
+        ]
+        return panel, rows, self._toolbar_dropdown_rect(line_item)
+
+    def _line_menu_index_at(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> int:
+        geometry = self._line_menu_geometry(region, document)
+        if geometry is None:
+            return -1
+        _, rows, _ = geometry
+        for index, rect in enumerate(rows):
+            if rect.collidepoint(pos):
+                return index
+        return -1
+
+    def _choose_line_type(self, index: int, document: Document) -> None:
+        if not 0 <= index < len(self.LINE_MENU_ITEMS):
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        key, _ = self.LINE_MENU_ITEMS[index]
+        sketch.line_type = key
+        self.sketch_palette_window.current_line_type = key
+        self._selected_tool = "line"
+        self._line_start = None
+        self._line_preview = None
+        self._line_menu_open = False
+        self._line_menu_hover = -1
+        document.dirty = True
+
     def _handle_sketch_toolbar_click(
         self, pos: Tuple[int, int], region: Rect, document: Document
     ) -> bool:
@@ -529,14 +645,22 @@ class Workspace:
             if group.finish and group.rect.collidepoint(pos):
                 document.active_sketch_id = None
                 self._selected_tool = None
+                self._reset_line_state()
                 self.sketch_palette_window.close()
                 return True
             for item in group.items:
-                if not item.action == "point":
+                if item.action not in ("line", "point"):
                     continue
-                if self._toolbar_item_hit_rect(item).collidepoint(pos):
-                    self._selected_tool = "point"
-                    return True
+                if item.action == "line":
+                    caret = self._toolbar_dropdown_rect(item)
+                    if caret is not None and caret.collidepoint(pos):
+                        self._line_menu_open = not self._line_menu_open
+                        self._line_menu_hover = -1
+                        return True
+                if not self._toolbar_item_hit_rect(item).collidepoint(pos):
+                    continue
+                self._select_tool(item.action)
+                return True
         return False
 
     def _draw_toolbar(
@@ -679,16 +803,18 @@ class Workspace:
                 color = self.text_secondary
             for item in group.items:
                 active = (
-                    item.action == "point"
-                    and self._selected_tool == "point"
+                    item.action in ("line", "point")
+                    and self._selected_tool == item.action
                 )
                 item_hover = (
-                    item.action == "point"
-                    and self._hover_tool == "point"
+                    item.action in ("line", "point")
+                    and self._hover_tool == item.action
                 ) or (
                     item.action == "finish_sketch"
                     and self._hover_tool == "finish_sketch"
                 )
+                if item.action == "line" and self._line_menu_open:
+                    item_hover = True
                 if active or item_hover:
                     pygame.draw.rect(
                         surface, self.header_bg, item.rect,
@@ -748,25 +874,16 @@ class Workspace:
             for index, word in enumerate(("FINISH", "SKETCH")):
                 label = self._font_caption.render(word, True, color)
                 y = region.bottom - self._s(18 - index * 11)
-                label_rect = label.get_rect(
-                    center=(group.rect.centerx, y)
+                surface.blit(
+                    label,
+                    label.get_rect(center=(group.rect.centerx, y)),
                 )
-                surface.blit(label, label_rect)
-                if word == "SKETCH":
-                    self._draw_dropdown_caret(
-                        surface,
-                        label_rect.right + self._s(3),
-                        label_rect.centery,
-                        color,
-                    )
             return
         label = self._font_caption.render(group.caption, True, color)
         y = region.bottom - self._s(11)
-        label_rect = label.get_rect(center=(group.rect.centerx, y))
-        surface.blit(label, label_rect)
-        self._draw_dropdown_caret(
-            surface, label_rect.right + self._s(3), label_rect.centery,
-            self.text_muted,
+        surface.blit(
+            label,
+            label.get_rect(center=(group.rect.centerx, y)),
         )
 
     def _draw_dropdown_caret(
@@ -778,6 +895,109 @@ class Workspace:
             (x + self._s(5), y - self._s(2)),
             (x + self._s(2), y + self._s(2)),
         ])
+
+    def _draw_line_preview(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        if (
+            self._selected_tool != "line"
+            or self._line_start is None
+            or self._line_preview is None
+        ):
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not self._sketch_toolbar_visible(document):
+            return
+        frame = sketch.frame()
+        center = region.center
+        start = self.viewport.camera.project(
+            point_on_plane(frame, self._line_start), center
+        )
+        end = self.viewport.camera.project(
+            point_on_plane(frame, self._line_preview), center
+        )
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        pygame.draw.line(
+            surface, self.accent, start, end, self._s(2)
+        )
+        pygame.draw.circle(
+            surface, self.accent,
+            (round(start[0]), round(start[1])), self._s(3),
+        )
+        surface.set_clip(previous_clip)
+
+    def _draw_line_menu(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        if not self._line_menu_open:
+            return
+        active = document.sketch(document.active_sketch_id)
+        if active is None:
+            return
+        geometry = self._line_menu_geometry(region, document)
+        if geometry is None:
+            return
+        panel, rows, _ = geometry
+        pygame.draw.rect(
+            surface, self.panel_bg, panel, border_radius=self._s(6)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, panel, width=1,
+            border_radius=self._s(6),
+        )
+        for index, ((key, label), rect) in enumerate(
+            zip(self.LINE_MENU_ITEMS, rows)
+        ):
+            selected = active.line_type == key
+            hovered = index == self._line_menu_hover
+            if hovered:
+                pygame.draw.rect(
+                    surface, self.header_bg, rect,
+                    border_radius=self._s(4),
+                )
+            if selected:
+                pygame.draw.rect(
+                    surface, self.accent,
+                    pygame.Rect(
+                        rect.x, rect.y + self._s(4),
+                        self._s(2), rect.h - self._s(8),
+                    ),
+                    border_radius=self._s(1),
+                )
+            color = (
+                self.accent if selected
+                else (self.text_primary if hovered else self.text_secondary)
+            )
+            self._draw_line_type_sample(surface, rect, key, color)
+            text = self._font_small.render(label, True, color)
+            surface.blit(
+                text,
+                text.get_rect(
+                    midleft=(rect.x + self._s(42), rect.centery)
+                ),
+            )
+
+    def _draw_line_type_sample(
+        self, surface: pygame.Surface, rect: pygame.Rect,
+        key: str, color: pygame.Color,
+    ) -> None:
+        x1 = rect.x + self._s(10)
+        x2 = x1 + self._s(26)
+        y = rect.centery
+        width = max(1, self._s(1))
+        if key == "normal":
+            pygame.draw.line(surface, color, (x1, y), (x2, y), width)
+            return
+        dash = self._s(4 if key == "construction" else 9)
+        gap = self._s(3)
+        x = x1
+        while x < x2:
+            stop = min(x + dash, x2)
+            pygame.draw.line(surface, color, (x, y), (stop, y), width)
+            x += dash + gap
+        if key == "center":
+            pygame.draw.circle(surface, color, ((x1 + x2) // 2, y), width)
 
     def _draw_action_group(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -811,17 +1031,10 @@ class Workspace:
             caption, True, self.text_primary
         )
         label_y = region.bottom - self._s(15)
-        label_width = label.get_width() + self._s(9)
-        label_rect = label.get_rect(
-            midleft=(center_x - label_width // 2, label_y)
+        surface.blit(
+            label,
+            label.get_rect(center=(center_x, label_y)),
         )
-        surface.blit(label, label_rect)
-        caret_x = label_rect.right + self._s(3)
-        pygame.draw.polygon(surface, self.text_muted, [
-            (caret_x, label_y - self._s(1)),
-            (caret_x + self._s(6), label_y - self._s(1)),
-            (caret_x + self._s(3), label_y + self._s(3)),
-        ])
         pygame.draw.line(
             surface, self.border_color,
             (right + self._s(14), buttons[0][1].top),
@@ -847,6 +1060,8 @@ class Workspace:
     def _draw_tool_tooltip(
         self, surface: pygame.Surface, region: Rect
     ) -> None:
+        if self._line_menu_open:
+            return
         if self._hover_tool not in self.TOOL_LABELS:
             return
         action = self._hover_tool
@@ -1524,7 +1739,7 @@ class Workspace:
             return pygame.Color(82, 205, 132)
         if kind == "extrude":
             return pygame.Color(78, 148, 235)
-        if kind == "point":
+        if kind in ("line", "point"):
             return pygame.Color(105, 178, 242)
         return pygame.Color(150, 150, 160)
 
@@ -1836,6 +2051,30 @@ class Workspace:
 
         active_sketch = document.sketch(document.active_sketch_id)
 
+        # A click outside the open line-style menu dismisses it without
+        # activating the control underneath.
+        if (
+            self._line_menu_open
+            and event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+        ):
+            geometry = self._line_menu_geometry(layout.toolbar, document)
+            if geometry is not None:
+                panel, item_rects, caret = geometry
+                if panel.collidepoint(event.pos):
+                    for index, rect in enumerate(item_rects):
+                        if rect.collidepoint(event.pos):
+                            self._choose_line_type(index, document)
+                            break
+                    return True
+                if caret is not None and caret.collidepoint(event.pos):
+                    self._line_menu_open = False
+                    self._line_menu_hover = -1
+                    return True
+            self._line_menu_open = False
+            self._line_menu_hover = -1
+            return True
+
         # Handle sketch palette window when a sketch is being edited
         if active_sketch is not None:
             action = self.sketch_palette_window.handle_event(
@@ -1847,6 +2086,7 @@ class Workspace:
                 elif action == SketchPaletteAction.FINISH_SKETCH:
                     document.active_sketch_id = None
                     self._selected_tool = None
+                    self._reset_line_state()
                     self.sketch_palette_window.close()
                 elif action == SketchPaletteAction.LINETYPE_CHANGED:
                     if active_sketch is not None:
@@ -1897,8 +2137,17 @@ class Workspace:
             for mode, rect in self._mode_rects(layout.toolbar, document):
                 if not rect.collidepoint(event.pos):
                     continue
+                previous_mode = self._active_mode_name
                 self._active_mode_name = mode
                 self._hover_mode = None
+                if (
+                    previous_mode == self.SKETCH_MODE
+                    and mode != self.SKETCH_MODE
+                ):
+                    # Keep the sketch open, but do not leave a hidden sketch
+                    # tool armed while another mode is visible.
+                    self._selected_tool = None
+                    self._reset_line_state()
                 return True
             if self._settings_rect(layout.toolbar).collidepoint(event.pos):
                 if self.on_settings is not None:
@@ -1944,6 +2193,7 @@ class Workspace:
                             document.selected_face = None
                             document.active_sketch_id = None
                             self._selected_tool = None
+                            self._reset_line_state()
                         return True
                     if kind == "sketch":
                         self.on_select_sketch(item_id)
@@ -1953,8 +2203,35 @@ class Workspace:
                     document.selected_face = None
                     return True
 
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self._selected_tool == "line"
+            and self._sketch_toolbar_visible(document)
+            and layout.viewport.collidepoint(event.pos)
+        ):
+            sketch = document.sketch(document.active_sketch_id)
+            if sketch is not None:
+                world = self.viewport.unproject_on_plane(
+                    event.pos, layout.viewport, sketch.frame()
+                )
+                if world is not None:
+                    point = (round(world[0]), round(world[1]))
+                    if self._line_start is None:
+                        self._line_start = point
+                    elif point != self._line_start:
+                        self.on_add_line(self._line_start, point)
+                        self._line_start = point
+                    self._line_preview = point
+                return True
+
         add_point = (
-            self.on_add_point if self._selected_tool == "point" else None
+            self.on_add_point
+            if (
+                self._selected_tool == "point"
+                and self._sketch_toolbar_visible(document)
+            )
+            else None
         )
         handled = self.viewport.handle_event(
             event, layout.viewport, document, add_point
@@ -2054,6 +2331,7 @@ class Workspace:
         elif action == "finish_sketch":
             document.active_sketch_id = None
             self._selected_tool = None
+            self._reset_line_state()
             self.sketch_palette_window.close()
 
     def _update_hover(
@@ -2070,6 +2348,28 @@ class Workspace:
         self._hover_origin = False
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
+        if self._line_menu_open:
+            self._line_menu_hover = self._line_menu_index_at(
+                pos, layout.toolbar, document
+            )
+        else:
+            self._line_menu_hover = -1
+        sketch = document.sketch(document.active_sketch_id)
+        if (
+            self._selected_tool == "line"
+            and sketch is not None
+            and layout.viewport.collidepoint(pos)
+        ):
+            world = self.viewport.unproject_on_plane(
+                pos, layout.viewport, sketch.frame()
+            )
+            self._line_preview = (
+                (round(world[0]), round(world[1]))
+                if world is not None
+                else None
+            )
+        else:
+            self._line_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
             return
         self._hover_settings = self._settings_rect(
@@ -2087,10 +2387,10 @@ class Workspace:
                     self._hover_tool = "finish_sketch"
                     break
                 for item in group.items:
-                    if item.action != "point":
+                    if item.action not in ("line", "point"):
                         continue
                     if self._toolbar_item_hit_rect(item).collidepoint(pos):
-                        self._hover_tool = "point"
+                        self._hover_tool = item.action
                         break
                 if self._hover_tool is not None:
                     break
