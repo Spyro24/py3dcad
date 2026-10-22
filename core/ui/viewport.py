@@ -240,15 +240,14 @@ class Viewport:
                 return True
             if event.button == 1:
                 sketch = document.sketch(document.active_sketch_id)
-                if sketch is not None:
-                    if on_add_point is not None:
-                        world = self.unproject_on_plane(
-                            event.pos, region, sketch.frame()
+                if sketch is not None and on_add_point is not None:
+                    world = self.unproject_on_plane(
+                        event.pos, region, sketch.frame()
+                    )
+                    if world is not None:
+                        on_add_point(
+                            (round(world[0]), round(world[1]))
                         )
-                        if world is not None:
-                            on_add_point(
-                                (round(world[0]), round(world[1]))
-                            )
                     return True
                 face_hit = self.renderer.pick_face(
                     event.pos, region.rect, document, self.camera
@@ -264,10 +263,12 @@ class Viewport:
                     plane = self.renderer.pick_origin_plane(
                         event.pos, region.rect, self.camera
                     )
-                document.selected_face = None
-                document.selected_plane = plane
-                document.active_sketch_id = None
-                return True
+                if plane is not None:
+                    document.selected_face = None
+                    document.selected_plane = plane
+                    document.active_sketch_id = None
+                    return True
+                return False
 
         if event.type == pygame.MOUSEBUTTONUP and event.button == 2:
             if self._panning or self._orbiting:
