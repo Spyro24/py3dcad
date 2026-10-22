@@ -60,6 +60,8 @@ class Workspace:
         self.scale = 1.0
         self.viewport = Viewport()
         self._hover_tool: Optional[str] = None
+        self._hover_mode: Optional[str] = None
+        self._active_mode_name = self.ACTIVE_MODE
         self._hover_sketch: Optional[int] = None
         self._hover_plane: Optional[int] = None
         self._hover_control: Optional[str] = None
@@ -100,6 +102,7 @@ class Workspace:
         self.scale = scale
         self.viewport.set_scale(scale)
         self._hover_tool = None
+        self._hover_mode = None
         self._hover_sketch = None
         self._hover_plane = None
         self._hover_control = None
@@ -194,6 +197,8 @@ class Workspace:
         if document.id != self._history_document:
             self._history_document = document.id
             self._selected_action = None
+            self._active_mode_name = self.ACTIVE_MODE
+            self._hover_mode = None
             self._hover_action = None
             self._hover_control = None
             self._hover_sketches_folder = False
@@ -231,11 +236,10 @@ class Workspace:
             return (Workspace.SKETCH_MODE,) + Workspace.MODES
         return Workspace.MODES
 
-    @classmethod
-    def _active_mode(cls, document: Document) -> str:
+    def _active_mode(self, document: Document) -> str:
         if document.sketch(document.active_sketch_id) is not None:
-            return cls.SKETCH_MODE
-        return cls.ACTIVE_MODE
+            return self.SKETCH_MODE
+        return self._active_mode_name
 
     def _mode_rects(
         self, region: Rect, document: Document
@@ -281,7 +285,6 @@ class Workspace:
             states = (
                 ("point", True),
                 ("finish_sketch", True),
-                ("extrude", extrude_ready),
             )
         else:
             states = (
@@ -385,12 +388,20 @@ class Workspace:
         active_mode = self._active_mode(document)
         for mode, rect in self._mode_rects(region, document):
             active = mode == active_mode
+            hovered = mode == self._hover_mode and not active
+            if hovered:
+                pygame.draw.rect(
+                    surface, self.header_bg, rect,
+                    border_radius=self._s(3),
+                )
             if active:
                 color = (
                     self._kind_color("sketch")
                     if mode == self.SKETCH_MODE
                     else self.text_primary
                 )
+            elif hovered:
+                color = self.text_secondary
             else:
                 color = self.text_muted
             label = self._font_tab.render(mode, True, color)
@@ -1300,6 +1311,17 @@ class Workspace:
                         return True
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for mode, rect in self._mode_rects(layout.toolbar, document):
+                if not rect.collidepoint(event.pos):
+                    continue
+                if mode == self.SKETCH_MODE:
+                    return True
+                if document.active_sketch_id is not None:
+                    document.active_sketch_id = None
+                    self.sketch_palette_window.close()
+                self._active_mode_name = mode
+                self._hover_mode = None
+                return True
             if self._settings_rect(layout.toolbar).collidepoint(event.pos):
                 if self.on_settings is not None:
                     self.on_settings()
@@ -1451,6 +1473,7 @@ class Workspace:
     ) -> None:
         self._mouse_pos = pos
         self._hover_tool = None
+        self._hover_mode = None
         self._hover_sketch = None
         self._hover_plane = None
         self._hover_control = None
@@ -1463,6 +1486,10 @@ class Workspace:
         self._hover_settings = self._settings_rect(
             layout.toolbar
         ).collidepoint(pos)
+        for mode, rect in self._mode_rects(layout.toolbar, document):
+            if rect.collidepoint(pos):
+                self._hover_mode = mode
+                break
         for action, rect, enabled in self._toolbar_buttons(
             layout.toolbar, document
         ):

@@ -220,13 +220,17 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Left: workspace tile with icon, `DESIGN` and the muted `workspace` sublabel.
 - Centre: uppercase mode tabs. The active mode uses primary text and a 2 px
   underline; inactive modes are muted.
+- Mode tabs are clickable. Hover adds the raised surface; switching to a
+  non-sketch mode while editing ends sketch editing and restores the tools for
+  that mode.
 - While a sketch is being edited, a `SKETCH` tab is prepended and becomes the
   active mode. It uses the green `sketch` kind colour for its label and
   underline; the normal mode tabs remain muted.
 - Below the modes: square action buttons. Normal mode shows Sketch and Extrude
-  under the bold `CREATE` caption. Sketch mode shows Point (selected), Finish
-  Sketch and Extrude under the bold `SKETCH` caption. Hover adds the raised
-  surface plus a 1 px border; the selected tool gets a 2 px accent border.
+  under the bold `CREATE` caption. Sketch mode shows Point (selected) and Finish
+  Sketch under the bold `SKETCH` caption; Extrude stays in the solid tools.
+  Hover adds the raised surface plus a 1 px border; the selected tool gets a
+  2 px accent border.
 - Right: gear icon button, 28 x 28. Tooltips use `field`-dark background,
   1 px border and 8 px horizontal / 4 px vertical padding.
 
