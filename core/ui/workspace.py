@@ -89,8 +89,8 @@ class Workspace:
             ("circular_pattern", None, True),
         )),
         ("CONSTRAINTS", (
-            ("constraint_vertical", None, True),
-            ("constraint_horizontal", None, False),
+            ("constraint_vertical", "V", True),
+            ("constraint_horizontal", "H", False),
             ("constraint_perpendicular", None, False),
             ("constraint_tangent", None, False),
             ("constraint_equal", None, False),
@@ -116,6 +116,11 @@ class Workspace:
         ("normal", "Line"),
         ("construction", "Construction Line"),
         ("center", "Centerline"),
+    )
+    CONSTRAINT_MENU_ITEMS = (
+        ("auto", "Auto (Horizontal/Vertical)"),
+        ("vertical", "Vertical"),
+        ("horizontal", "Horizontal"),
     )
 
     def __init__(
@@ -156,6 +161,8 @@ class Workspace:
         self._line_preview: Optional[Point] = None
         self._line_menu_open = False
         self._line_menu_hover = -1
+        self._constraint_menu_open = False
+        self._constraint_menu_hover = -1
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
         self._drag_point_index: Optional[int] = None
@@ -262,6 +269,8 @@ class Workspace:
         self._line_preview = None
         self._line_menu_open = False
         self._line_menu_hover = -1
+        self._constraint_menu_open = False
+        self._constraint_menu_hover = -1
 
     def _select_tool(self, tool: Optional[str]) -> None:
         self._selected_tool = tool
@@ -345,6 +354,57 @@ class Workspace:
         else:
             self.create_sketch_window.draw(surface, layout.viewport)
         self._draw_line_menu(surface, layout.toolbar, document)
+        self._draw_constraint_menu(surface, layout.toolbar, document)
+
+    def _draw_constraint_menu(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        if not self._constraint_menu_open:
+            return
+        geometry = self._constraint_menu_geometry(region, document)
+        if geometry is None:
+            return
+        panel, rows, _ = geometry
+        pygame.draw.rect(
+            surface, self.panel_bg, panel, border_radius=self._s(6)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, panel, width=1,
+            border_radius=self._s(6),
+        )
+        for index, ((key, label), rect) in enumerate(
+            zip(self.CONSTRAINT_MENU_ITEMS, rows)
+        ):
+            hovered = index == self._constraint_menu_hover
+            auto_on = self.sketch_palette_window.options.get("constraints", True)
+            selected = (key == "auto" and auto_on) or (
+                key in ("vertical", "horizontal") and not auto_on
+            )
+            if hovered:
+                pygame.draw.rect(
+                    surface, self.header_bg, rect,
+                    border_radius=self._s(4),
+                )
+            if selected:
+                pygame.draw.rect(
+                    surface, self.accent,
+                    pygame.Rect(
+                        rect.x, rect.y + self._s(4),
+                        self._s(2), rect.h - self._s(8),
+                    ),
+                    border_radius=self._s(1),
+                )
+            color = (
+                self.accent if selected
+                else (self.text_primary if hovered else self.text_secondary)
+            )
+            text = self._font_small.render(label, True, color)
+            surface.blit(
+                text,
+                text.get_rect(
+                    midleft=(rect.x + self._s(12), rect.centery)
+                ),
+            )
 
     def _sync_history_document(self, document: Document) -> None:
         if document.id != self._history_document:
@@ -557,7 +617,10 @@ class Workspace:
                     action=action,
                     rect=pygame.Rect(item_x, icon_y, width, icon_height),
                     label=(
-                        label if create_group and not compact else None
+                        label
+                        if (create_group or caption == "CONSTRAINTS")
+                        and not compact
+                        else None
                     ),
                     placeholder=action not in self.ACTIVE_SKETCH_TOOLS,
                     dropdown=dropdown,
@@ -727,6 +790,72 @@ class Workspace:
         self._clear_sketch_selection()
         document.dirty = True
 
+    def _constraint_menu_geometry(
+        self, region: Rect, document: Document
+    ) -> Optional[Tuple[Rect, List[pygame.Rect], Optional[pygame.Rect]]]:
+        groups = self._sketch_toolbar_groups(region, document)
+        for group in groups:
+            for item in group.items:
+                if item.action == "constraint_vertical":
+                    return self._dropdown_menu_geometry(item, len(self.CONSTRAINT_MENU_ITEMS))
+        return None
+
+    def _dropdown_menu_geometry(
+        self, item: ToolbarItem, item_count: int
+    ) -> Tuple[Rect, List[pygame.Rect], Optional[pygame.Rect]]:
+        self._init_fonts()
+        padding = self._s(6)
+        row_height = self._s(28)
+        max_label = max(self._font_small.size(label)[0] for _, label in self.CONSTRAINT_MENU_ITEMS)
+        width = max(item.rect.w, max_label + padding * 2)
+        panel = pygame.Rect(
+            item.rect.x,
+            item.rect.bottom + self._s(4),
+            width,
+            padding * 2 + item_count * row_height,
+        )
+        panel.x = max(panel.x, self._s(4))
+        if panel.right > self._s(1280):
+            panel.x = self._s(1280) - panel.w - self._s(4)
+        rows = [
+            pygame.Rect(
+                panel.x + padding,
+                panel.y + padding + index * row_height,
+                panel.w - padding * 2,
+                row_height,
+            )
+            for index in range(item_count)
+        ]
+        return panel, rows, self._toolbar_dropdown_rect(item)
+
+    def _constraint_menu_index_at(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> int:
+        geometry = self._constraint_menu_geometry(region, document)
+        if geometry is None:
+            return -1
+        _, rows, _ = geometry
+        for index, rect in enumerate(rows):
+            if rect.collidepoint(pos):
+                return index
+        return -1
+
+    def _choose_constraint(self, index: int, document: Document) -> None:
+        if not 0 <= index < len(self.CONSTRAINT_MENU_ITEMS):
+            return
+        key, _ = self.CONSTRAINT_MENU_ITEMS[index]
+        self.sketch_palette_window.options["constraints"] = (key == "auto")
+        if key in ("vertical", "horizontal"):
+            selected = self._selected_sketch_entity
+            if selected is not None and selected[0] == "line":
+                sketch = document.sketch(document.active_sketch_id)
+                if sketch is not None and 0 <= selected[1] < len(sketch.edges):
+                    self.on_set_edge_constraint(selected[1], key)
+        self._constraint_menu_open = False
+        self._constraint_menu_hover = -1
+        self._clear_sketch_selection()
+        document.dirty = True
+
     def _handle_sketch_toolbar_click(
         self, pos: Tuple[int, int], region: Rect, document: Document
     ) -> bool:
@@ -741,9 +870,13 @@ class Workspace:
             for item in group.items:
                 if item.action in self.SKETCH_CONSTRAINT_ACTIONS:
                     if self._toolbar_item_hit_rect(item).collidepoint(pos):
-                        self._apply_edge_constraint(
-                            item.action, document
-                        )
+                        if item.action == "constraint_vertical":
+                            caret = self._toolbar_dropdown_rect(item)
+                            if caret is not None and caret.collidepoint(pos):
+                                self._constraint_menu_open = not self._constraint_menu_open
+                                self._constraint_menu_hover = -1
+                                return True
+                        self._apply_edge_constraint(item.action, document)
                         return True
                     continue
                 if item.action not in ("line", "point"):
@@ -2465,6 +2598,28 @@ class Workspace:
             self._line_menu_hover = -1
             return True
 
+        if (
+            self._constraint_menu_open
+            and event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+        ):
+            geometry = self._constraint_menu_geometry(layout.toolbar, document)
+            if geometry is not None:
+                panel, item_rects, caret = geometry
+                if panel.collidepoint(event.pos):
+                    for index, rect in enumerate(item_rects):
+                        if rect.collidepoint(event.pos):
+                            self._choose_constraint(index, document)
+                            break
+                    return True
+                if caret is not None and caret.collidepoint(event.pos):
+                    self._constraint_menu_open = False
+                    self._constraint_menu_hover = -1
+                    return True
+            self._constraint_menu_open = False
+            self._constraint_menu_hover = -1
+            return True
+
         # Commit a drag before any panel can consume the release.
         if (
             event.type == pygame.MOUSEBUTTONUP
@@ -2962,6 +3117,12 @@ class Workspace:
             )
         else:
             self._line_menu_hover = -1
+        if self._constraint_menu_open:
+            self._constraint_menu_hover = self._constraint_menu_index_at(
+                pos, layout.toolbar, document
+            )
+        else:
+            self._constraint_menu_hover = -1
         sketch = document.sketch(document.active_sketch_id)
         if self._drag_point_index is not None and sketch is not None:
             if layout.viewport.collidepoint(pos):
