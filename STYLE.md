@@ -252,19 +252,23 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   endpoints stay visible and moving one endpoint moves every attached segment.
   Only a closed loop of edges is an extrusion profile. Hover adds the raised
   surface plus a 1 px border; the selected tool gets a 2 px accent border.
-- Sketch entities are directly editable when Point or no tool is armed.
-  Clicking a point selects it and starts a drag; releasing after movement
-  commits one undoable move. Clicking a line selects it. Points take hit-test
-  priority over lines, and clicking empty space clears the selection before the
-  active Point or Line tool acts. Hover outlines sketch points and lines in
-  `geometry_hover`; selection uses a thicker `geometry_selection` outline.
+- Sketch entities are directly editable. With Point or no tool armed, clicking
+  a point selects it and starts a drag; releasing after movement commits one
+  undoable move. Clicking a line selects it and starts an edge drag with any
+  tool; dragging translates the edge by moving both endpoint entities, so
+  attached segments follow. Releasing after movement commits one hidden
+  undoable move. Points take hit-test priority over lines, and clicking empty
+  space clears the selection before the active Point or Line tool acts. Hover
+  outlines sketch points and lines in `geometry_hover`; selection uses a
+  thicker `geometry_selection` outline.
 - With the Line tool armed, clicking an existing point snaps to it and starts
   or continues the chain instead of starting a point drag. This keeps shared
-  segment endpoints connected while drawing.
+  segment endpoints connected while drawing. Clicking or dragging a line
+  selects or moves the edge instead of starting a line chain.
 - `Esc` deselects the current sketch tool, clears the entity selection and
-  cancels an in-progress line or point drag. It does not leave sketch mode or
-  close the sketch palette. Click Point or Line to draw again. Clicking
-  `Finish Sketch` ends sketch editing and restores the solid tools.
+  cancels an in-progress line, point drag or edge drag. It does not leave
+  sketch mode or close the sketch palette. Click Point or Line to draw again.
+  Clicking `Finish Sketch` ends sketch editing and restores the solid tools.
 - Right: gear icon button, 28 x 28. Tooltips use `field`-dark background,
   1 px border and 8 px horizontal / 4 px vertical padding.
 

@@ -117,6 +117,7 @@ class Workspace:
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point], None],
         on_move_point: Callable[[int, Point], None],
+        on_move_edge: Callable[[int, Point, Point], None],
         on_select_sketch: Callable[[int], None],
         on_history_jump: Callable[[int], None],
         on_history_delete: Callable[[int], None],
@@ -128,6 +129,7 @@ class Workspace:
         self.on_add_point = on_add_point
         self.on_add_line = on_add_line
         self.on_move_point = on_move_point
+        self.on_move_edge = on_move_edge
         self.on_select_sketch = on_select_sketch
         self.on_history_jump = on_history_jump
         self.on_history_delete = on_history_delete
@@ -149,6 +151,10 @@ class Workspace:
         self._drag_point_index: Optional[int] = None
         self._drag_point_origin: Optional[Point] = None
         self._drag_point_current: Optional[Point] = None
+        self._drag_edge_index: Optional[int] = None
+        self._drag_edge_origin: Optional[Tuple[Point, Point]] = None
+        self._drag_edge_anchor: Optional[Point] = None
+        self._drag_edge_current: Optional[Tuple[Point, Point]] = None
         self._hover_sketch: Optional[int] = None
         self._hover_plane: Optional[int] = None
         self._hover_control: Optional[str] = None
@@ -236,6 +242,10 @@ class Workspace:
         self._drag_point_index = None
         self._drag_point_origin = None
         self._drag_point_current = None
+        self._drag_edge_index = None
+        self._drag_edge_origin = None
+        self._drag_edge_anchor = None
+        self._drag_edge_current = None
 
     def _reset_line_state(self) -> None:
         self._line_start = None
@@ -380,6 +390,11 @@ class Workspace:
         if (
             self._drag_point_index is not None
             and not 0 <= self._drag_point_index < len(sketch.points)
+        ):
+            self._clear_sketch_selection()
+        if (
+            self._drag_edge_index is not None
+            and not 0 <= self._drag_edge_index < len(sketch.edges)
         ):
             self._clear_sketch_selection()
 
@@ -1077,11 +1092,15 @@ class Workspace:
                 surface, sketch, region, hovered,
                 self.geometry_hover, False,
             )
-        if selected is not None:
+        if selected is not None and not (
+            self._drag_edge_index is not None
+            and selected == ("line", self._drag_edge_index)
+        ):
             self._draw_sketch_entity_highlight(
                 surface, sketch, region, selected, self.geometry_selection, True
             )
         self._draw_point_drag_preview(surface, sketch, region)
+        self._draw_edge_drag_preview(surface, sketch, region)
         surface.set_clip(previous_clip)
 
     def _draw_point_drag_preview(
@@ -1126,6 +1145,43 @@ class Workspace:
             (round(screen_current[0]), round(screen_current[1])),
             self._s(5), width=max(1, self._s(2)),
         )
+
+    def _draw_edge_drag_preview(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        index = self._drag_edge_index
+        current = self._drag_edge_current
+        if (
+            index is None
+            or current is None
+            or not 0 <= index < len(sketch.edges)
+        ):
+            return
+        first, second = sketch.edges[index]
+        preview_points = list(sketch.points)
+        preview_points[first] = current[0]
+        preview_points[second] = current[1]
+        for edge_index, (start, end) in enumerate(sketch.edges):
+            if first not in (start, end) and second not in (start, end):
+                continue
+            screen_start = self._project_sketch_point(
+                sketch, preview_points[start], region
+            )
+            screen_end = self._project_sketch_point(
+                sketch, preview_points[end], region
+            )
+            pygame.draw.line(
+                surface, self.geometry_selection,
+                screen_start, screen_end,
+                max(1, self._s(3 if edge_index == index else 1)),
+            )
+        for point in current:
+            screen = self._project_sketch_point(sketch, point, region)
+            pygame.draw.circle(
+                surface, self.geometry_selection,
+                (round(screen[0]), round(screen[1])),
+                self._s(5), width=max(1, self._s(2)),
+            )
 
     def _draw_sketch_entity_highlight(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect,
@@ -2303,13 +2359,20 @@ class Workspace:
             self._line_menu_hover = -1
             return True
 
-        # Commit a point drag before any panel can consume the release.
+        # Commit a drag before any panel can consume the release.
         if (
             event.type == pygame.MOUSEBUTTONUP
             and event.button == 1
             and self._drag_point_index is not None
         ):
             self._finish_point_drag(document)
+            return True
+        if (
+            event.type == pygame.MOUSEBUTTONUP
+            and event.button == 1
+            and self._drag_edge_index is not None
+        ):
+            self._finish_edge_drag(document)
             return True
 
         # Handle sketch palette window when a sketch is being edited
@@ -2471,6 +2534,10 @@ class Workspace:
                             self._drag_point_index = index
                             self._drag_point_origin = sketch.points[index]
                             self._drag_point_current = sketch.points[index]
+                        else:
+                            self._start_edge_drag(
+                                index, sketch, event.pos, layout.viewport
+                            )
                         return True
                     self._clear_sketch_selection()
 
@@ -2644,6 +2711,39 @@ class Workspace:
                 return index
         return len(full_history)
 
+    def _start_edge_drag(
+        self, index: int, sketch: Sketch, pos: Tuple[int, int], region: Rect
+    ) -> None:
+        if not 0 <= index < len(sketch.edges):
+            return
+        anchor = self.viewport.unproject_on_plane(
+            pos, region, sketch.frame()
+        )
+        if anchor is None:
+            return
+        start, end = sketch.lines[index]
+        self._drag_edge_index = index
+        self._drag_edge_origin = (start, end)
+        self._drag_edge_anchor = (anchor[0], anchor[1])
+        self._drag_edge_current = (start, end)
+
+    def _finish_edge_drag(self, document: Document) -> None:
+        index = self._drag_edge_index
+        current = self._drag_edge_current
+        origin = self._drag_edge_origin
+        self._drag_edge_index = None
+        self._drag_edge_origin = None
+        self._drag_edge_anchor = None
+        self._drag_edge_current = None
+        if index is None or current is None or origin is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.edges):
+            return
+        if current == origin:
+            return
+        self.on_move_edge(index, current[0], current[1])
+
     def _finish_point_drag(self, document: Document) -> None:
         index = self._drag_point_index
         current = self._drag_point_current
@@ -2704,6 +2804,31 @@ class Workspace:
                     )
             self._hover_sketch_entity = (
                 "point", self._drag_point_index
+            )
+            self._line_preview = None
+            return
+        if self._drag_edge_index is not None and sketch is not None:
+            if layout.viewport.collidepoint(pos):
+                world = self.viewport.unproject_on_plane(
+                    pos, layout.viewport, sketch.frame()
+                )
+                anchor = self._drag_edge_anchor
+                origin = self._drag_edge_origin
+                if world is not None and anchor is not None and origin is not None:
+                    delta_x = round(world[0] - anchor[0])
+                    delta_y = round(world[1] - anchor[1])
+                    self._drag_edge_current = (
+                        (
+                            origin[0][0] + delta_x,
+                            origin[0][1] + delta_y,
+                        ),
+                        (
+                            origin[1][0] + delta_x,
+                            origin[1][1] + delta_y,
+                        ),
+                    )
+            self._hover_sketch_entity = (
+                "line", self._drag_edge_index
             )
             self._line_preview = None
             return

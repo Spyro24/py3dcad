@@ -1,7 +1,7 @@
 """Undoable document editing commands."""
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .document import Document
 from .sketch import Extrude, PlaneFrame, Point, Sketch, normalize_plane
@@ -165,6 +165,72 @@ class MovePointCommand(Command):
             and 0 <= self.index < len(self.sketch.points)
         ):
             self.sketch.points[self.index] = self.previous
+            self.document.dirty = True
+
+
+class MoveEdgeCommand(Command):
+    """Translate a sketch edge by moving both of its point entities."""
+
+    kind = "move_edge"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        index: int,
+        start: Point,
+        end: Point,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.index = index
+        self.start = start
+        self.end = end
+        self.indices: Optional[Tuple[int, int]] = None
+        self.previous: Optional[Tuple[Point, Point]] = None
+        if 0 <= index < len(sketch.edges):
+            first, second = sketch.edges[index]
+            if (
+                0 <= first < len(sketch.points)
+                and 0 <= second < len(sketch.points)
+            ):
+                self.indices = (first, second)
+                self.previous = (
+                    sketch.points[first],
+                    sketch.points[second],
+                )
+
+    @property
+    def label(self) -> str:
+        return "Move Edge"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self.indices is None:
+            return
+        first, second = self.indices
+        if (
+            0 <= first < len(self.sketch.points)
+            and 0 <= second < len(self.sketch.points)
+        ):
+            self.sketch.points[first] = self.start
+            self.sketch.points[second] = self.end
+            self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.indices is None or self.previous is None:
+            return
+        first, second = self.indices
+        if (
+            0 <= first < len(self.sketch.points)
+            and 0 <= second < len(self.sketch.points)
+        ):
+            self.sketch.points[first] = self.previous[0]
+            self.sketch.points[second] = self.previous[1]
             self.document.dirty = True
 
 
