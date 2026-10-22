@@ -86,7 +86,7 @@ class Workspace:
             ("circular_pattern", None, True),
         )),
         ("CONSTRAINTS", (
-            ("constraint_auto", "Auto", True),
+            ("constraint_auto", "V/H", True),
         )),
         ("INSPECT", (
             ("measure", None, True),
@@ -845,6 +845,9 @@ class Workspace:
                 sketch = document.sketch(document.active_sketch_id)
                 if sketch is not None and 0 <= selected[1] < len(sketch.edges):
                     self.on_set_edge_constraint(selected[1], key)
+            # Deselect any active tool when applying a constraint
+            self._selected_tool = None
+            self._reset_line_state()
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
         self._clear_sketch_selection()

@@ -246,16 +246,17 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   `Construction Line`, `Centerline`). Choosing a style selects the Line tool,
   updates the sketch and palette line type, and closes the menu. Clicking
   outside the menu dismisses it.
-- The `CONSTRAINTS` group provides a single `Auto` button with a dropdown
+- The `CONSTRAINTS` group provides a single `V/H` button with a dropdown
   menu offering three options: `Auto (Vertical/Horizontal)` (default),
   `Vertical Only`, and `Horizontal Only`. When `Auto` is active, free endpoints
   snap to the horizontal or vertical axis within a 6 px screen-space tolerance
   while drawing lines. Selecting `Vertical Only` or `Horizontal Only` disables
   auto-snapping and applies that constraint to the currently selected edge,
-  rotating it around its first endpoint while preserving its length. The `Auto`
-  button shows a 2 px accent border when auto-snapping is enabled; an `H`/`V`
-  marker appears near constrained edge midpoints. Other constraint icons remain
-  placeholders.
+  rotating it around its first endpoint while preserving its length. The menu
+  items highlight on hover. Choosing a constraint from the dropdown deselects
+  any active drawing tool (Line, Point). The `V/H` button shows a 2 px accent
+  border when auto-snapping is enabled; an `H`/`V` marker appears near
+  constrained edge midpoints. Other constraint icons remain placeholders.
 - Point is selected when sketch editing begins. Point places standalone
   vertices and never connects them; Line draws chained two-click segments
   between points. Every segment references two point entities, so its
@@ -283,10 +284,11 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   only adds a constraint when that point is already exactly aligned. Automatic
   snapping and the on-canvas `H`/`V` markers follow the Sketch Palette
   `Constraints` option; manual toolbar constraints still work when the option
-  is off. The constraint dropdown menu (opened via the caret on the `Auto`
+  is off. The constraint dropdown menu (opened via the caret on the `V/H`
   button) mirrors the palette option and lets you switch between `Auto`,
   `Vertical Only`, and `Horizontal Only` without leaving the toolbar. Clicking
-  the `Auto` button itself toggles auto-snapping on/off.
+  the `V/H` button itself toggles auto-snapping on/off. Selecting a constraint
+  from the dropdown deselects any active drawing tool.
 - `Esc` deselects the current sketch tool, clears the entity selection and
   cancels an in-progress line, point drag or edge drag. It does not leave
   sketch mode or close the sketch palette. Click Point or Line to draw again.
