@@ -24,10 +24,16 @@ class HistoryEntry:
 class Workspace:
     """Draws the document workspace and routes editing interactions."""
 
-    TOOL_LABELS = {"sketch": "Sketch", "extrude": "Extrude"}
+    TOOL_LABELS = {
+        "sketch": "Sketch",
+        "point": "Point",
+        "finish_sketch": "Finish Sketch",
+        "extrude": "Extrude",
+    }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
     ACTIVE_MODE = "SOLID"
+    SKETCH_MODE = "SKETCH"
     ORIGIN_PLANES = ("XY Plane", "YZ Plane", "ZX Plane")
     ORIGIN_PLANE_KEYS = ("XY", "YZ", "ZX")
 
@@ -218,14 +224,28 @@ class Workspace:
             size,
         )
 
+    @staticmethod
+    def _modes(document: Document) -> Tuple[str, ...]:
+        """Return the mode tabs for the document's current edit state."""
+        if document.sketch(document.active_sketch_id) is not None:
+            return (Workspace.SKETCH_MODE,) + Workspace.MODES
+        return Workspace.MODES
+
+    @classmethod
+    def _active_mode(cls, document: Document) -> str:
+        if document.sketch(document.active_sketch_id) is not None:
+            return cls.SKETCH_MODE
+        return cls.ACTIVE_MODE
+
     def _mode_rects(
-        self, region: Rect
+        self, region: Rect, document: Document
     ) -> List[Tuple[str, pygame.Rect]]:
         self._init_fonts()
+        modes = self._modes(document)
         start = self._content_x(region)
         right_limit = self._settings_rect(region).left - self._s(8)
         available = right_limit - start
-        label_widths = [self._font_tab.size(mode)[0] for mode in self.MODES]
+        label_widths = [self._font_tab.size(mode)[0] for mode in modes]
         padding = self._s(20)
         gap = self._s(6)
         for candidate_padding, candidate_gap in (
@@ -243,7 +263,7 @@ class Workspace:
         y = region.y + self._s(10)
         height = self._s(24)
         tabs: List[Tuple[str, pygame.Rect]] = []
-        for mode, label_width in zip(self.MODES, label_widths):
+        for mode, label_width in zip(modes, label_widths):
             width = label_width + padding
             rect = pygame.Rect(x, y, width, height)
             if rect.right > right_limit:
@@ -257,10 +277,17 @@ class Workspace:
     ) -> List[Tuple[str, pygame.Rect, bool]]:
         sketch = document.sketch(document.active_sketch_id)
         extrude_ready = sketch is not None and len(sketch.points) >= 3
-        states = (
-            ("sketch", True),
-            ("extrude", extrude_ready),
-        )
+        if sketch is not None:
+            states = (
+                ("point", True),
+                ("finish_sketch", True),
+                ("extrude", extrude_ready),
+            )
+        else:
+            states = (
+                ("sketch", True),
+                ("extrude", extrude_ready),
+            )
         buttons: List[Tuple[str, pygame.Rect, bool]] = []
         x = self._content_x(region)
         y = region.y + self._s(42)
@@ -289,7 +316,7 @@ class Workspace:
             (divider_x, region.y + self._s(12)),
             (divider_x, region.bottom - self._s(12)),
         )
-        self._draw_modes(surface, region)
+        self._draw_modes(surface, region, document)
         self._draw_action_group(surface, region, document)
         self._draw_settings_button(surface, region)
         self._draw_tool_tooltip(surface, region)
@@ -353,11 +380,19 @@ class Workspace:
         pygame.draw.circle(surface, self.accent, top, self._s(2))
 
     def _draw_modes(
-        self, surface: pygame.Surface, region: Rect
+        self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
-        for mode, rect in self._mode_rects(region):
-            active = mode == self.ACTIVE_MODE
-            color = self.text_primary if active else self.text_muted
+        active_mode = self._active_mode(document)
+        for mode, rect in self._mode_rects(region, document):
+            active = mode == active_mode
+            if active:
+                color = (
+                    self._kind_color("sketch")
+                    if mode == self.SKETCH_MODE
+                    else self.text_primary
+                )
+            else:
+                color = self.text_muted
             label = self._font_tab.render(mode, True, color)
             surface.blit(label, label.get_rect(
                 center=(rect.centerx, rect.centery - self._s(1))
@@ -366,7 +401,7 @@ class Workspace:
                 half = label.get_width() // 2 + self._s(2)
                 y = rect.bottom - self._s(2)
                 pygame.draw.line(
-                    surface, self.text_primary,
+                    surface, color,
                     (rect.centerx - half, y),
                     (rect.centerx + half, y),
                     self._s(2),
@@ -376,15 +411,20 @@ class Workspace:
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
         buttons = self._toolbar_buttons(region, document)
+        in_sketch = document.sketch(document.active_sketch_id) is not None
         for action, rect, enabled in buttons:
             hovered = enabled and action == self._hover_tool
-            if hovered:
+            selected = in_sketch and action == "point"
+            if hovered or selected:
                 pygame.draw.rect(
                     surface, self.header_bg, rect,
                     border_radius=self._s(5),
                 )
                 pygame.draw.rect(
-                    surface, self.border_color, rect, width=1,
+                    surface,
+                    self.accent if selected else self.border_color,
+                    rect,
+                    width=self._s(2 if selected else 1),
                     border_radius=self._s(5),
                 )
             color = (
@@ -398,7 +438,10 @@ class Workspace:
         left = buttons[0][1].left
         right = buttons[-1][1].right
         center_x = (left + right) // 2
-        label = self._font_caption.render("CREATE", True, self.text_primary)
+        caption = "SKETCH" if in_sketch else "CREATE"
+        label = self._font_caption.render(
+            caption, True, self.text_primary
+        )
         label_y = region.bottom - self._s(15)
         label_width = label.get_width() + self._s(9)
         label_rect = label.get_rect(
@@ -439,10 +482,10 @@ class Workspace:
         if self._hover_tool not in self.TOOL_LABELS:
             return
         action = self._hover_tool
-        text = (
-            f"{self.TOOL_LABELS[action]}  "
-            f"({self.TOOL_SHORTCUTS[action]})"
-        )
+        text = self.TOOL_LABELS[action]
+        shortcut = self.TOOL_SHORTCUTS.get(action)
+        if shortcut is not None:
+            text = f"{text}  ({shortcut})"
         label = self._font_small.render(text, True, self.text_primary)
         padding_x = self._s(8)
         padding_y = self._s(4)
@@ -1109,7 +1152,7 @@ class Workspace:
 
     @staticmethod
     def _kind_color(kind: str) -> pygame.Color:
-        if kind == "sketch":
+        if kind in ("sketch", "finish_sketch"):
             return pygame.Color(82, 205, 132)
         if kind == "extrude":
             return pygame.Color(78, 148, 235)
@@ -1171,6 +1214,16 @@ class Workspace:
                         (cx + column * gap - dot, cy + row * gap - dot,
                          dot * 2, dot * 2),
                     )
+        elif kind == "finish_sketch":
+            pygame.draw.lines(
+                surface, color, False,
+                [
+                    (cx - radius, cy),
+                    (cx - radius // 3, cy + radius // 2),
+                    (cx + radius, cy - radius // 2),
+                ],
+                max(2, self._s(2)),
+            )
 
     # ------------------------------------------------------------------
     # Interaction
@@ -1255,7 +1308,7 @@ class Workspace:
                 layout.toolbar, document
             ):
                 if enabled and rect.collidepoint(event.pos):
-                    self._run_tool(action)
+                    self._run_tool(action, document)
                     return True
             if layout.document_tree.collidepoint(event.pos):
                 hit_row = False
@@ -1383,11 +1436,14 @@ class Workspace:
         elif action == "end":
             self.on_history_jump(total)
 
-    def _run_tool(self, action: str) -> None:
+    def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":
             self.on_new_sketch()
         elif action == "extrude":
             self.on_extrude()
+        elif action == "finish_sketch":
+            document.active_sketch_id = None
+            self.sketch_palette_window.close()
 
     def _update_hover(
         self, pos: Tuple[int, int], layout: UILayout,
