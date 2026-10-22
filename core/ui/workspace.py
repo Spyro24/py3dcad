@@ -52,13 +52,10 @@ class Workspace:
         "point": "Point",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
-        "constraint_vertical": "Vertical Constraint",
-        "constraint_horizontal": "Horizontal Constraint",
+        "constraint_auto": "Auto Constraint",
     }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
-    SKETCH_CONSTRAINT_ACTIONS = (
-        "constraint_vertical", "constraint_horizontal"
-    )
+    SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto",)
     SKETCH_INTERACTIVE_ACTIONS = (
         "line", "point", *SKETCH_CONSTRAINT_ACTIONS
     )
@@ -89,12 +86,7 @@ class Workspace:
             ("circular_pattern", None, True),
         )),
         ("CONSTRAINTS", (
-            ("constraint_vertical", "V", True),
-            ("constraint_horizontal", "H", False),
-            ("constraint_perpendicular", None, False),
-            ("constraint_tangent", None, False),
-            ("constraint_equal", None, False),
-            ("constraint_midpoint", None, False),
+            ("constraint_auto", "Auto", True),
         )),
         ("INSPECT", (
             ("measure", None, True),
@@ -118,9 +110,9 @@ class Workspace:
         ("center", "Centerline"),
     )
     CONSTRAINT_MENU_ITEMS = (
-        ("auto", "Auto (Horizontal/Vertical)"),
-        ("vertical", "Vertical"),
-        ("horizontal", "Horizontal"),
+        ("auto", "Auto (Vertical/Horizontal)"),
+        ("vertical", "Vertical Only"),
+        ("horizontal", "Horizontal Only"),
     )
 
     def __init__(
@@ -372,11 +364,11 @@ class Workspace:
             surface, self.border_color, panel, width=1,
             border_radius=self._s(6),
         )
+        auto_on = self.sketch_palette_window.options.get("constraints", True)
         for index, ((key, label), rect) in enumerate(
             zip(self.CONSTRAINT_MENU_ITEMS, rows)
         ):
             hovered = index == self._constraint_menu_hover
-            auto_on = self.sketch_palette_window.options.get("constraints", True)
             selected = (key == "auto" and auto_on) or (
                 key in ("vertical", "horizontal") and not auto_on
             )
@@ -796,7 +788,7 @@ class Workspace:
         groups = self._sketch_toolbar_groups(region, document)
         for group in groups:
             for item in group.items:
-                if item.action == "constraint_vertical":
+                if item.action == "constraint_auto":
                     return self._dropdown_menu_geometry(item, len(self.CONSTRAINT_MENU_ITEMS))
         return None
 
@@ -844,8 +836,10 @@ class Workspace:
         if not 0 <= index < len(self.CONSTRAINT_MENU_ITEMS):
             return
         key, _ = self.CONSTRAINT_MENU_ITEMS[index]
-        self.sketch_palette_window.options["constraints"] = (key == "auto")
-        if key in ("vertical", "horizontal"):
+        if key == "auto":
+            self.sketch_palette_window.options["constraints"] = True
+        else:
+            self.sketch_palette_window.options["constraints"] = False
             selected = self._selected_sketch_entity
             if selected is not None and selected[0] == "line":
                 sketch = document.sketch(document.active_sketch_id)
@@ -868,15 +862,17 @@ class Workspace:
                 self.sketch_palette_window.close()
                 return True
             for item in group.items:
-                if item.action in self.SKETCH_CONSTRAINT_ACTIONS:
-                    if self._toolbar_item_hit_rect(item).collidepoint(pos):
-                        if item.action == "constraint_vertical":
-                            caret = self._toolbar_dropdown_rect(item)
-                            if caret is not None and caret.collidepoint(pos):
-                                self._constraint_menu_open = not self._constraint_menu_open
-                                self._constraint_menu_hover = -1
-                                return True
-                        self._apply_edge_constraint(item.action, document)
+                if item.action == "constraint_auto":
+                    hit_rect = self._toolbar_item_hit_rect(item)
+                    caret = self._toolbar_dropdown_rect(item)
+                    if hit_rect.collidepoint(pos) or (caret is not None and caret.collidepoint(pos)):
+                        if caret is not None and caret.collidepoint(pos):
+                            self._constraint_menu_open = not self._constraint_menu_open
+                            self._constraint_menu_hover = -1
+                            return True
+                        # Click on the button itself toggles auto on/off
+                        self.sketch_palette_window.options["constraints"] = not self.sketch_palette_window.options.get("constraints", True)
+                        document.dirty = True
                         return True
                     continue
                 if item.action not in ("line", "point"):

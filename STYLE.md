@@ -246,14 +246,16 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   `Construction Line`, `Centerline`). Choosing a style selects the Line tool,
   updates the sketch and palette line type, and closes the menu. Clicking
   outside the menu dismisses it.
-- The `CONSTRAINTS` group provides a dropdown menu with three options:
-  `Auto (Horizontal/Vertical)` (default), `Vertical`, and `Horizontal`. When
-  `Auto` is selected, free endpoints snap to the horizontal or vertical axis
-  within a 6 px screen-space tolerance while drawing lines. Selecting `Vertical`
-  or `Horizontal` applies that constraint to the currently selected edge,
-  rotating it around its first endpoint while preserving its length. The
-  matching toolbar button shows a 2 px accent border and an `H`/`V` marker
-  appears near the edge midpoint. Other constraint icons remain placeholders.
+- The `CONSTRAINTS` group provides a single `Auto` button with a dropdown
+  menu offering three options: `Auto (Vertical/Horizontal)` (default),
+  `Vertical Only`, and `Horizontal Only`. When `Auto` is active, free endpoints
+  snap to the horizontal or vertical axis within a 6 px screen-space tolerance
+  while drawing lines. Selecting `Vertical Only` or `Horizontal Only` disables
+  auto-snapping and applies that constraint to the currently selected edge,
+  rotating it around its first endpoint while preserving its length. The `Auto`
+  button shows a 2 px accent border when auto-snapping is enabled; an `H`/`V`
+  marker appears near constrained edge midpoints. Other constraint icons remain
+  placeholders.
 - Point is selected when sketch editing begins. Point places standalone
   vertices and never connects them; Line draws chained two-click segments
   between points. Every segment references two point entities, so its
@@ -275,15 +277,16 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   or continues the chain instead of starting a point drag. This keeps shared
   segment endpoints connected while drawing. Clicking or dragging a line
   selects or moves the edge instead of starting a line chain.
-- While drawing a line with `Auto` selected, a free endpoint within a 6 px
+- While drawing a line with `Auto` active, a free endpoint within a 6 px
   screen-space band of the start point's horizontal or vertical axis snaps to
   that axis and creates the matching constraint. Snapping to an existing point
   only adds a constraint when that point is already exactly aligned. Automatic
   snapping and the on-canvas `H`/`V` markers follow the Sketch Palette
   `Constraints` option; manual toolbar constraints still work when the option
-  is off. The constraint dropdown menu (opened via the caret on the `V` button)
-  mirrors the palette option and lets you switch between `Auto`, `Vertical`,
-  and `Horizontal` without leaving the toolbar.
+  is off. The constraint dropdown menu (opened via the caret on the `Auto`
+  button) mirrors the palette option and lets you switch between `Auto`,
+  `Vertical Only`, and `Horizontal Only` without leaving the toolbar. Clicking
+  the `Auto` button itself toggles auto-snapping on/off.
 - `Esc` deselects the current sketch tool, clears the entity selection and
   cancels an in-progress line, point drag or edge drag. It does not leave
   sketch mode or close the sketch palette. Click Point or Line to draw again.
