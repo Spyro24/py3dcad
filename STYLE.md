@@ -274,6 +274,10 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 
 - Panel background with a top border. Transport controls on the left, then a
   light vertical separator, then one box per history action.
+- Only top-level document actions belong here: sketch creation and solid
+  features. Sketch-internal edits such as points and lines stay undoable but
+  are omitted from the timeline. Transport previous/next steps between these
+  visible actions.
 - Applied actions use the lighter history surface; future actions use `field`.
   Hover lightens applied boxes. The selected action gets a 2 px accent border.
 - The playhead is a 2 px accent line with a 3 px dot.
@@ -284,7 +288,8 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 ### Command bar
 
 - Single line, 36 high. Accent `>` prompt, muted placeholder, muted
-  `Roll History Marker  n / m` status right-aligned.
+  `Roll History Marker  n / m` status right-aligned. The `n / m` values count
+  timeline-visible actions, not hidden sketch edits.
 - Truncate the placeholder with an ellipsis rather than wrapping or clipping
   mid-glyph.
 

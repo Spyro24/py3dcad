@@ -208,9 +208,12 @@ class Application:
         if stack is None:
             return []
         return [
-            HistoryEntry(command.kind, command.label)
+            HistoryEntry(
+                command.kind,
+                command.label,
+                command.timeline_visible,
+            )
             for command in stack.history()
-            if command.kind != "point"
         ]
 
     def _sync_active_sketch(self, document: Document) -> None:
@@ -412,7 +415,14 @@ class Application:
         if self._play_accumulator < 0.35:
             return
         self._play_accumulator = 0.0
-        stack.jump_to(stack.position + 1)
+        history = stack.history()
+        target = min(stack.position + 1, total)
+        while (
+            target < total
+            and not history[target - 1].timeline_visible
+        ):
+            target += 1
+        stack.jump_to(target)
         self._sync_active_sketch(document)
         if stack.position >= total:
             self._playing = False
@@ -519,12 +529,11 @@ class Application:
             document = self.active_document()
             if document is not None:
                 stack = self._active_stack()
-                full_history = [
-                    HistoryEntry(command.kind, command.label)
-                    for command in stack.history()
-                ] if stack else []
+                full_history = self._history_entries(stack)
                 filtered_history = [
-                    entry for entry in full_history if entry.kind != "point"
+                    entry
+                    for entry in full_history
+                    if entry.timeline_visible
                 ]
                 self.workspace.handle_event(
                     event,
@@ -593,12 +602,11 @@ class Application:
         document = self.active_document()
         if document is not None:
             stack = self._active_stack()
-            full_history = [
-                HistoryEntry(command.kind, command.label)
-                for command in stack.history()
-            ] if stack else []
+            full_history = self._history_entries(stack)
             filtered_history = [
-                entry for entry in full_history if entry.kind != "point"
+                entry
+                for entry in full_history
+                if entry.timeline_visible
             ]
             self.workspace.draw(
                 surface,

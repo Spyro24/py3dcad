@@ -11,6 +11,7 @@ class Command(ABC):
     """Base class for an undoable edit."""
 
     kind: str = "action"
+    timeline_visible: bool = True
 
     @property
     def label(self) -> str:
@@ -93,6 +94,7 @@ class AddPointCommand(Command):
     """Add a point to a sketch."""
 
     kind = "point"
+    timeline_visible = False
 
     def __init__(self, document: Document, sketch: Sketch, point: Point) -> None:
         self.document = document
@@ -125,6 +127,7 @@ class AddLineCommand(Command):
     """Add a straight line segment to a sketch."""
 
     kind = "line"
+    timeline_visible = False
 
     def __init__(
         self,
@@ -258,8 +261,9 @@ class CommandStack:
         """Delete an action and rebuild the document from the remaining ones.
 
         Deleting a sketch also removes every action that belongs to it, since
-        points and extrusions cannot exist without their sketch.  Returns the
-        new roll-marker position, or ``None`` when the index is invalid.
+        sketch geometry and features cannot exist without their sketch.
+        Returns the new roll-marker position, or ``None`` when the index is
+        invalid.
         """
         history = self.history()
         if not 0 <= index < len(history):

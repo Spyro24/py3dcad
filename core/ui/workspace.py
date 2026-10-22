@@ -15,10 +15,11 @@ from .viewport import Viewport
 
 @dataclass
 class HistoryEntry:
-    """One action shown in the timeline."""
+    """One action in the document history."""
 
     kind: str
     label: str
+    timeline_visible: bool = True
 
 
 @dataclass
@@ -288,7 +289,10 @@ class Workspace:
         self._draw_line_preview(surface, layout.viewport, document)
         if layout.command_bar.w > 0:
             self._draw_command_bar(
-                surface, layout.command_bar, position, len(history)
+                surface,
+                layout.command_bar,
+                self._full_to_filtered_position(position, full_history),
+                len(history),
             )
         self._draw_timeline(
             surface, layout.timeline, history, full_history, position, playing
@@ -2256,11 +2260,10 @@ class Workspace:
         """Map a filtered history index to the corresponding full history index."""
         if filtered_index >= len(filtered_history):
             return len(full_history)
-        target = filtered_history[filtered_index]
-        # Find the matching entry in full_history at or after the previous match.
+        # Find the matching visible entry in full_history.
         match_count = 0
         for i, entry in enumerate(full_history):
-            if entry.kind == "point":
+            if not entry.timeline_visible:
                 continue
             if match_count == filtered_index:
                 return i
@@ -2273,9 +2276,11 @@ class Workspace:
         full_history: List[HistoryEntry],
     ) -> int:
         """Map a full history position to the filtered position for the marker."""
-        # Count non-point entries up to (but not including) full_position.
+        # Count timeline-visible entries up to (but not including) full_position.
         return sum(
-            1 for entry in full_history[:full_position] if entry.kind != "point"
+            1
+            for entry in full_history[:full_position]
+            if entry.timeline_visible
         )
 
     def _handle_timeline_click(
@@ -2289,14 +2294,20 @@ class Workspace:
         for action, rect in controls:
             if rect.collidepoint(pos):
                 self._selected_action = None
-                self._run_history_control(action, full_total, position)
+                self._run_history_control(
+                    action, full_history, position
+                )
                 return True
 
         for index, rect in enumerate(boxes):
             if rect.collidepoint(pos):
                 full_index = self._filtered_to_full_index(index, history, full_history)
                 self._selected_action = index
-                self.on_history_jump(full_index + 1)
+                self.on_history_jump(
+                    self._visible_action_end_position(
+                        full_history, full_index
+                    )
+                )
                 return True
 
         boxes_center_y = region.centery
@@ -2311,17 +2322,51 @@ class Workspace:
                 return True
         return False
 
-    def _run_history_control(self, action: str, total: int, position: int) -> None:
+    def _run_history_control(
+        self, action: str, full_history: List[HistoryEntry], position: int
+    ) -> None:
+        total = len(full_history)
         if action == "start":
             self.on_history_jump(0)
         elif action == "prev":
-            self.on_history_jump(max(0, position - 1))
+            self.on_history_jump(
+                self._previous_visible_jump(full_history, position)
+            )
         elif action == "play":
             self.on_history_play()
         elif action == "next":
-            self.on_history_jump(min(total, position + 1))
+            self.on_history_jump(
+                self._next_visible_jump(full_history, position)
+            )
         elif action == "end":
             self.on_history_jump(total)
+
+    def _previous_visible_jump(
+        self, full_history: List[HistoryEntry], position: int
+    ) -> int:
+        """Target position after undoing the previous visible action."""
+        for index in range(min(position, len(full_history)) - 1, -1, -1):
+            if full_history[index].timeline_visible:
+                return index
+        return 0
+
+    def _next_visible_jump(
+        self, full_history: List[HistoryEntry], position: int
+    ) -> int:
+        """Target position after applying the next visible action."""
+        for index in range(min(position, len(full_history)), len(full_history)):
+            if full_history[index].timeline_visible:
+                return index + 1
+        return len(full_history)
+
+    def _visible_action_end_position(
+        self, full_history: List[HistoryEntry], action_index: int
+    ) -> int:
+        """State after an action, including its hidden sketch edits."""
+        for index in range(action_index + 1, len(full_history)):
+            if full_history[index].timeline_visible:
+                return index
+        return len(full_history)
 
     def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":
