@@ -160,10 +160,13 @@ def iter_solid_faces(
     """Yield ``(feature_id, face_index, face)`` for every solid face."""
     for feature in document.features:
         sketch = document.sketch(feature.sketch_id)
-        if sketch is None or len(sketch.points) < 3:
+        if sketch is None:
+            continue
+        profile = sketch.profile_points()
+        if len(profile) < 3:
             continue
         for index, face in enumerate(
-            prism_faces(sketch.points, feature.height, sketch.frame())
+            prism_faces(profile, feature.height, sketch.frame())
         ):
             yield feature.id, index, face
 

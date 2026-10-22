@@ -125,7 +125,75 @@ class Sketch:
     plane_v: Optional[Point3] = None
     plane_normal: Optional[Point3] = None
     line_type: str = "normal"
-    lines: List[Tuple[Point, Point]] = field(default_factory=list)
+    profile: Optional[List[int]] = None
+    edges: List[Tuple[int, int]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.profile is None:
+            self.profile = (
+                list(range(len(self.points))) if self.points else []
+            )
+        else:
+            self.profile = [
+                index for index in self.profile
+                if 0 <= index < len(self.points)
+            ]
+        self.edges = [
+            (start, end)
+            for start, end in self.edges
+            if (
+                0 <= start < len(self.points)
+                and 0 <= end < len(self.points)
+                and start != end
+            )
+        ]
+
+    @property
+    def lines(self) -> List[Tuple[Point, Point]]:
+        """Return edge endpoints as coordinate pairs."""
+        return [
+            (self.points[start], self.points[end])
+            for start, end in self.edges
+        ]
+
+    def profile_points(self) -> List[Point]:
+        """Return the ordered points that form the extrudable profile."""
+        return [self.points[index] for index in self.profile]
+
+    def find_point(self, point: Point) -> Optional[int]:
+        """Find an existing point by its coordinates."""
+        for index, existing in enumerate(self.points):
+            if existing == point:
+                return index
+        return None
+
+    def add_point(self, point: Point, profile: bool = False) -> int:
+        """Append a point and optionally include it in the profile."""
+        index = len(self.points)
+        self.points.append(point)
+        if profile:
+            self.profile.append(index)
+        return index
+
+    def remove_point(self, index: int) -> None:
+        """Remove a point and any edges that referenced it."""
+        if not 0 <= index < len(self.points):
+            return
+        self.points.pop(index)
+        self.profile = [
+            current if current < index else current - 1
+            for current in self.profile
+            if current != index
+        ]
+        shifted: List[Tuple[int, int]] = []
+        for start, end in self.edges:
+            if start == index or end == index:
+                continue
+            shifted.append((
+                start if start < index else start - 1,
+                end if end < index else end - 1,
+            ))
+        self.edges = shifted
 
     @property
     def is_custom_plane(self) -> bool:
@@ -162,7 +230,12 @@ class Sketch:
             "name": self.name,
             "plane": normalize_plane(self.plane),
             "points": [[x, y] for x, y in self.points],
+            "profile": list(self.profile),
+            "edges": [
+                [start, end] for start, end in self.edges
+            ],
             "line_type": self.line_type,
+            # Kept for older readers; edges are the source of truth.
             "lines": [
                 [[start[0], start[1]], [end[0], end[1]]]
                 for start, end in self.lines
@@ -204,19 +277,55 @@ class Sketch:
                 )
 
         line_type = str(data.get("line_type", "normal"))
-        lines: List[Tuple[Point, Point]] = []
-        raw_lines = data.get("lines", [])
-        if not isinstance(raw_lines, (list, tuple)):
-            raw_lines = []
-        for raw in raw_lines:
-            if not isinstance(raw, (list, tuple)) or len(raw) < 2:
-                continue
-            try:
-                start = (float(raw[0][0]), float(raw[0][1]))
-                end = (float(raw[1][0]), float(raw[1][1]))
-            except (TypeError, ValueError, IndexError):
-                continue
-            lines.append((start, end))
+        edges: List[Tuple[int, int]] = []
+        raw_edges = data.get("edges")
+        if isinstance(raw_edges, (list, tuple)):
+            profile: List[int] = []
+            raw_profile = data.get("profile", [])
+            if isinstance(raw_profile, (list, tuple)):
+                for raw in raw_profile:
+                    try:
+                        index = int(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if (
+                        0 <= index < len(points)
+                        and index not in profile
+                    ):
+                        profile.append(index)
+            for raw in raw_edges:
+                if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                    continue
+                try:
+                    start = int(raw[0])
+                    end = int(raw[1])
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    0 <= start < len(points)
+                    and 0 <= end < len(points)
+                    and start != end
+                ):
+                    edges.append((start, end))
+        else:
+            # Legacy sketches store edge coordinates separately from points.
+            # Promote those endpoints into real point entities.
+            profile = list(range(len(points)))
+            raw_lines = data.get("lines", [])
+            if not isinstance(raw_lines, (list, tuple)):
+                raw_lines = []
+            for raw in raw_lines:
+                if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                    continue
+                try:
+                    start = (float(raw[0][0]), float(raw[0][1]))
+                    end = (float(raw[1][0]), float(raw[1][1]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+                start_index = cls._find_or_add_point(points, start)
+                end_index = cls._find_or_add_point(points, end)
+                if start_index != end_index:
+                    edges.append((start_index, end_index))
 
         return cls(
             id=int(data.get("id", 0)),
@@ -229,8 +338,17 @@ class Sketch:
             plane_v=plane_v,
             plane_normal=plane_normal,
             line_type=line_type,
-            lines=lines,
+            profile=profile,
+            edges=edges,
         )
+
+    @staticmethod
+    def _find_or_add_point(points: List[Point], point: Point) -> int:
+        for index, existing in enumerate(points):
+            if existing == point:
+                return index
+        points.append(point)
+        return len(points) - 1
 
 
 @dataclass

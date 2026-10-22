@@ -528,7 +528,7 @@ class SceneRenderer:
             frame = sketch.frame()
             points = [
                 camera.project(point_on_plane(frame, (x, y)), center)
-                for x, y in sketch.points
+                for x, y in sketch.profile_points()
             ]
             if len(points) >= 2:
                 pygame.draw.lines(

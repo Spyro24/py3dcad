@@ -154,21 +154,25 @@ class Viewport:
             if active.lines:
                 line_word = "line" if len(active.lines) == 1 else "lines"
                 status += f"  ·  {len(active.lines)} {line_word}"
+            profile_count = len(active.profile_points())
             if active_tool == "line":
                 hint = "Click to draw a line  ·  Esc to deselect"
             elif active_tool != "point":
-                if len(active.points) < 3:
+                if profile_count < 3:
                     hint = (
                         "No tool selected  ·  click Point or Line to draw"
-                        "  ·  3+ points needed to extrude"
+                        "  ·  3+ profile points needed to extrude"
                     )
                 else:
                     hint = (
                         "No tool selected  ·  click Point or Line to draw"
                         "  ·  E to extrude"
                     )
-            elif len(active.points) < 3:
-                hint = "Click to place points  ·  3+ points needed to extrude"
+            elif profile_count < 3:
+                hint = (
+                    "Click to place points  ·  3+ profile points needed"
+                    " to extrude"
+                )
             else:
                 hint = "Click to place points  ·  E to extrude  ·  Esc to deselect"
         else:

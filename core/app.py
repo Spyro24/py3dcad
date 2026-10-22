@@ -302,7 +302,7 @@ class Application:
         if document is None or stack is None:
             return
         sketch = document.sketch(document.active_sketch_id)
-        if sketch is None:
+        if sketch is None or start == end:
             return
         stack.execute(AddLineCommand(document, sketch, start, end))
 
@@ -326,7 +326,7 @@ class Application:
         if document is None or stack is None:
             return
         sketch = document.sketch(document.active_sketch_id)
-        if sketch is None or len(sketch.points) < 3:
+        if sketch is None or len(sketch.profile_points()) < 3:
             return
         stack.execute(AddExtrudeCommand(document, sketch))
         # The sketch is now consumed by the feature; hide it until selected again.

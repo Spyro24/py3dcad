@@ -111,15 +111,12 @@ class AddPointCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        if self.index is None:
-            self.index = len(self.sketch.points)
-        self.index = min(self.index, len(self.sketch.points))
-        self.sketch.points.insert(self.index, self.point)
+        self.index = self.sketch.add_point(self.point, profile=True)
         self.document.dirty = True
 
     def undo(self) -> None:
-        if self.index is not None and self.index < len(self.sketch.points):
-            self.sketch.points.pop(self.index)
+        if self.index is not None:
+            self.sketch.remove_point(self.index)
         self.document.dirty = True
 
 
@@ -189,6 +186,7 @@ class AddLineCommand(Command):
         self.start = start
         self.end = end
         self.index: Optional[int] = None
+        self.created_points: List[int] = []
 
     @property
     def label(self) -> str:
@@ -198,17 +196,49 @@ class AddLineCommand(Command):
     def sketch_id(self) -> Optional[int]:
         return self.sketch.id
 
+    def _ensure_point(self, point: Point) -> int:
+        index = self.sketch.find_point(point)
+        if index is not None:
+            return index
+        index = self.sketch.add_point(point)
+        self.created_points.append(index)
+        return index
+
     def do(self) -> None:
+        self.created_points = []
+        if self.start == self.end:
+            return
+        start_index = self._ensure_point(self.start)
+        end_index = self._ensure_point(self.end)
+        if start_index == end_index:
+            return
         if self.index is None:
-            self.index = len(self.sketch.lines)
-        self.index = min(self.index, len(self.sketch.lines))
-        self.sketch.lines.insert(self.index, (self.start, self.end))
+            self.index = len(self.sketch.edges)
+        self.index = min(self.index, len(self.sketch.edges))
+        self.sketch.edges.insert(
+            self.index, (start_index, end_index)
+        )
         self.document.dirty = True
 
     def undo(self) -> None:
-        if self.index is not None and self.index < len(self.sketch.lines):
-            self.sketch.lines.pop(self.index)
-            self.document.dirty = True
+        if (
+            self.index is not None
+            and self.index < len(self.sketch.edges)
+        ):
+            self.sketch.edges.pop(self.index)
+        referenced = {
+            index
+            for edge in self.sketch.edges
+            for index in edge
+        }
+        for index in sorted(self.created_points, reverse=True):
+            if (
+                index < len(self.sketch.points)
+                and index not in referenced
+            ):
+                self.sketch.remove_point(index)
+        self.created_points = []
+        self.document.dirty = True
 
 
 class AddExtrudeCommand(Command):

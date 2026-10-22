@@ -246,15 +246,22 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   `Construction Line`, `Centerline`). Choosing a style selects the Line tool,
   updates the sketch and palette line type, and closes the menu. Clicking
   outside the menu dismisses it.
-- Point is selected when sketch editing begins. Point places points; Line
-  draws chained two-click segments from the sketch plane. Hover adds the raised
-  surface plus a 1 px border; the selected tool gets a 2 px accent border.
-- Sketch entities are directly editable with any tool armed. Clicking a point
-  selects it and starts a drag; releasing after movement commits one undoable
-  move. Clicking a line selects it. Points take hit-test priority over lines,
-  and clicking empty space clears the selection before the active Point or Line
-  tool acts. Hover outlines sketch points and lines in `geometry_hover`;
-  selection uses a thicker `geometry_selection` outline.
+- Point is selected when sketch editing begins. Point places profile points;
+  Line draws chained two-click segments from the sketch plane. Every segment
+  references two point entities, so its endpoints stay visible and moving one
+  endpoint moves every attached segment. Line endpoints are edge points and do
+  not join the extrusion profile; only Point-tool points do. Hover adds the
+  raised surface plus a 1 px border; the selected tool gets a 2 px accent
+  border.
+- Sketch entities are directly editable when Point or no tool is armed.
+  Clicking a point selects it and starts a drag; releasing after movement
+  commits one undoable move. Clicking a line selects it. Points take hit-test
+  priority over lines, and clicking empty space clears the selection before the
+  active Point or Line tool acts. Hover outlines sketch points and lines in
+  `geometry_hover`; selection uses a thicker `geometry_selection` outline.
+- With the Line tool armed, clicking an existing point snaps to it and starts
+  or continues the chain instead of starting a point drag. This keeps shared
+  segment endpoints connected while drawing.
 - `Esc` deselects the current sketch tool, clears the entity selection and
   cancels an in-progress line or point drag. It does not leave sketch mode or
   close the sketch palette. Click Point or Line to draw again. Clicking

@@ -462,7 +462,9 @@ class Workspace:
         self, region: Rect, document: Document
     ) -> List[Tuple[str, pygame.Rect, bool]]:
         sketch = document.sketch(document.active_sketch_id)
-        extrude_ready = sketch is not None and len(sketch.points) >= 3
+        extrude_ready = (
+            sketch is not None and len(sketch.profile_points()) >= 3
+        )
         states = (
             ("sketch", True),
             ("extrude", extrude_ready),
@@ -1017,9 +1019,9 @@ class Workspace:
         closest_y = start[1] + dy * t
         return math.hypot(pos[0] - closest_x, pos[1] - closest_y)
 
-    def _pick_sketch_entity(
+    def _pick_sketch_point(
         self, pos: Tuple[int, int], region: Rect, sketch: Sketch
-    ) -> Optional[Tuple[str, int]]:
+    ) -> Optional[int]:
         point_limit = self._s(8)
         nearest_point: Optional[int] = None
         nearest_distance = float(point_limit)
@@ -1031,8 +1033,14 @@ class Workspace:
             if distance <= nearest_distance:
                 nearest_point = index
                 nearest_distance = distance
-        if nearest_point is not None:
-            return "point", nearest_point
+        return nearest_point
+
+    def _pick_sketch_entity(
+        self, pos: Tuple[int, int], region: Rect, sketch: Sketch
+    ) -> Optional[Tuple[str, int]]:
+        point_index = self._pick_sketch_point(pos, region, sketch)
+        if point_index is not None:
+            return "point", point_index
 
         line_limit = self._s(6)
         nearest_line: Optional[int] = None
@@ -1094,15 +1102,30 @@ class Workspace:
             surface, self.geometry_selection, screen_origin, screen_current,
             max(1, self._s(1)),
         )
-        preview = [
-            self._project_sketch_point(sketch, point, region)
-            for point in sketch.points
+        preview_points = list(sketch.points)
+        preview_points[index] = current
+        profile = [
+            self._project_sketch_point(sketch, preview_points[point_index], region)
+            for point_index in sketch.profile
+            if 0 <= point_index < len(preview_points)
         ]
-        preview[index] = screen_current
-        if len(preview) >= 2:
+        if len(profile) >= 2:
             pygame.draw.lines(
-                surface, self.geometry_selection, len(preview) >= 3,
-                preview, max(1, self._s(1)),
+                surface, self.geometry_selection, len(profile) >= 3,
+                profile, max(1, self._s(1)),
+            )
+        for start, end in sketch.edges:
+            if index not in (start, end):
+                continue
+            screen_start = self._project_sketch_point(
+                sketch, preview_points[start], region
+            )
+            screen_end = self._project_sketch_point(
+                sketch, preview_points[end], region
+            )
+            pygame.draw.line(
+                surface, self.geometry_selection,
+                screen_start, screen_end, max(1, self._s(1)),
             )
         pygame.draw.circle(
             surface, self.geometry_selection,
@@ -2434,21 +2457,28 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
-                hit = self._pick_sketch_entity(
+                point_hit = self._pick_sketch_point(
                     event.pos, layout.viewport, sketch
                 )
-                if hit is not None:
-                    kind, index = hit
+                if not (
+                    self._selected_tool == "line"
+                    and point_hit is not None
+                ):
+                    hit = self._pick_sketch_entity(
+                        event.pos, layout.viewport, sketch
+                    )
+                    if hit is not None:
+                        kind, index = hit
+                        self._clear_sketch_selection()
+                        self._selected_sketch_entity = hit
+                        self._hover_sketch_entity = hit
+                        self._reset_line_state()
+                        if kind == "point":
+                            self._drag_point_index = index
+                            self._drag_point_origin = sketch.points[index]
+                            self._drag_point_current = sketch.points[index]
+                        return True
                     self._clear_sketch_selection()
-                    self._selected_sketch_entity = hit
-                    self._hover_sketch_entity = hit
-                    self._reset_line_state()
-                    if kind == "point":
-                        self._drag_point_index = index
-                        self._drag_point_origin = sketch.points[index]
-                        self._drag_point_current = sketch.points[index]
-                    return True
-                self._clear_sketch_selection()
 
         if (
             event.type == pygame.MOUSEBUTTONDOWN
@@ -2459,11 +2489,20 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
-                world = self.viewport.unproject_on_plane(
-                    event.pos, layout.viewport, sketch.frame()
+                point: Optional[Point] = None
+                snap_index = self._pick_sketch_point(
+                    event.pos, layout.viewport, sketch
                 )
-                if world is not None:
-                    point = (round(world[0]), round(world[1]))
+                if snap_index is not None:
+                    point = sketch.points[snap_index]
+                else:
+                    world = self.viewport.unproject_on_plane(
+                        event.pos, layout.viewport, sketch.frame()
+                    )
+                    if world is not None:
+                        point = (round(world[0]), round(world[1]))
+                if point is not None:
+                    self._clear_sketch_selection()
                     if self._line_start is None:
                         self._line_start = point
                     elif point != self._line_start:
@@ -2679,14 +2718,20 @@ class Workspace:
             and sketch is not None
             and layout.viewport.collidepoint(pos)
         ):
-            world = self.viewport.unproject_on_plane(
-                pos, layout.viewport, sketch.frame()
+            snap_index = self._pick_sketch_point(
+                pos, layout.viewport, sketch
             )
-            self._line_preview = (
-                (round(world[0]), round(world[1]))
-                if world is not None
-                else None
-            )
+            if snap_index is not None:
+                self._line_preview = sketch.points[snap_index]
+            else:
+                world = self.viewport.unproject_on_plane(
+                    pos, layout.viewport, sketch.frame()
+                )
+                self._line_preview = (
+                    (round(world[0]), round(world[1]))
+                    if world is not None
+                    else None
+                )
         else:
             self._line_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
