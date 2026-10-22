@@ -389,10 +389,9 @@ class SketchPaletteWindow:
 
     # Line type: key, label
     LINE_TYPES = [
-        ("normal", "Solid"),
-        ("dashed", "Dashed"),
-        ("dashdot", "Dash-dot"),
+        ("normal", "Normal"),
         ("construction", "Construction"),
+        ("center", "Center"),
     ]
 
     # Display toggles: key, label, default
@@ -438,6 +437,7 @@ class SketchPaletteWindow:
         self.accent = pygame.Color(59, 130, 246)
         self.accent_hover = pygame.Color(88, 155, 255)
         self.success = pygame.Color(82, 205, 132)
+        self.centerline = pygame.Color(235, 180, 90)
         self.field_bg = pygame.Color(35, 37, 46)
         self.field_hover_bg = pygame.Color(52, 58, 72)
         self.header_bg = pygame.Color(42, 44, 52)
@@ -457,7 +457,10 @@ class SketchPaletteWindow:
         self.visible = True
         self.minimized = False
         self.options_expanded = True
-        self.current_line_type = line_type
+        aliases = {"dashed": "construction", "dashdot": "center"}
+        line_type = aliases.get(line_type, line_type)
+        valid = {key for key, _label in self.LINE_TYPES}
+        self.current_line_type = line_type if line_type in valid else "normal"
         self._scroll = 0
         self._reset_hover()
 
@@ -902,6 +905,8 @@ class SketchPaletteWindow:
                 color = pygame.Color(255, 255, 255)
             elif key == "construction":
                 color = self.success
+            elif key == "center":
+                color = self.centerline
             else:
                 color = self.text_primary
             self._draw_line_type_symbol(surface, rect.center, key, color)
@@ -1071,7 +1076,7 @@ class SketchPaletteWindow:
                 surface, color,
                 (cx - w // 2, cy), (cx + w // 2, cy), thickness,
             )
-        elif line_type == "dashed":
+        elif line_type == "construction":
             dash_w = w // 3
             gap = self._s(3)
             for index in range(3):
@@ -1079,7 +1084,7 @@ class SketchPaletteWindow:
                 pygame.draw.line(
                     surface, color, (x0, cy), (x0 + dash_w, cy), thickness,
                 )
-        elif line_type == "dashdot":
+        else:
             pygame.draw.line(
                 surface, color,
                 (cx - w // 2, cy), (cx - w // 6, cy), thickness,
@@ -1091,25 +1096,6 @@ class SketchPaletteWindow:
                 surface, color,
                 (cx + w // 6, cy), (cx + w // 2, cy), thickness,
             )
-        else:
-            pygame.draw.line(
-                surface, color,
-                (cx - w // 2, cy + self._s(3)),
-                (cx + w // 2, cy - self._s(3)),
-                thickness,
-            )
-            pygame.draw.line(
-                surface, color,
-                (cx, cy - self._s(4)), (cx, cy + self._s(2)),
-                max(1, self._s(2)),
-            )
-            for offset in (-self._s(6), self._s(6)):
-                pygame.draw.line(
-                    surface, color,
-                    (cx + offset, cy - self._s(1)),
-                    (cx + offset, cy + self._s(1)),
-                    max(1, self._s(2)),
-                )
 
     def _draw_look_at_icon(
         self, surface: pygame.Surface, center: Tuple[int, int],

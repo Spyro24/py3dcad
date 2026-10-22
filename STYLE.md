@@ -289,7 +289,7 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Fields and buttons use the darker `field` / `button` surfaces with accent
   hover/selection. Labels are 12 px; titles are 12 px bold and uppercase.
 - The sketch palette uses an inset rounded title bar, a collapsible `Options`
-  header, semantic line-style buttons (solid, dashed, dash-dot, construction),
+  header, semantic line-style buttons (normal, construction, center),
   right-aligned checkboxes and a full-width status field. `Finish Sketch` is a
   filled accent button. Its body scrolls when the viewport is too short.
 
