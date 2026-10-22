@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..sketch import Point, point_on_plane
+from ..sketch import Point, Sketch, point_on_plane
 from .layout import Rect, UILayout
 from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchPaletteWindow, SketchPaletteAction
 from .viewport import Viewport
@@ -116,6 +116,7 @@ class Workspace:
         on_extrude: Callable[[], None],
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point], None],
+        on_move_point: Callable[[int, Point], None],
         on_select_sketch: Callable[[int], None],
         on_history_jump: Callable[[int], None],
         on_history_delete: Callable[[int], None],
@@ -126,6 +127,7 @@ class Workspace:
         self.on_extrude = on_extrude
         self.on_add_point = on_add_point
         self.on_add_line = on_add_line
+        self.on_move_point = on_move_point
         self.on_select_sketch = on_select_sketch
         self.on_history_jump = on_history_jump
         self.on_history_delete = on_history_delete
@@ -142,6 +144,11 @@ class Workspace:
         self._line_preview: Optional[Point] = None
         self._line_menu_open = False
         self._line_menu_hover = -1
+        self._selected_sketch_entity: Optional[Tuple[str, int]] = None
+        self._hover_sketch_entity: Optional[Tuple[str, int]] = None
+        self._drag_point_index: Optional[int] = None
+        self._drag_point_origin: Optional[Point] = None
+        self._drag_point_current: Optional[Point] = None
         self._hover_sketch: Optional[int] = None
         self._hover_plane: Optional[int] = None
         self._hover_control: Optional[str] = None
@@ -160,6 +167,7 @@ class Workspace:
         )
         self.sketch_palette_window = SketchPaletteWindow()
         self._history_document: Optional[int] = None
+        self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
 
         self._font_label: Optional[pygame.font.Font] = None
@@ -175,6 +183,8 @@ class Workspace:
         self.text_muted = pygame.Color(125, 125, 136)
         self.accent = pygame.Color(59, 130, 246)
         self.tree_selection = pygame.Color(44, 94, 154)
+        self.geometry_selection = pygame.Color(255, 193, 110)
+        self.geometry_hover = pygame.Color(255, 224, 180)
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.scale) < 1e-6:
@@ -191,6 +201,7 @@ class Workspace:
         self._hover_origin = False
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
+        self._hover_sketch_entity = None
         self.create_sketch_window.set_scale(scale)
         self.sketch_palette_window.set_scale(scale)
         self._font_label = None
@@ -211,11 +222,20 @@ class Workspace:
         self._active_mode_name = self.SKETCH_MODE
         self._selected_tool = "point"
         self._reset_line_state()
+        self._clear_sketch_selection()
 
     def deselect_tool(self) -> None:
         """Clear the current sketch tool without leaving sketch mode."""
         self._selected_tool = None
         self._reset_line_state()
+        self._clear_sketch_selection()
+
+    def _clear_sketch_selection(self) -> None:
+        self._selected_sketch_entity = None
+        self._hover_sketch_entity = None
+        self._drag_point_index = None
+        self._drag_point_origin = None
+        self._drag_point_current = None
 
     def _reset_line_state(self) -> None:
         self._line_start = None
@@ -226,6 +246,7 @@ class Workspace:
     def _select_tool(self, tool: Optional[str]) -> None:
         self._selected_tool = tool
         self._reset_line_state()
+        self._clear_sketch_selection()
 
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
@@ -287,6 +308,7 @@ class Workspace:
             self._selected_tool,
         )
         self._draw_line_preview(surface, layout.viewport, document)
+        self._draw_sketch_selection(surface, layout.viewport, document)
         if layout.command_bar.w > 0:
             self._draw_command_bar(
                 surface,
@@ -319,12 +341,47 @@ class Workspace:
             self._hover_sketches_folder = False
             self._sketches_expanded = True
             self._reset_line_state()
+            self._clear_sketch_selection()
             self.close_create_sketch_dialog()
-        if document.sketch(document.active_sketch_id) is None:
+        if document.active_sketch_id != self._selection_sketch_id:
+            self._selection_sketch_id = document.active_sketch_id
+            self._reset_line_state()
+            self._clear_sketch_selection()
+        active = document.sketch(document.active_sketch_id)
+        if active is None:
             self._selected_tool = None
             self._reset_line_state()
+            self._clear_sketch_selection()
             if self._active_mode_name == self.SKETCH_MODE:
                 self._active_mode_name = self.ACTIVE_MODE
+        else:
+            self._validate_sketch_selection(active)
+
+    def _validate_sketch_selection(self, sketch: Sketch) -> None:
+        """Drop selections and drags that no longer point at live geometry."""
+        selected = self._selected_sketch_entity
+        if selected is not None:
+            kind, index = selected
+            limit = (
+                len(sketch.points) if kind == "point"
+                else len(sketch.lines)
+            )
+            if kind not in ("point", "line") or not 0 <= index < limit:
+                self._clear_sketch_selection()
+        hovered = self._hover_sketch_entity
+        if hovered is not None:
+            kind, index = hovered
+            limit = (
+                len(sketch.points) if kind == "point"
+                else len(sketch.lines)
+            )
+            if kind not in ("point", "line") or not 0 <= index < limit:
+                self._hover_sketch_entity = None
+        if (
+            self._drag_point_index is not None
+            and not 0 <= self._drag_point_index < len(sketch.points)
+        ):
+            self._clear_sketch_selection()
 
     # ------------------------------------------------------------------
     # Toolbar
@@ -640,6 +697,7 @@ class Workspace:
         self._line_preview = None
         self._line_menu_open = False
         self._line_menu_hover = -1
+        self._clear_sketch_selection()
         document.dirty = True
 
     def _handle_sketch_toolbar_click(
@@ -650,6 +708,7 @@ class Workspace:
                 document.active_sketch_id = None
                 self._selected_tool = None
                 self._reset_line_state()
+                self._clear_sketch_selection()
                 self.sketch_palette_window.close()
                 return True
             for item in group.items:
@@ -930,6 +989,154 @@ class Workspace:
             (round(start[0]), round(start[1])), self._s(3),
         )
         surface.set_clip(previous_clip)
+
+    def _project_sketch_point(
+        self, sketch: Sketch, point: Point, region: Rect
+    ) -> Tuple[float, float]:
+        return self.viewport.camera.project(
+            point_on_plane(sketch.frame(), point), region.center
+        )
+
+    @staticmethod
+    def _distance_to_segment(
+        pos: Tuple[float, float],
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+    ) -> float:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-9:
+            return math.hypot(pos[0] - start[0], pos[1] - start[1])
+        t = (
+            (pos[0] - start[0]) * dx
+            + (pos[1] - start[1]) * dy
+        ) / length_sq
+        t = max(0.0, min(1.0, t))
+        closest_x = start[0] + dx * t
+        closest_y = start[1] + dy * t
+        return math.hypot(pos[0] - closest_x, pos[1] - closest_y)
+
+    def _pick_sketch_entity(
+        self, pos: Tuple[int, int], region: Rect, sketch: Sketch
+    ) -> Optional[Tuple[str, int]]:
+        point_limit = self._s(8)
+        nearest_point: Optional[int] = None
+        nearest_distance = float(point_limit)
+        for index, point in enumerate(sketch.points):
+            screen = self._project_sketch_point(sketch, point, region)
+            distance = math.hypot(
+                pos[0] - screen[0], pos[1] - screen[1]
+            )
+            if distance <= nearest_distance:
+                nearest_point = index
+                nearest_distance = distance
+        if nearest_point is not None:
+            return "point", nearest_point
+
+        line_limit = self._s(6)
+        nearest_line: Optional[int] = None
+        nearest_distance = float(line_limit)
+        for index, (start, end) in enumerate(sketch.lines):
+            screen_start = self._project_sketch_point(
+                sketch, start, region
+            )
+            screen_end = self._project_sketch_point(
+                sketch, end, region
+            )
+            distance = self._distance_to_segment(
+                pos, screen_start, screen_end
+            )
+            if distance <= nearest_distance:
+                nearest_line = index
+                nearest_distance = distance
+        if nearest_line is not None:
+            return "line", nearest_line
+        return None
+
+    def _draw_sketch_selection(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not self._sketch_toolbar_visible(document):
+            return
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        selected = self._selected_sketch_entity
+        hovered = self._hover_sketch_entity
+        if hovered is not None and hovered != selected:
+            self._draw_sketch_entity_highlight(
+                surface, sketch, region, hovered,
+                self.geometry_hover, False,
+            )
+        if selected is not None:
+            self._draw_sketch_entity_highlight(
+                surface, sketch, region, selected, self.geometry_selection, True
+            )
+        self._draw_point_drag_preview(surface, sketch, region)
+        surface.set_clip(previous_clip)
+
+    def _draw_point_drag_preview(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        index = self._drag_point_index
+        current = self._drag_point_current
+        if index is None or current is None or not 0 <= index < len(
+            sketch.points
+        ):
+            return
+        origin = self._drag_point_origin or sketch.points[index]
+        if current == origin:
+            return
+        screen_origin = self._project_sketch_point(sketch, origin, region)
+        screen_current = self._project_sketch_point(sketch, current, region)
+        pygame.draw.line(
+            surface, self.geometry_selection, screen_origin, screen_current,
+            max(1, self._s(1)),
+        )
+        preview = [
+            self._project_sketch_point(sketch, point, region)
+            for point in sketch.points
+        ]
+        preview[index] = screen_current
+        if len(preview) >= 2:
+            pygame.draw.lines(
+                surface, self.geometry_selection, len(preview) >= 3,
+                preview, max(1, self._s(1)),
+            )
+        pygame.draw.circle(
+            surface, self.geometry_selection,
+            (round(screen_current[0]), round(screen_current[1])),
+            self._s(5), width=max(1, self._s(2)),
+        )
+
+    def _draw_sketch_entity_highlight(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect,
+        entity: Tuple[str, int], color: pygame.Color, selected: bool,
+    ) -> None:
+        kind, index = entity
+        if kind == "point":
+            if not 0 <= index < len(sketch.points):
+                return
+            screen = self._project_sketch_point(
+                sketch, sketch.points[index], region
+            )
+            pygame.draw.circle(
+                surface, color,
+                (round(screen[0]), round(screen[1])),
+                self._s(8 if selected else 6),
+                width=max(1, self._s(2 if selected else 1)),
+            )
+            return
+        if not 0 <= index < len(sketch.lines):
+            return
+        start, end = sketch.lines[index]
+        screen_start = self._project_sketch_point(sketch, start, region)
+        screen_end = self._project_sketch_point(sketch, end, region)
+        pygame.draw.line(
+            surface, color, screen_start, screen_end,
+            max(1, self._s(3 if selected else 2)),
+        )
 
     def _draw_line_menu(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -2079,6 +2286,15 @@ class Workspace:
             self._line_menu_hover = -1
             return True
 
+        # Commit a point drag before any panel can consume the release.
+        if (
+            event.type == pygame.MOUSEBUTTONUP
+            and event.button == 1
+            and self._drag_point_index is not None
+        ):
+            self._finish_point_drag(document)
+            return True
+
         # Handle sketch palette window when a sketch is being edited
         if active_sketch is not None:
             action = self.sketch_palette_window.handle_event(
@@ -2091,6 +2307,7 @@ class Workspace:
                     document.active_sketch_id = None
                     self._selected_tool = None
                     self._reset_line_state()
+                    self._clear_sketch_selection()
                     self.sketch_palette_window.close()
                 elif action == SketchPaletteAction.LINETYPE_CHANGED:
                     if active_sketch is not None:
@@ -2152,6 +2369,7 @@ class Workspace:
                     # tool armed while another mode is visible.
                     self._selected_tool = None
                     self._reset_line_state()
+                    self._clear_sketch_selection()
                 return True
             if self._settings_rect(layout.toolbar).collidepoint(event.pos):
                 if self.on_settings is not None:
@@ -2198,6 +2416,7 @@ class Workspace:
                             document.active_sketch_id = None
                             self._selected_tool = None
                             self._reset_line_state()
+                            self._clear_sketch_selection()
                         return True
                     if kind == "sketch":
                         self.on_select_sketch(item_id)
@@ -2206,6 +2425,30 @@ class Workspace:
                     document.selected_plane = None
                     document.selected_face = None
                     return True
+
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self._sketch_toolbar_visible(document)
+            and layout.viewport.collidepoint(event.pos)
+        ):
+            sketch = document.sketch(document.active_sketch_id)
+            if sketch is not None:
+                hit = self._pick_sketch_entity(
+                    event.pos, layout.viewport, sketch
+                )
+                if hit is not None:
+                    kind, index = hit
+                    self._clear_sketch_selection()
+                    self._selected_sketch_entity = hit
+                    self._hover_sketch_entity = hit
+                    self._reset_line_state()
+                    if kind == "point":
+                        self._drag_point_index = index
+                        self._drag_point_origin = sketch.points[index]
+                        self._drag_point_current = sketch.points[index]
+                    return True
+                self._clear_sketch_selection()
 
         if (
             event.type == pygame.MOUSEBUTTONDOWN
@@ -2368,6 +2611,21 @@ class Workspace:
                 return index
         return len(full_history)
 
+    def _finish_point_drag(self, document: Document) -> None:
+        index = self._drag_point_index
+        current = self._drag_point_current
+        self._drag_point_index = None
+        self._drag_point_origin = None
+        self._drag_point_current = None
+        if index is None or current is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.points):
+            return
+        if sketch.points[index] == current:
+            return
+        self.on_move_point(index, current)
+
     def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":
             self.on_new_sketch()
@@ -2377,6 +2635,7 @@ class Workspace:
             document.active_sketch_id = None
             self._selected_tool = None
             self._reset_line_state()
+            self._clear_sketch_selection()
             self.sketch_palette_window.close()
 
     def _update_hover(
@@ -2393,6 +2652,7 @@ class Workspace:
         self._hover_origin = False
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
+        self._hover_sketch_entity = None
         if self._line_menu_open:
             self._line_menu_hover = self._line_menu_index_at(
                 pos, layout.toolbar, document
@@ -2400,6 +2660,20 @@ class Workspace:
         else:
             self._line_menu_hover = -1
         sketch = document.sketch(document.active_sketch_id)
+        if self._drag_point_index is not None and sketch is not None:
+            if layout.viewport.collidepoint(pos):
+                world = self.viewport.unproject_on_plane(
+                    pos, layout.viewport, sketch.frame()
+                )
+                if world is not None:
+                    self._drag_point_current = (
+                        round(world[0]), round(world[1])
+                    )
+            self._hover_sketch_entity = (
+                "point", self._drag_point_index
+            )
+            self._line_preview = None
+            return
         if (
             self._selected_tool == "line"
             and sketch is not None
@@ -2460,6 +2734,15 @@ class Workspace:
                 self._hover_origin_eye = self._origin_eye_rect(
                     rect
                 ).collidepoint(pos)
+
+        if (
+            sketch is not None
+            and self._sketch_toolbar_visible(document)
+            and layout.viewport.collidepoint(pos)
+        ):
+            self._hover_sketch_entity = self._pick_sketch_entity(
+                pos, layout.viewport, sketch
+            )
 
         if layout.timeline.collidepoint(pos):
             controls, _, _, boxes, _, _, _, _ = self._timeline_geometry(

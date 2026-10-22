@@ -12,6 +12,7 @@ from .commands import (
     AddPointCommand,
     AddSketchCommand,
     CommandStack,
+    MovePointCommand,
 )
 from .config import Config, format_opened
 from .document import Document
@@ -55,6 +56,7 @@ class Application:
             on_extrude=self.extrude_active,
             on_add_point=self.add_point,
             on_add_line=self.add_line,
+            on_move_point=self.move_point,
             on_select_sketch=self.select_sketch,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
@@ -303,6 +305,19 @@ class Application:
         if sketch is None:
             return
         stack.execute(AddLineCommand(document, sketch, start, end))
+
+    def move_point(self, index: int, point: Point) -> None:
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.points):
+            return
+        if sketch.points[index] == point:
+            return
+        stack.execute(MovePointCommand(document, sketch, index, point))
 
     def extrude_active(self) -> None:
         self._playing = False

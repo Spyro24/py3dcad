@@ -123,6 +123,54 @@ class AddPointCommand(Command):
         self.document.dirty = True
 
 
+class MovePointCommand(Command):
+    """Move an existing sketch point."""
+
+    kind = "move_point"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        index: int,
+        point: Point,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.index = index
+        self.point = point
+        self.previous: Optional[Point] = (
+            sketch.points[index]
+            if 0 <= index < len(sketch.points)
+            else None
+        )
+
+    @property
+    def label(self) -> str:
+        return "Move Point"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if (
+            self.previous is not None
+            and 0 <= self.index < len(self.sketch.points)
+        ):
+            self.sketch.points[self.index] = self.point
+            self.document.dirty = True
+
+    def undo(self) -> None:
+        if (
+            self.previous is not None
+            and 0 <= self.index < len(self.sketch.points)
+        ):
+            self.sketch.points[self.index] = self.previous
+            self.document.dirty = True
+
+
 class AddLineCommand(Command):
     """Add a straight line segment to a sketch."""
 

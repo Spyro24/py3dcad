@@ -16,7 +16,8 @@ Related documents: [`agents.md`](agents.md) (engineering rules),
 - **Surface steps, not shadows.** Depth comes from layered greys, 1 px borders
   and rounded corners. There are no drop shadows, gradients or glass effects.
 - **Quiet chrome, clear content.** Toolbars and panels use muted labels; the
-  active document, active tool and selection carry the accent colour.
+  active document and active tool carry the accent colour, while selected
+  geometry adds the warm geometry-selection overlay.
 - **Hand-drawn, code-built.** All icons and previews are drawn with pygame
   primitives. The app ships no image or icon assets.
 - **Everything scales.** UI scale is a user setting (0.75x to 2.0x). Every
@@ -102,6 +103,8 @@ consistent across the toolbar, document tree and timeline.
 | `axis_z` | 70, 110, 220 | `#466EDC` | Z axis |
 | `origin_plane` | 255, 224, 180 | `#FFE0B4` | Origin plane fill |
 | `origin_plane_selected` | 255, 193, 110 | `#FFC16E` | Hovered / selected origin plane |
+| `geometry_hover` | 255, 224, 180 | `#FFE0B4` | Hovered sketch point or line |
+| `geometry_selection` | 255, 193, 110 | `#FFC16E` | Selected sketch point or line |
 | `sketch_line` | 120, 145, 185 | `#7891B9` | Inactive sketch geometry |
 | `active_geometry` | 59, 130, 246 | `#3B82F6` | Active sketch, selection |
 | `solid_edge` | 55, 55, 65 | `#373741` | Solid silhouette and edges |
@@ -246,10 +249,16 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Point is selected when sketch editing begins. Point places points; Line
   draws chained two-click segments from the sketch plane. Hover adds the raised
   surface plus a 1 px border; the selected tool gets a 2 px accent border.
-- `Esc` only deselects the current sketch tool and clears an in-progress line.
-  It does not leave sketch mode or close the sketch palette. Click Point or Line
-  to draw again. Clicking `Finish Sketch` ends sketch editing and restores the
-  solid tools.
+- Sketch entities are directly editable with any tool armed. Clicking a point
+  selects it and starts a drag; releasing after movement commits one undoable
+  move. Clicking a line selects it. Points take hit-test priority over lines,
+  and clicking empty space clears the selection before the active Point or Line
+  tool acts. Hover outlines sketch points and lines in `geometry_hover`;
+  selection uses a thicker `geometry_selection` outline.
+- `Esc` deselects the current sketch tool, clears the entity selection and
+  cancels an in-progress line or point drag. It does not leave sketch mode or
+  close the sketch palette. Click Point or Line to draw again. Clicking
+  `Finish Sketch` ends sketch editing and restores the solid tools.
 - Right: gear icon button, 28 x 28. Tooltips use `field`-dark background,
   1 px border and 8 px horizontal / 4 px vertical padding.
 
@@ -268,16 +277,17 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - HUD: document or sketch status at top-left (13 bold, muted); contextual hint at
   bottom-left (12, muted). Keep hints to one line and use `·` separators.
 - Selection always wins over base geometry colour: active sketch and selected
-  faces use `accent`.
+  faces use `accent`; selected sketch points and lines use
+  `geometry_selection`, and their hover state uses `geometry_hover`.
 
 ### Timeline
 
 - Panel background with a top border. Transport controls on the left, then a
   light vertical separator, then one box per history action.
 - Only top-level document actions belong here: sketch creation and solid
-  features. Sketch-internal edits such as points and lines stay undoable but
-  are omitted from the timeline. Transport previous/next steps between these
-  visible actions.
+  features. Sketch-internal edits such as points, lines and point moves stay
+  undoable but are omitted from the timeline. Transport previous/next steps
+  between these visible actions.
 - Applied actions use the lighter history surface; future actions use `field`.
   Hover lightens applied boxes. The selected action gets a 2 px accent border.
 - The playhead is a 2 px accent line with a 3 px dot.
@@ -342,7 +352,8 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 | --- | --- |
 | Default | Base surface, `text_secondary` or `text_muted` |
 | Hover | One surface step lighter; accent border for cards and secondary buttons |
-| Active / selected | `accent` underline or 2 px border, or `selection` fill for tree rows |
+| Active / selected | `accent` underline or 2 px border, `selection` fill for tree rows, or `geometry_selection` outline for sketch entities |
+| Geometry hover | `geometry_hover` ring or line overlay, one step thinner than selection |
 | Focus | `accent` 1 px border around inputs and fields |
 | Disabled | `disabled` icons or `text_muted` labels; no hover response |
 | Applied (history) | Lighter history surface; future actions stay dark |
