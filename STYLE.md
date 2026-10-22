@@ -178,6 +178,7 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 | Start-page card | target column 272 wide, radius 6 |
 | Start-page margin / gap | 16 / 16, section gap 24 |
 | Floating tool panel | 322 x 158, radius 6 |
+| Sketch palette | 322 wide, radius 6; 36 line-style buttons, 22 option rows; body scrolls on short viewports |
 | Save dialog | 620 x 200, radius 8 |
 | Settings dialog | 440 x 196, radius 8 |
 
@@ -287,6 +288,10 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   1 px border. They never block viewport picking outside the panel.
 - Fields and buttons use the darker `field` / `button` surfaces with accent
   hover/selection. Labels are 12 px; titles are 12 px bold and uppercase.
+- The sketch palette uses an inset rounded title bar, a collapsible `Options`
+  header, semantic line-style buttons (solid, dashed, dash-dot, construction),
+  right-aligned checkboxes and a full-width status field. `Finish Sketch` is a
+  filled accent button. Its body scrolls when the viewport is too short.
 
 ## 7. Iconography
 
