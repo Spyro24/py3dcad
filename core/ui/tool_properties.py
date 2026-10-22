@@ -708,8 +708,7 @@ class SketchPaletteWindow:
 
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                self.close()
-                return SketchPaletteAction.FINISH_SKETCH
+                return SketchPaletteAction.CONSUMED
             return SketchPaletteAction.NONE
 
         if event.type == pygame.MOUSEMOTION:

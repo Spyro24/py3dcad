@@ -122,6 +122,7 @@ class Viewport:
         surface: pygame.Surface,
         region: Rect,
         document: Document,
+        point_tool_active: bool = True,
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -136,12 +137,13 @@ class Viewport:
             self.renderer.draw_orientation_cube(
                 surface, region.rect, self.camera
             )
-        self._draw_hud(surface, region, document)
+        self._draw_hud(surface, region, document, point_tool_active)
 
         surface.set_clip(previous_clip)
 
     def _draw_hud(
-        self, surface: pygame.Surface, region: Rect, document: Document
+        self, surface: pygame.Surface, region: Rect, document: Document,
+        point_tool_active: bool = True,
     ) -> None:
         active = document.sketch(document.active_sketch_id)
         if active is not None:
@@ -149,10 +151,21 @@ class Viewport:
                 f"{active.name}  ·  {active.display_plane}  ·  "
                 f"{len(active.points)} points"
             )
-            if len(active.points) < 3:
+            if not point_tool_active:
+                if len(active.points) < 3:
+                    hint = (
+                        "No tool selected  ·  click Point to draw"
+                        "  ·  3+ points needed to extrude"
+                    )
+                else:
+                    hint = (
+                        "No tool selected  ·  click Point to draw"
+                        "  ·  E to extrude"
+                    )
+            elif len(active.points) < 3:
                 hint = "Click to place points  ·  3+ points needed to extrude"
             else:
-                hint = "Click to place points  ·  E to extrude  ·  Esc to finish"
+                hint = "Click to place points  ·  E to extrude  ·  Esc to deselect"
         else:
             status = document.name
             if document.selected_face is not None:
@@ -200,7 +213,7 @@ class Viewport:
         event: pygame.event.Event,
         region: Rect,
         document: Document,
-        on_add_point: Callable[[Point], None],
+        on_add_point: Optional[Callable[[Point], None]],
     ) -> bool:
         if event.type == pygame.MOUSEWHEEL:
             if not region.collidepoint(pygame.mouse.get_pos()):
@@ -219,13 +232,14 @@ class Viewport:
             if event.button == 1:
                 sketch = document.sketch(document.active_sketch_id)
                 if sketch is not None:
-                    world = self.unproject_on_plane(
-                        event.pos, region, sketch.frame()
-                    )
-                    if world is not None:
-                        on_add_point(
-                            (round(world[0]), round(world[1]))
+                    if on_add_point is not None:
+                        world = self.unproject_on_plane(
+                            event.pos, region, sketch.frame()
                         )
+                        if world is not None:
+                            on_add_point(
+                                (round(world[0]), round(world[1]))
+                            )
                     return True
                 face_hit = self.renderer.pick_face(
                     event.pos, region.rect, document, self.camera

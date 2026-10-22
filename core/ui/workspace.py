@@ -21,6 +21,27 @@ class HistoryEntry:
     label: str
 
 
+@dataclass
+class ToolbarItem:
+    """One button inside a grouped sketch toolbar."""
+
+    action: str
+    rect: pygame.Rect
+    label: Optional[str] = None
+    placeholder: bool = False
+    dropdown: bool = False
+
+
+@dataclass
+class ToolbarGroupLayout:
+    """A captioned group of sketch toolbar buttons."""
+
+    caption: str
+    rect: pygame.Rect
+    items: List[ToolbarItem]
+    finish: bool = False
+
+
 class Workspace:
     """Draws the document workspace and routes editing interactions."""
 
@@ -36,6 +57,51 @@ class Workspace:
     SKETCH_MODE = "SKETCH"
     ORIGIN_PLANES = ("XY Plane", "YZ Plane", "ZX Plane")
     ORIGIN_PLANE_KEYS = ("XY", "YZ", "ZX")
+
+    # Caption, (action, visible label, dropdown caret)
+    SKETCH_GROUPS = (
+        ("CREATE", (
+            ("line", "Line", True),
+            ("rectangle", "Rectangle", True),
+            ("circle", "Circle", True),
+            ("arc", "Arc", True),
+            ("slot", "Slot", True),
+            ("polygon", "Polygon", True),
+            ("spline", "Spline", True),
+            ("point", "Point", False),
+        )),
+        ("MODIFY", (
+            ("fillet", None, False),
+            ("trim", None, False),
+        )),
+        ("PATTERN", (
+            ("linear_pattern", None, True),
+            ("circular_pattern", None, True),
+        )),
+        ("CONSTRAINTS", (
+            ("constraint_vertical", None, True),
+            ("constraint_horizontal", None, False),
+            ("constraint_perpendicular", None, False),
+            ("constraint_tangent", None, False),
+            ("constraint_equal", None, False),
+            ("constraint_midpoint", None, False),
+        )),
+        ("INSPECT", (
+            ("measure", None, True),
+            ("section_view", None, False),
+        )),
+        ("INSERT", (
+            ("insert_part", None, True),
+            ("insert_sketch", None, False),
+        )),
+        ("SELECT", (
+            ("select", None, True),
+        )),
+        ("FINISH SKETCH", (
+            ("finish_sketch", None, False),
+        )),
+    )
+    ACTIVE_SKETCH_TOOLS = ("point", "finish_sketch")
 
     def __init__(
         self,
@@ -62,6 +128,7 @@ class Workspace:
         self._hover_tool: Optional[str] = None
         self._hover_mode: Optional[str] = None
         self._active_mode_name = self.ACTIVE_MODE
+        self._selected_tool: Optional[str] = None
         self._hover_sketch: Optional[int] = None
         self._hover_plane: Optional[int] = None
         self._hover_control: Optional[str] = None
@@ -126,6 +193,14 @@ class Workspace:
         self._origin_visible = bool(visible)
         self.viewport.set_origin_visible(self._origin_visible)
 
+    def begin_sketch_edit(self) -> None:
+        """Start sketch editing with the point tool selected."""
+        self._selected_tool = "point"
+
+    def deselect_tool(self) -> None:
+        """Clear the current sketch tool without leaving sketch mode."""
+        self._selected_tool = None
+
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
         self.create_sketch_window.open()
@@ -179,7 +254,12 @@ class Workspace:
         self._sync_history_document(document)
         self._draw_toolbar(surface, layout.toolbar, document)
         self._draw_tree(surface, layout.document_tree, document)
-        self.viewport.draw(surface, layout.viewport, document)
+        self.viewport.draw(
+            surface,
+            layout.viewport,
+            document,
+            self._selected_tool == "point",
+        )
         if layout.command_bar.w > 0:
             self._draw_command_bar(
                 surface, layout.command_bar, position, len(history)
@@ -204,6 +284,8 @@ class Workspace:
             self._hover_sketches_folder = False
             self._sketches_expanded = True
             self.close_create_sketch_dialog()
+        if document.sketch(document.active_sketch_id) is None:
+            self._selected_tool = None
 
     # ------------------------------------------------------------------
     # Toolbar
@@ -281,16 +363,10 @@ class Workspace:
     ) -> List[Tuple[str, pygame.Rect, bool]]:
         sketch = document.sketch(document.active_sketch_id)
         extrude_ready = sketch is not None and len(sketch.points) >= 3
-        if sketch is not None:
-            states = (
-                ("point", True),
-                ("finish_sketch", True),
-            )
-        else:
-            states = (
-                ("sketch", True),
-                ("extrude", extrude_ready),
-            )
+        states = (
+            ("sketch", True),
+            ("extrude", extrude_ready),
+        )
         buttons: List[Tuple[str, pygame.Rect, bool]] = []
         x = self._content_x(region)
         y = region.y + self._s(42)
@@ -302,6 +378,155 @@ class Workspace:
             ))
             x += width + self._s(6)
         return buttons
+
+    def _build_sketch_toolbar(
+        self, region: Rect, compact: bool, padding: int, gap: int,
+        icon_width: int = 30,
+    ) -> Tuple[List[ToolbarGroupLayout], int]:
+        """Lay out the grouped sketch command bar and return its total width."""
+        start = self._content_x(region)
+        icon_height = self._s(30)
+        icon_y = region.y + self._s(42)
+        x = start
+        groups: List[ToolbarGroupLayout] = []
+
+        for caption, specs in self.SKETCH_GROUPS:
+            create_group = caption == "CREATE"
+            finish_group = caption == "FINISH SKETCH"
+            widths: List[int] = []
+            for action, label, dropdown in specs:
+                if create_group and not compact and label:
+                    caret = self._s(8) if dropdown else self._s(4)
+                    widths.append(max(
+                        self._s(30),
+                        self._font_small.size(label)[0] + caret,
+                    ))
+                elif finish_group:
+                    widths.append(self._s(max(36, icon_width)))
+                else:
+                    widths.append(self._s(icon_width))
+
+            content_width = sum(widths) + gap * (len(widths) - 1)
+            if finish_group:
+                caption_width = max(
+                    self._font_caption.size("FINISH")[0],
+                    self._font_caption.size("SKETCH")[0],
+                ) + self._s(10)
+            else:
+                caption_width = (
+                    self._font_caption.size(caption)[0] + self._s(10)
+                )
+            group_width = max(content_width, caption_width) + padding * 2
+            group_rect = pygame.Rect(
+                x,
+                region.y + self._s(38),
+                group_width,
+                region.h - self._s(44),
+            )
+            item_x = group_rect.x + (group_width - content_width) // 2
+            items: List[ToolbarItem] = []
+            for (action, label, dropdown), width in zip(specs, widths):
+                items.append(ToolbarItem(
+                    action=action,
+                    rect=pygame.Rect(item_x, icon_y, width, icon_height),
+                    label=(
+                        label if create_group and not compact else None
+                    ),
+                    placeholder=action not in self.ACTIVE_SKETCH_TOOLS,
+                    dropdown=dropdown,
+                ))
+                item_x += width + gap
+            groups.append(ToolbarGroupLayout(
+                caption=caption,
+                rect=group_rect,
+                items=items,
+                finish=finish_group,
+            ))
+            x += group_width
+        return groups, x - start
+
+    def _sketch_toolbar_groups(
+        self, region: Rect, document: Document
+    ) -> List[ToolbarGroupLayout]:
+        self._init_fonts()
+        start = self._content_x(region)
+        right_limit = self._settings_rect(region).left - self._s(8)
+        available = right_limit - start
+        last: List[ToolbarGroupLayout] = []
+        for compact in (False, True):
+            icon_widths = (30,) if not compact else (30, 28, 26, 24, 22)
+            for icon_width in icon_widths:
+                for padding, gap in (
+                    (self._s(10), self._s(8)),
+                    (self._s(7), self._s(6)),
+                    (self._s(8), self._s(6)),
+                    (self._s(8), self._s(4)),
+                    (self._s(6), self._s(3)),
+                    (self._s(4), self._s(2)),
+                    (self._s(2), self._s(1)),
+                ):
+                    groups, total = self._build_sketch_toolbar(
+                        region, compact, padding, gap, icon_width
+                    )
+                    last = groups
+                    if total <= available:
+                        return groups
+        return self._fit_sketch_groups(last, start, available)
+
+    def _fit_sketch_groups(
+        self, groups: List[ToolbarGroupLayout], start: int, available: int
+    ) -> List[ToolbarGroupLayout]:
+        """Keep the finish group visible when the toolbar cannot fit it all."""
+        if len(groups) <= 1:
+            return groups
+        finish = groups[-1]
+        middle = list(groups[:-1])
+        while (
+            middle
+            and sum(group.rect.w for group in middle) + finish.rect.w
+            > available
+        ):
+            middle.pop()
+        x = start
+        for group in middle:
+            self._move_toolbar_group(group, x - group.rect.x)
+            x += group.rect.w
+        finish_x = start + available - finish.rect.w
+        self._move_toolbar_group(finish, finish_x - finish.rect.x)
+        return middle + [finish]
+
+    @staticmethod
+    def _move_toolbar_group(group: ToolbarGroupLayout, dx: int) -> None:
+        group.rect.x += dx
+        for item in group.items:
+            item.rect.x += dx
+
+    def _toolbar_item_hit_rect(self, item: ToolbarItem) -> pygame.Rect:
+        if item.label is None:
+            return item.rect
+        return pygame.Rect(
+            item.rect.x,
+            item.rect.y,
+            item.rect.w,
+            self._s(46),
+        )
+
+    def _handle_sketch_toolbar_click(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> bool:
+        for group in self._sketch_toolbar_groups(region, document):
+            if group.finish and group.rect.collidepoint(pos):
+                document.active_sketch_id = None
+                self._selected_tool = None
+                self.sketch_palette_window.close()
+                return True
+            for item in group.items:
+                if not item.action == "point":
+                    continue
+                if self._toolbar_item_hit_rect(item).collidepoint(pos):
+                    self._selected_tool = "point"
+                    return True
+        return False
 
     def _draw_toolbar(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -320,7 +545,10 @@ class Workspace:
             (divider_x, region.bottom - self._s(12)),
         )
         self._draw_modes(surface, region, document)
-        self._draw_action_group(surface, region, document)
+        if document.sketch(document.active_sketch_id) is not None:
+            self._draw_sketch_toolbar(surface, region, document)
+        else:
+            self._draw_action_group(surface, region, document)
         self._draw_settings_button(surface, region)
         self._draw_tool_tooltip(surface, region)
         self._draw_settings_tooltip(surface, region)
@@ -417,6 +645,128 @@ class Workspace:
                     (rect.centerx + half, y),
                     self._s(2),
                 )
+
+    def _draw_sketch_toolbar(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        groups = self._sketch_toolbar_groups(region, document)
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        for index, group in enumerate(groups):
+            if index > 0:
+                pygame.draw.line(
+                    surface,
+                    self.border_color,
+                    (group.rect.x, region.y + self._s(40)),
+                    (group.rect.x, region.bottom - self._s(6)),
+                )
+            if group.finish:
+                hovered = self._hover_tool == "finish_sketch"
+                color = self._kind_color("sketch")
+            else:
+                hovered = False
+                color = self.text_secondary
+            for item in group.items:
+                active = (
+                    item.action == "point"
+                    and self._selected_tool == "point"
+                )
+                item_hover = (
+                    item.action == "point"
+                    and self._hover_tool == "point"
+                ) or (
+                    item.action == "finish_sketch"
+                    and self._hover_tool == "finish_sketch"
+                )
+                if active or item_hover:
+                    pygame.draw.rect(
+                        surface, self.header_bg, item.rect,
+                        border_radius=self._s(5),
+                    )
+                    pygame.draw.rect(
+                        surface,
+                        self.accent if active else self.border_color,
+                        item.rect,
+                        width=self._s(2 if active else 1),
+                        border_radius=self._s(5),
+                    )
+                if item.placeholder:
+                    item_color = self.text_secondary
+                elif item.action == "finish_sketch":
+                    item_color = color
+                else:
+                    item_color = self._kind_color(item.action)
+                self._draw_action_icon(
+                    surface, item.rect, item.action, item_color
+                )
+                if item.label is not None:
+                    self._draw_toolbar_tool_label(
+                        surface, item, item_color, active or item_hover
+                    )
+            self._draw_group_caption(surface, region, group, hovered)
+        surface.set_clip(previous_clip)
+
+    def _draw_toolbar_tool_label(
+        self, surface: pygame.Surface, item: ToolbarItem,
+        color: pygame.Color, emphasize: bool,
+    ) -> None:
+        label_color = self.text_primary if emphasize else color
+        label = self._font_small.render(
+            item.label, True, label_color
+        )
+        y = item.rect.bottom + self._s(8)
+        label_rect = label.get_rect(center=(item.rect.centerx, y))
+        surface.blit(label, label_rect)
+        if item.dropdown:
+            self._draw_dropdown_caret(
+                surface,
+                label_rect.right + self._s(2),
+                label_rect.centery,
+                self.text_muted,
+            )
+
+    def _draw_group_caption(
+        self, surface: pygame.Surface, region: Rect,
+        group: ToolbarGroupLayout, hovered: bool,
+    ) -> None:
+        color = (
+            self._kind_color("sketch") if group.finish
+            else (self.text_primary if hovered else self.text_secondary)
+        )
+        if group.finish:
+            for index, word in enumerate(("FINISH", "SKETCH")):
+                label = self._font_caption.render(word, True, color)
+                y = region.bottom - self._s(18 - index * 11)
+                label_rect = label.get_rect(
+                    center=(group.rect.centerx, y)
+                )
+                surface.blit(label, label_rect)
+                if word == "SKETCH":
+                    self._draw_dropdown_caret(
+                        surface,
+                        label_rect.right + self._s(3),
+                        label_rect.centery,
+                        color,
+                    )
+            return
+        label = self._font_caption.render(group.caption, True, color)
+        y = region.bottom - self._s(11)
+        label_rect = label.get_rect(center=(group.rect.centerx, y))
+        surface.blit(label, label_rect)
+        self._draw_dropdown_caret(
+            surface, label_rect.right + self._s(3), label_rect.centery,
+            self.text_muted,
+        )
+
+    def _draw_dropdown_caret(
+        self, surface: pygame.Surface, x: int, y: int,
+        color: pygame.Color,
+    ) -> None:
+        pygame.draw.polygon(surface, color, [
+            (x, y - self._s(2)),
+            (x + self._s(5), y - self._s(2)),
+            (x + self._s(2), y + self._s(2)),
+        ])
 
     def _draw_action_group(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -1235,6 +1585,231 @@ class Workspace:
                 ],
                 max(2, self._s(2)),
             )
+        elif kind == "line":
+            pygame.draw.line(
+                surface, color,
+                (cx - radius, cy + radius),
+                (cx + radius, cy - radius),
+                max(2, self._s(2)),
+            )
+        elif kind == "rectangle":
+            pygame.draw.rect(
+                surface, color,
+                (cx - radius, cy - radius + 1,
+                 radius * 2, radius * 2 - 2),
+                max(1, self._s(2)), border_radius=self._s(2),
+            )
+        elif kind == "circle":
+            pygame.draw.circle(
+                surface, color, (cx, cy), radius,
+                max(1, self._s(2)),
+            )
+        elif kind == "arc":
+            pygame.draw.arc(
+                surface, color,
+                (cx - radius, cy - radius, radius * 2, radius * 2),
+                math.pi * 0.15, math.pi * 0.85,
+                max(1, self._s(2)),
+            )
+        elif kind == "slot":
+            pygame.draw.rect(
+                surface, color,
+                (cx - radius, cy - radius // 2,
+                 radius * 2, radius),
+                max(1, self._s(2)),
+                border_radius=max(1, radius // 2),
+            )
+        elif kind == "polygon":
+            points = [
+                (
+                    cx + int(radius * math.cos(
+                        -math.pi / 2 + index * math.pi / 3
+                    )),
+                    cy + int(radius * math.sin(
+                        -math.pi / 2 + index * math.pi / 3
+                    )),
+                )
+                for index in range(6)
+            ]
+            pygame.draw.polygon(
+                surface, color, points, max(1, self._s(2))
+            )
+        elif kind == "spline":
+            pygame.draw.lines(
+                surface, color, False,
+                [
+                    (cx - radius, cy + radius // 2),
+                    (cx - radius // 2, cy - radius // 2),
+                    (cx, cy + radius // 2),
+                    (cx + radius, cy - radius // 2),
+                ],
+                max(1, self._s(2)),
+            )
+        elif kind == "fillet":
+            pygame.draw.lines(
+                surface, color, False,
+                [
+                    (cx - radius, cy + radius),
+                    (cx - radius, cy - radius // 3),
+                    (cx, cy - radius),
+                    (cx + radius, cy - radius),
+                ],
+                max(1, self._s(2)),
+            )
+        elif kind == "trim":
+            pygame.draw.line(
+                surface, color,
+                (cx - radius, cy - radius),
+                (cx + radius, cy + radius),
+                max(1, self._s(2)),
+            )
+            pygame.draw.line(
+                surface, color,
+                (cx - radius, cy + radius),
+                (cx + radius, cy - radius),
+                max(1, self._s(2)),
+            )
+        elif kind == "linear_pattern":
+            square = max(2, self._s(4))
+            for index in range(3):
+                offset = index * square
+                pygame.draw.rect(
+                    surface, color,
+                    (cx - radius + offset, cy + radius - square - offset,
+                     square, square),
+                    max(1, self._s(1)),
+                )
+        elif kind == "circular_pattern":
+            pygame.draw.circle(
+                surface, color, (cx, cy), radius,
+                max(1, self._s(1)),
+            )
+            dot = max(1, self._s(1))
+            for index in range(8):
+                angle = index * math.pi / 4
+                point = (
+                    cx + int(radius * math.cos(angle)),
+                    cy + int(radius * math.sin(angle)),
+                )
+                pygame.draw.circle(surface, color, point, dot)
+        elif kind == "constraint_vertical":
+            pygame.draw.line(
+                surface, color, (cx, cy - radius), (cx, cy + radius),
+                max(1, self._s(2)),
+            )
+            pygame.draw.line(
+                surface, self.text_muted,
+                (cx - radius // 2, cy - radius),
+                (cx + radius // 2, cy - radius),
+                max(1, self._s(1)),
+            )
+        elif kind == "constraint_horizontal":
+            pygame.draw.line(
+                surface, color, (cx - radius, cy), (cx + radius, cy),
+                max(1, self._s(2)),
+            )
+            pygame.draw.line(
+                surface, self.text_muted,
+                (cx - radius, cy - radius // 2),
+                (cx - radius, cy + radius // 2),
+                max(1, self._s(1)),
+            )
+        elif kind == "constraint_perpendicular":
+            pygame.draw.lines(
+                surface, color, False,
+                [(cx - radius, cy + radius), (cx - radius, cy - radius),
+                 (cx + radius, cy - radius)],
+                max(1, self._s(2)),
+            )
+        elif kind == "constraint_tangent":
+            pygame.draw.circle(
+                surface, color, (cx - radius // 2, cy + radius // 2),
+                radius // 2, max(1, self._s(1)),
+            )
+            pygame.draw.line(
+                surface, color,
+                (cx - radius, cy - radius // 2),
+                (cx + radius, cy - radius // 2),
+                max(1, self._s(1)),
+            )
+        elif kind == "constraint_equal":
+            for offset in (-radius // 2, radius // 2):
+                pygame.draw.line(
+                    surface, color,
+                    (cx - radius, cy + offset),
+                    (cx + radius, cy + offset),
+                    max(1, self._s(2)),
+                )
+        elif kind == "constraint_midpoint":
+            pygame.draw.line(
+                surface, color, (cx - radius, cy), (cx + radius, cy),
+                max(1, self._s(1)),
+            )
+            pygame.draw.circle(
+                surface, color, (cx, cy), max(1, self._s(2))
+            )
+        elif kind == "measure":
+            pygame.draw.rect(
+                surface, color,
+                (cx - radius, cy - radius // 2,
+                 radius * 2, radius),
+                max(1, self._s(1)), border_radius=self._s(1),
+            )
+            for index in range(3):
+                tick_x = cx - radius + (index + 1) * radius * 2 // 4
+                pygame.draw.line(
+                    surface, color,
+                    (tick_x, cy - radius // 2),
+                    (tick_x, cy),
+                    max(1, self._s(1)),
+                )
+        elif kind == "section_view":
+            pygame.draw.circle(
+                surface, color, (cx - 1, cy - 1), radius - 2,
+                max(1, self._s(2)),
+            )
+            pygame.draw.line(
+                surface, color,
+                (cx + radius // 2, cy + radius // 2),
+                (cx + radius, cy + radius),
+                max(1, self._s(2)),
+            )
+        elif kind == "insert_part":
+            pygame.draw.rect(
+                surface, color,
+                (cx - radius, cy - radius // 2,
+                 radius, radius),
+                max(1, self._s(1)),
+            )
+            pygame.draw.lines(
+                surface, color, False,
+                [(cx + radius // 2, cy - radius),
+                 (cx + radius, cy - radius // 2),
+                 (cx + radius // 2, cy)],
+                max(1, self._s(1)),
+            )
+        elif kind == "insert_sketch":
+            pygame.draw.rect(
+                surface, color,
+                (cx - radius, cy - radius,
+                 radius * 2, radius * 2),
+                max(1, self._s(1)),
+            )
+            pygame.draw.line(
+                surface, color, (cx, cy - radius // 2), (cx, cy + radius // 2),
+                max(1, self._s(1)),
+            )
+            pygame.draw.line(
+                surface, color, (cx - radius // 2, cy), (cx + radius // 2, cy),
+                max(1, self._s(1)),
+            )
+        elif kind == "select":
+            pygame.draw.polygon(surface, color, [
+                (cx - radius, cy - radius),
+                (cx - radius, cy + radius),
+                (cx - radius // 3, cy + radius // 3),
+                (cx + radius, cy + radius // 2),
+            ])
 
     # ------------------------------------------------------------------
     # Interaction
@@ -1264,6 +1839,7 @@ class Workspace:
                     self.viewport.camera.align_to_plane(active_sketch.frame())
                 elif action == SketchPaletteAction.FINISH_SKETCH:
                     document.active_sketch_id = None
+                    self._selected_tool = None
                     self.sketch_palette_window.close()
                 elif action == SketchPaletteAction.LINETYPE_CHANGED:
                     if active_sketch is not None:
@@ -1318,6 +1894,7 @@ class Workspace:
                     return True
                 if document.active_sketch_id is not None:
                     document.active_sketch_id = None
+                    self._selected_tool = None
                     self.sketch_palette_window.close()
                 self._active_mode_name = mode
                 self._hover_mode = None
@@ -1326,12 +1903,18 @@ class Workspace:
                 if self.on_settings is not None:
                     self.on_settings()
                 return True
-            for action, rect, enabled in self._toolbar_buttons(
-                layout.toolbar, document
-            ):
-                if enabled and rect.collidepoint(event.pos):
-                    self._run_tool(action, document)
+            if document.sketch(document.active_sketch_id) is not None:
+                if self._handle_sketch_toolbar_click(
+                    event.pos, layout.toolbar, document
+                ):
                     return True
+            else:
+                for action, rect, enabled in self._toolbar_buttons(
+                    layout.toolbar, document
+                ):
+                    if enabled and rect.collidepoint(event.pos):
+                        self._run_tool(action, document)
+                        return True
             if layout.document_tree.collidepoint(event.pos):
                 hit_row = False
                 for kind, item_id, rect in self._tree_rows(
@@ -1359,6 +1942,7 @@ class Workspace:
                             document.selected_plane = plane
                             document.selected_face = None
                             document.active_sketch_id = None
+                            self._selected_tool = None
                         return True
                     if kind == "sketch":
                         self.on_select_sketch(item_id)
@@ -1368,8 +1952,11 @@ class Workspace:
                     document.selected_face = None
                     return True
 
+        add_point = (
+            self.on_add_point if self._selected_tool == "point" else None
+        )
         handled = self.viewport.handle_event(
-            event, layout.viewport, document, self.on_add_point
+            event, layout.viewport, document, add_point
         )
         if self.create_sketch_window.visible and active_sketch is None:
             if document.selected_face is not None:
@@ -1465,6 +2052,7 @@ class Workspace:
             self.on_extrude()
         elif action == "finish_sketch":
             document.active_sketch_id = None
+            self._selected_tool = None
             self.sketch_palette_window.close()
 
     def _update_hover(
@@ -1490,12 +2078,28 @@ class Workspace:
             if rect.collidepoint(pos):
                 self._hover_mode = mode
                 break
-        for action, rect, enabled in self._toolbar_buttons(
-            layout.toolbar, document
-        ):
-            if enabled and rect.collidepoint(pos):
-                self._hover_tool = action
-                break
+        if document.sketch(document.active_sketch_id) is not None:
+            for group in self._sketch_toolbar_groups(
+                layout.toolbar, document
+            ):
+                if group.finish and group.rect.collidepoint(pos):
+                    self._hover_tool = "finish_sketch"
+                    break
+                for item in group.items:
+                    if item.action != "point":
+                        continue
+                    if self._toolbar_item_hit_rect(item).collidepoint(pos):
+                        self._hover_tool = "point"
+                        break
+                if self._hover_tool is not None:
+                    break
+        else:
+            for action, rect, enabled in self._toolbar_buttons(
+                layout.toolbar, document
+            ):
+                if enabled and rect.collidepoint(pos):
+                    self._hover_tool = action
+                    break
         for kind, item_id, rect in self._tree_rows(layout.document_tree, document):
             if not rect.collidepoint(pos):
                 continue

@@ -232,6 +232,7 @@ class Application:
             document.active_sketch_id = editable[-1].id
             self._align_camera_to_active_sketch(document)
             sketch = document.sketch(document.active_sketch_id)
+            self.workspace.begin_sketch_edit()
             self.workspace.sketch_palette_window.open(sketch.line_type if sketch else "normal")
 
     # ------------------------------------------------------------------
@@ -268,6 +269,7 @@ class Application:
         if command.sketch is not None:
             document.active_sketch_id = command.sketch.id
             self._align_camera_to_active_sketch(document)
+            self.workspace.begin_sketch_edit()
             self.workspace.sketch_palette_window.open(command.sketch.line_type)
 
     def add_point(self, point: Point) -> None:
@@ -306,6 +308,7 @@ class Application:
                     None if sketch.is_custom_plane else sketch.plane
                 )
                 self._align_camera_to_active_sketch(document)
+                self.workspace.begin_sketch_edit()
                 self.workspace.sketch_palette_window.open(sketch.line_type)
 
     def _align_camera_to_active_sketch(self, document: Document) -> None:
@@ -530,8 +533,7 @@ class Application:
             self.redo()
             return True
         if key == pygame.K_ESCAPE and document.active_sketch_id is not None:
-            document.active_sketch_id = None
-            self.workspace.sketch_palette_window.close()
+            self.workspace.deselect_tool()
             return True
         return False
 

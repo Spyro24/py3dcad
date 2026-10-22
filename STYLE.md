@@ -169,6 +169,7 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 | Workspace tile | 152 wide, full toolbar height minus 8 |
 | Toolbar mode tab | 24 high |
 | Toolbar action button | 40 x 38, 6 gap |
+| Grouped sketch tool button | 30 high, 22-62 wide; labels under `CREATE` |
 | Settings button | 28 x 28 |
 | Tree root row | 34 high, radius 3 |
 | Tree child row | 28 high, radius 3, 22 indent |
@@ -227,10 +228,21 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   active mode. It uses the green `sketch` kind colour for its label and
   underline; the normal mode tabs remain muted.
 - Below the modes: square action buttons. Normal mode shows Sketch and Extrude
-  under the bold `CREATE` caption. Sketch mode shows Point (selected) and Finish
-  Sketch under the bold `SKETCH` caption; Extrude stays in the solid tools.
-  Hover adds the raised surface plus a 1 px border; the selected tool gets a
-  2 px accent border.
+  under the bold `CREATE` caption. Extrude stays in the solid tools.
+- Sketch editing uses a full grouped command bar: `CREATE`, `MODIFY`, `PATTERN`,
+  `CONSTRAINTS`, `INSPECT`, `INSERT`, `SELECT`, `FINISH SKETCH`. Groups are
+  separated by 1 px vertical rules and carry a bold uppercase caption at the
+  bottom. `CREATE` shows labelled tools with dropdown carets; the other groups
+  use icon buttons. `FINISH SKETCH` stays at the far right with a green check
+  and two-line green caption.
+- Point is selected when sketch editing begins. Only Point and Finish Sketch
+  are active; the remaining grouped tools are neutral placeholders for future
+  tools. Hover adds the raised surface plus a 1 px border; the selected tool
+  gets a 2 px accent border.
+- `Esc` only deselects the current sketch tool. It does not leave sketch mode
+  or close the sketch palette. Click Point to draw again; viewport clicks place
+  points only while Point is selected. Switching to `SOLID` or clicking Finish
+  Sketch leaves sketch editing and restores the solid tools.
 - Right: gear icon button, 28 x 28. Tooltips use `field`-dark background,
   1 px border and 8 px horizontal / 4 px vertical padding.
 
@@ -335,6 +347,9 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   `Open...`, `Select`, `Finish Sketch`, `Extrude`.
 - Hints explain the next action and the relevant shortcut:
   `Click a plane or face to select it  ·  then press S to sketch`.
+  In sketch mode, `Esc` means deselect: use
+  `Click to place points  ·  E to extrude  ·  Esc to deselect`, and
+  `No tool selected  ·  click Point to draw` when no tool is active.
 - Use `·` between facts and `—` only for a longer pause in hints.
 - Keep empty-state copy calm and instructive; never use exclamation marks.
 - Units are millimetres, with Y up. Do not show unit suffixes in chrome labels
