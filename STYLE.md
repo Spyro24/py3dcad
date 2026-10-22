@@ -221,9 +221,10 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Left: workspace tile with icon, `DESIGN` and the muted `workspace` sublabel.
 - Centre: uppercase mode tabs. The active mode uses primary text and a 2 px
   underline; inactive modes are muted.
-- Mode tabs are clickable. Hover adds the raised surface; switching to a
-  non-sketch mode while editing ends sketch editing and restores the tools for
-  that mode.
+- Mode tabs are clickable. Hover adds the raised surface. Switching modes while
+  a sketch is open only changes the visible tool group: the sketch stays
+  active, its palette stays visible, and the `SKETCH` tab remains available.
+  Use `Finish Sketch` to end sketch editing.
 - While a sketch is being edited, a `SKETCH` tab is prepended and becomes the
   active mode. It uses the green `sketch` kind colour for its label and
   underline; the normal mode tabs remain muted.
@@ -241,8 +242,8 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   gets a 2 px accent border.
 - `Esc` only deselects the current sketch tool. It does not leave sketch mode
   or close the sketch palette. Click Point to draw again; viewport clicks place
-  points only while Point is selected. Switching to `SOLID` or clicking Finish
-  Sketch leaves sketch editing and restores the solid tools.
+  points only while Point is selected. Clicking `Finish Sketch` ends sketch
+  editing and restores the solid tools.
 - Right: gear icon button, 28 x 28. Tooltips use `field`-dark background,
   1 px border and 8 px horizontal / 4 px vertical padding.
 

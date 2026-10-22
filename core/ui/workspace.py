@@ -195,6 +195,7 @@ class Workspace:
 
     def begin_sketch_edit(self) -> None:
         """Start sketch editing with the point tool selected."""
+        self._active_mode_name = self.SKETCH_MODE
         self._selected_tool = "point"
 
     def deselect_tool(self) -> None:
@@ -277,7 +278,11 @@ class Workspace:
         if document.id != self._history_document:
             self._history_document = document.id
             self._selected_action = None
-            self._active_mode_name = self.ACTIVE_MODE
+            self._active_mode_name = (
+                self.SKETCH_MODE
+                if document.sketch(document.active_sketch_id) is not None
+                else self.ACTIVE_MODE
+            )
             self._hover_mode = None
             self._hover_action = None
             self._hover_control = None
@@ -286,6 +291,8 @@ class Workspace:
             self.close_create_sketch_dialog()
         if document.sketch(document.active_sketch_id) is None:
             self._selected_tool = None
+            if self._active_mode_name == self.SKETCH_MODE:
+                self._active_mode_name = self.ACTIVE_MODE
 
     # ------------------------------------------------------------------
     # Toolbar
@@ -319,9 +326,13 @@ class Workspace:
         return Workspace.MODES
 
     def _active_mode(self, document: Document) -> str:
-        if document.sketch(document.active_sketch_id) is not None:
-            return self.SKETCH_MODE
         return self._active_mode_name
+
+    def _sketch_toolbar_visible(self, document: Document) -> bool:
+        return (
+            document.sketch(document.active_sketch_id) is not None
+            and self._active_mode_name == self.SKETCH_MODE
+        )
 
     def _mode_rects(
         self, region: Rect, document: Document
@@ -545,7 +556,7 @@ class Workspace:
             (divider_x, region.bottom - self._s(12)),
         )
         self._draw_modes(surface, region, document)
-        if document.sketch(document.active_sketch_id) is not None:
+        if self._sketch_toolbar_visible(document):
             self._draw_sketch_toolbar(surface, region, document)
         else:
             self._draw_action_group(surface, region, document)
@@ -772,20 +783,16 @@ class Workspace:
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
         buttons = self._toolbar_buttons(region, document)
-        in_sketch = document.sketch(document.active_sketch_id) is not None
         for action, rect, enabled in buttons:
             hovered = enabled and action == self._hover_tool
-            selected = in_sketch and action == "point"
-            if hovered or selected:
+            if hovered:
                 pygame.draw.rect(
                     surface, self.header_bg, rect,
                     border_radius=self._s(5),
                 )
                 pygame.draw.rect(
-                    surface,
-                    self.accent if selected else self.border_color,
-                    rect,
-                    width=self._s(2 if selected else 1),
+                    surface, self.border_color, rect,
+                    width=self._s(1),
                     border_radius=self._s(5),
                 )
             color = (
@@ -799,7 +806,7 @@ class Workspace:
         left = buttons[0][1].left
         right = buttons[-1][1].right
         center_x = (left + right) // 2
-        caption = "SKETCH" if in_sketch else "CREATE"
+        caption = "CREATE"
         label = self._font_caption.render(
             caption, True, self.text_primary
         )
@@ -1890,12 +1897,6 @@ class Workspace:
             for mode, rect in self._mode_rects(layout.toolbar, document):
                 if not rect.collidepoint(event.pos):
                     continue
-                if mode == self.SKETCH_MODE:
-                    return True
-                if document.active_sketch_id is not None:
-                    document.active_sketch_id = None
-                    self._selected_tool = None
-                    self.sketch_palette_window.close()
                 self._active_mode_name = mode
                 self._hover_mode = None
                 return True
@@ -1903,7 +1904,7 @@ class Workspace:
                 if self.on_settings is not None:
                     self.on_settings()
                 return True
-            if document.sketch(document.active_sketch_id) is not None:
+            if self._sketch_toolbar_visible(document):
                 if self._handle_sketch_toolbar_click(
                     event.pos, layout.toolbar, document
                 ):
@@ -2078,7 +2079,7 @@ class Workspace:
             if rect.collidepoint(pos):
                 self._hover_mode = mode
                 break
-        if document.sketch(document.active_sketch_id) is not None:
+        if self._sketch_toolbar_visible(document):
             for group in self._sketch_toolbar_groups(
                 layout.toolbar, document
             ):
