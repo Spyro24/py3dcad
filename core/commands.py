@@ -111,7 +111,7 @@ class AddPointCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        self.index = self.sketch.add_point(self.point, profile=True)
+        self.index = self.sketch.add_point(self.point)
         self.document.dirty = True
 
     def undo(self) -> None:

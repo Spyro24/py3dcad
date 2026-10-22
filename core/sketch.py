@@ -125,19 +125,9 @@ class Sketch:
     plane_v: Optional[Point3] = None
     plane_normal: Optional[Point3] = None
     line_type: str = "normal"
-    profile: Optional[List[int]] = None
     edges: List[Tuple[int, int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.profile is None:
-            self.profile = (
-                list(range(len(self.points))) if self.points else []
-            )
-        else:
-            self.profile = [
-                index for index in self.profile
-                if 0 <= index < len(self.points)
-            ]
         self.edges = [
             (start, end)
             for start, end in self.edges
@@ -156,9 +146,74 @@ class Sketch:
             for start, end in self.edges
         ]
 
+    def profile_indices(self) -> List[int]:
+        """Return a simple closed edge loop, or an empty list."""
+        if len(self.edges) < 3:
+            return []
+        adjacency: Dict[int, List[int]] = {}
+        for start, end in self.edges:
+            adjacency.setdefault(start, []).append(end)
+            adjacency.setdefault(end, []).append(start)
+
+        seen: set[int] = set()
+        for start in adjacency:
+            if start in seen:
+                continue
+            component = self._graph_component(start, adjacency, seen)
+            if len(component) < 3:
+                continue
+            if any(len(adjacency[node]) != 2 for node in component):
+                continue
+            loop = self._trace_cycle(start, adjacency)
+            if len(loop) == len(component) and len(loop) >= 3:
+                return loop
+        return []
+
+    @staticmethod
+    def _graph_component(
+        start: int,
+        adjacency: Dict[int, List[int]],
+        seen: set[int],
+    ) -> List[int]:
+        component: List[int] = []
+        stack = [start]
+        seen.add(start)
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in adjacency[node]:
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        return component
+
+    @staticmethod
+    def _trace_cycle(
+        start: int, adjacency: Dict[int, List[int]]
+    ) -> List[int]:
+        loop = [start]
+        previous: Optional[int] = None
+        current = start
+        while True:
+            neighbors = adjacency[current]
+            nxt = (
+                neighbors[0]
+                if neighbors[0] != previous
+                else neighbors[1]
+            )
+            if nxt == start:
+                break
+            if nxt in loop:
+                return []
+            loop.append(nxt)
+            previous, current = current, nxt
+        return loop
+
     def profile_points(self) -> List[Point]:
-        """Return the ordered points that form the extrudable profile."""
-        return [self.points[index] for index in self.profile]
+        """Return the ordered points of the extrudable edge loop."""
+        return [
+            self.points[index] for index in self.profile_indices()
+        ]
 
     def find_point(self, point: Point) -> Optional[int]:
         """Find an existing point by its coordinates."""
@@ -167,12 +222,10 @@ class Sketch:
                 return index
         return None
 
-    def add_point(self, point: Point, profile: bool = False) -> int:
-        """Append a point and optionally include it in the profile."""
+    def add_point(self, point: Point) -> int:
+        """Append a standalone point."""
         index = len(self.points)
         self.points.append(point)
-        if profile:
-            self.profile.append(index)
         return index
 
     def remove_point(self, index: int) -> None:
@@ -180,11 +233,6 @@ class Sketch:
         if not 0 <= index < len(self.points):
             return
         self.points.pop(index)
-        self.profile = [
-            current if current < index else current - 1
-            for current in self.profile
-            if current != index
-        ]
         shifted: List[Tuple[int, int]] = []
         for start, end in self.edges:
             if start == index or end == index:
@@ -230,7 +278,6 @@ class Sketch:
             "name": self.name,
             "plane": normalize_plane(self.plane),
             "points": [[x, y] for x, y in self.points],
-            "profile": list(self.profile),
             "edges": [
                 [start, end] for start, end in self.edges
             ],
@@ -279,20 +326,8 @@ class Sketch:
         line_type = str(data.get("line_type", "normal"))
         edges: List[Tuple[int, int]] = []
         raw_edges = data.get("edges")
+        raw_profile = data.get("profile")
         if isinstance(raw_edges, (list, tuple)):
-            profile: List[int] = []
-            raw_profile = data.get("profile", [])
-            if isinstance(raw_profile, (list, tuple)):
-                for raw in raw_profile:
-                    try:
-                        index = int(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if (
-                        0 <= index < len(points)
-                        and index not in profile
-                    ):
-                        profile.append(index)
             for raw in raw_edges:
                 if not isinstance(raw, (list, tuple)) or len(raw) < 2:
                     continue
@@ -307,10 +342,18 @@ class Sketch:
                     and start != end
                 ):
                     edges.append((start, end))
+            # Older point-profile sketches stored their loop separately.
+            cls._add_loop_edges(
+                edges, cls._valid_profile(raw_profile, len(points))
+            )
         else:
-            # Legacy sketches store edge coordinates separately from points.
-            # Promote those endpoints into real point entities.
-            profile = list(range(len(points)))
+            # Legacy sketches draw a profile through their ordered points
+            # and store extra edge coordinates separately.
+            if isinstance(raw_profile, (list, tuple)):
+                profile = cls._valid_profile(raw_profile, len(points))
+            else:
+                profile = list(range(len(points)))
+            cls._add_loop_edges(edges, profile)
             raw_lines = data.get("lines", [])
             if not isinstance(raw_lines, (list, tuple)):
                 raw_lines = []
@@ -324,8 +367,7 @@ class Sketch:
                     continue
                 start_index = cls._find_or_add_point(points, start)
                 end_index = cls._find_or_add_point(points, end)
-                if start_index != end_index:
-                    edges.append((start_index, end_index))
+                cls._add_edge(edges, start_index, end_index)
 
         return cls(
             id=int(data.get("id", 0)),
@@ -338,9 +380,50 @@ class Sketch:
             plane_v=plane_v,
             plane_normal=plane_normal,
             line_type=line_type,
-            profile=profile,
             edges=edges,
         )
+
+    @staticmethod
+    def _valid_profile(raw: Any, point_count: int) -> List[int]:
+        if not isinstance(raw, (list, tuple)):
+            return []
+        profile: List[int] = []
+        for item in raw:
+            try:
+                index = int(item)
+            except (TypeError, ValueError):
+                continue
+            if (
+                0 <= index < point_count
+                and index not in profile
+            ):
+                profile.append(index)
+        return profile
+
+    @classmethod
+    def _add_loop_edges(
+        cls, edges: List[Tuple[int, int]], profile: List[int]
+    ) -> None:
+        if len(profile) < 2:
+            return
+        pairs = list(zip(profile, profile[1:]))
+        if len(profile) >= 3:
+            pairs.append((profile[-1], profile[0]))
+        for start, end in pairs:
+            cls._add_edge(edges, start, end)
+
+    @staticmethod
+    def _add_edge(
+        edges: List[Tuple[int, int]], start: int, end: int
+    ) -> None:
+        if start == end:
+            return
+        key = (min(start, end), max(start, end))
+        if any(
+            (min(a, b), max(a, b)) == key for a, b in edges
+        ):
+            return
+        edges.append((start, end))
 
     @staticmethod
     def _find_or_add_point(points: List[Point], point: Point) -> int:

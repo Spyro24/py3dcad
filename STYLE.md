@@ -246,13 +246,12 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   `Construction Line`, `Centerline`). Choosing a style selects the Line tool,
   updates the sketch and palette line type, and closes the menu. Clicking
   outside the menu dismisses it.
-- Point is selected when sketch editing begins. Point places profile points;
-  Line draws chained two-click segments from the sketch plane. Every segment
-  references two point entities, so its endpoints stay visible and moving one
-  endpoint moves every attached segment. Line endpoints are edge points and do
-  not join the extrusion profile; only Point-tool points do. Hover adds the
-  raised surface plus a 1 px border; the selected tool gets a 2 px accent
-  border.
+- Point is selected when sketch editing begins. Point places standalone
+  vertices and never connects them; Line draws chained two-click segments
+  between points. Every segment references two point entities, so its
+  endpoints stay visible and moving one endpoint moves every attached segment.
+  Only a closed loop of edges is an extrusion profile. Hover adds the raised
+  surface plus a 1 px border; the selected tool gets a 2 px accent border.
 - Sketch entities are directly editable when Point or no tool is armed.
   Clicking a point selects it and starts a drag; releasing after movement
   commits one undoable move. Clicking a line selects it. Points take hit-test
@@ -378,7 +377,7 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Hints explain the next action and the relevant shortcut:
   `Click a plane or face to select it  ·  then press S to sketch`.
   In sketch mode, `Esc` means deselect: use
-  `Click to place points  ·  E to extrude  ·  Esc to deselect`,
+  `Click to place points  ·  draw a closed loop to extrude`,
   `Click to draw a line  ·  Esc to deselect`, and
   `No tool selected  ·  click Point or Line to draw` when no tool is active.
 - Use `·` between facts and `—` only for a longer pause in hints.

@@ -1110,16 +1110,6 @@ class Workspace:
             )
         preview_points = list(sketch.points)
         preview_points[index] = current
-        profile = [
-            self._project_sketch_point(sketch, preview_points[point_index], region)
-            for point_index in sketch.profile
-            if 0 <= point_index < len(preview_points)
-        ]
-        if len(profile) >= 2:
-            pygame.draw.lines(
-                surface, self.geometry_selection, len(profile) >= 3,
-                profile, max(1, self._s(1)),
-            )
         for start, end in connected_edges:
             screen_start = self._project_sketch_point(
                 sketch, preview_points[start], region

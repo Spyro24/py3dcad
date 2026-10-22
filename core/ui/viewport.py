@@ -161,7 +161,7 @@ class Viewport:
                 if profile_count < 3:
                     hint = (
                         "No tool selected  ·  click Point or Line to draw"
-                        "  ·  3+ profile points needed to extrude"
+                        "  ·  draw a closed loop to extrude"
                     )
                 else:
                     hint = (
@@ -170,7 +170,7 @@ class Viewport:
                     )
             elif profile_count < 3:
                 hint = (
-                    "Click to place points  ·  3+ profile points needed"
+                    "Click to place points  ·  draw a closed loop"
                     " to extrude"
                 )
             else:

@@ -526,14 +526,6 @@ class SceneRenderer:
                 else self.palette.sketch
             )
             frame = sketch.frame()
-            points = [
-                camera.project(point_on_plane(frame, (x, y)), center)
-                for x, y in sketch.profile_points()
-            ]
-            if len(points) >= 2:
-                pygame.draw.lines(
-                    surface, color, len(points) >= 3, points, self._s(2)
-                )
             for start, end in sketch.lines:
                 start_point = camera.project(
                     point_on_plane(frame, start), center
