@@ -1,10 +1,39 @@
 """Sketch and feature models for PY3DCAD."""
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
+
+EDGE_CONSTRAINTS = ("horizontal", "vertical")
+
+
+def normalize_edge_constraint(value: Any) -> Optional[str]:
+    """Return a supported edge constraint key or None."""
+    if isinstance(value, str):
+        value = value.lower()
+        if value in EDGE_CONSTRAINTS:
+            return value
+    return None
+
+
+def aligned_edge_endpoint(
+    start: Point, end: Point, constraint: Optional[str]
+) -> Point:
+    """Return an endpoint aligned to an axis, preserving edge length."""
+    constraint = normalize_edge_constraint(constraint)
+    if constraint is None:
+        return end
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = max(1, int(round(math.hypot(dx, dy))))
+    if constraint == "horizontal":
+        direction = 1 if dx >= 0 else -1
+        return (start[0] + direction * length, start[1])
+    direction = 1 if dy >= 0 else -1
+    return (start[0], start[1] + direction * length)
 
 PLANE_KEYS = ("XY", "YZ", "ZX")
 PLANE_NAMES = {
@@ -126,6 +155,7 @@ class Sketch:
     plane_normal: Optional[Point3] = None
     line_type: str = "normal"
     edges: List[Tuple[int, int]] = field(default_factory=list)
+    edge_constraints: List[Optional[str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.edges = [
@@ -137,6 +167,56 @@ class Sketch:
                 and start != end
             )
         ]
+        constraints = [
+            normalize_edge_constraint(value)
+            for value in self.edge_constraints[:len(self.edges)]
+        ]
+        constraints.extend(
+            [None] * (len(self.edges) - len(constraints))
+        )
+        self.edge_constraints = constraints
+
+    def edge_constraint(self, index: int) -> Optional[str]:
+        """Return the axis constraint for an edge, if any."""
+        if 0 <= index < len(self.edge_constraints):
+            return self.edge_constraints[index]
+        return None
+
+    def constrain_axis_changes(
+        self,
+        points: List[Point],
+        changed: set[int],
+        locked: Optional[set[int]] = None,
+    ) -> None:
+        """Propagate axis constraints after points have been changed."""
+        active = set(changed)
+        locked = set(changed) if locked is None else set(locked)
+        for _ in range(max(1, len(self.points))):
+            adjusted = False
+            for index, (first, second) in enumerate(self.edges):
+                constraint = self.edge_constraint(index)
+                if constraint is None:
+                    continue
+                for mover, other in (
+                    (first, second), (second, first)
+                ):
+                    if (
+                        mover not in active
+                        or other in active
+                        or other in locked
+                    ):
+                        continue
+                    moved_x, moved_y = points[mover]
+                    other_x, other_y = points[other]
+                    points[other] = (
+                        (other_x, moved_y)
+                        if constraint == "horizontal"
+                        else (moved_x, other_y)
+                    )
+                    active.add(other)
+                    adjusted = True
+            if not adjusted:
+                break
 
     @property
     def lines(self) -> List[Tuple[Point, Point]]:
@@ -234,14 +314,17 @@ class Sketch:
             return
         self.points.pop(index)
         shifted: List[Tuple[int, int]] = []
-        for start, end in self.edges:
+        constraints: List[Optional[str]] = []
+        for edge_index, (start, end) in enumerate(self.edges):
             if start == index or end == index:
                 continue
             shifted.append((
                 start if start < index else start - 1,
                 end if end < index else end - 1,
             ))
+            constraints.append(self.edge_constraint(edge_index))
         self.edges = shifted
+        self.edge_constraints = constraints
 
     @property
     def is_custom_plane(self) -> bool:
@@ -281,6 +364,7 @@ class Sketch:
             "edges": [
                 [start, end] for start, end in self.edges
             ],
+            "edge_constraints": list(self.edge_constraints),
             "line_type": self.line_type,
             # Kept for older readers; edges are the source of truth.
             "lines": [
@@ -325,10 +409,14 @@ class Sketch:
 
         line_type = str(data.get("line_type", "normal"))
         edges: List[Tuple[int, int]] = []
+        constraints: List[Optional[str]] = []
         raw_edges = data.get("edges")
         raw_profile = data.get("profile")
+        raw_constraints = data.get("edge_constraints")
+        if not isinstance(raw_constraints, (list, tuple)):
+            raw_constraints = []
         if isinstance(raw_edges, (list, tuple)):
-            for raw in raw_edges:
+            for raw_index, raw in enumerate(raw_edges):
                 if not isinstance(raw, (list, tuple)) or len(raw) < 2:
                     continue
                 try:
@@ -342,6 +430,14 @@ class Sketch:
                     and start != end
                 ):
                     edges.append((start, end))
+                    constraint = (
+                        raw_constraints[raw_index]
+                        if raw_index < len(raw_constraints)
+                        else None
+                    )
+                    constraints.append(
+                        normalize_edge_constraint(constraint)
+                    )
             # Older point-profile sketches stored their loop separately.
             cls._add_loop_edges(
                 edges, cls._valid_profile(raw_profile, len(points))
@@ -369,6 +465,7 @@ class Sketch:
                 end_index = cls._find_or_add_point(points, end)
                 cls._add_edge(edges, start_index, end_index)
 
+        constraints.extend([None] * (len(edges) - len(constraints)))
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Sketch")),
@@ -381,6 +478,7 @@ class Sketch:
             plane_normal=plane_normal,
             line_type=line_type,
             edges=edges,
+            edge_constraints=constraints[:len(edges)],
         )
 
     @staticmethod

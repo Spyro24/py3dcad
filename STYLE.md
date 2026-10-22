@@ -246,6 +246,11 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   `Construction Line`, `Centerline`). Choosing a style selects the Line tool,
   updates the sketch and palette line type, and closes the menu. Clicking
   outside the menu dismisses it.
+- The `CONSTRAINTS` group provides Horizontal and Vertical constraints. Select
+  a single sketch edge, then click the matching button; the edge rotates around
+  its first endpoint to that axis while preserving its length. The matching
+  button gets the 2 px accent border and an `H` or `V` marker appears near the
+  edge midpoint. Other constraint icons remain placeholders.
 - Point is selected when sketch editing begins. Point places standalone
   vertices and never connects them; Line draws chained two-click segments
   between points. Every segment references two point entities, so its
@@ -257,14 +262,22 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   undoable move. Clicking a line selects it and starts an edge drag with any
   tool; dragging translates the edge by moving both endpoint entities, so
   attached segments follow. Releasing after movement commits one hidden
-  undoable move. Points take hit-test priority over lines, and clicking empty
-  space clears the selection before the active Point or Line tool acts. Hover
+  undoable move. Dragging an endpoint of a horizontal or vertical edge brings
+  its partner along on the constrained axis. Points take hit-test priority over
+  lines, and clicking empty space clears the selection before the active Point
+  or Line tool acts. Hover
   outlines sketch points and lines in `geometry_hover`; selection uses a
   thicker `geometry_selection` outline.
 - With the Line tool armed, clicking an existing point snaps to it and starts
   or continues the chain instead of starting a point drag. This keeps shared
   segment endpoints connected while drawing. Clicking or dragging a line
   selects or moves the edge instead of starting a line chain.
+- While drawing a line, a free endpoint within a 6 px screen-space band of the
+  start point's horizontal or vertical axis snaps to that axis and creates the
+  matching constraint. Snapping to an existing point only adds a constraint
+  when that point is already exactly aligned. Automatic snapping and the
+  on-canvas `H`/`V` markers follow the Sketch Palette `Constraints` option;
+  manual toolbar constraints still work when the option is off.
 - `Esc` deselects the current sketch tool, clears the entity selection and
   cancels an in-progress line, point drag or edge drag. It does not leave
   sketch mode or close the sketch palette. Click Point or Line to draw again.
@@ -295,9 +308,9 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
 - Panel background with a top border. Transport controls on the left, then a
   light vertical separator, then one box per history action.
 - Only top-level document actions belong here: sketch creation and solid
-  features. Sketch-internal edits such as points, lines and point moves stay
-  undoable but are omitted from the timeline. Transport previous/next steps
-  between these visible actions.
+  features. Sketch-internal edits such as points, lines, point/edge moves and
+  horizontal/vertical constraints stay undoable but are omitted from the
+  timeline. Transport previous/next steps between these visible actions.
 - Applied actions use the lighter history surface; future actions use `field`.
   Hover lightens applied boxes. The selected action gets a 2 px accent border.
 - The playhead is a 2 px accent line with a 3 px dot.
@@ -343,8 +356,10 @@ Use a 4 px grid with a 2 px half-step for fine optical alignment. Common values:
   hover/selection. Labels are 12 px; titles are 12 px bold and uppercase.
 - The sketch palette uses an inset rounded title bar, a collapsible `Options`
   header, semantic line-style buttons (normal, construction, center),
-  right-aligned checkboxes and a full-width status field. `Finish Sketch` is a
-  filled accent button. Its body scrolls when the viewport is too short.
+  right-aligned checkboxes and a full-width status field. The `Constraints`
+  option controls automatic axis snapping and `H`/`V` marker visibility.
+  `Finish Sketch` is a filled accent button. Its body scrolls when the viewport
+  is too short.
 
 ## 7. Iconography
 

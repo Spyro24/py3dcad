@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..sketch import Point, Sketch, point_on_plane
+from ..sketch import Point, Sketch, aligned_edge_endpoint, point_on_plane
 from .layout import Rect, UILayout
 from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchPaletteWindow, SketchPaletteAction
 from .viewport import Viewport
@@ -52,8 +52,16 @@ class Workspace:
         "point": "Point",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
+        "constraint_vertical": "Vertical Constraint",
+        "constraint_horizontal": "Horizontal Constraint",
     }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
+    SKETCH_CONSTRAINT_ACTIONS = (
+        "constraint_vertical", "constraint_horizontal"
+    )
+    SKETCH_INTERACTIVE_ACTIONS = (
+        "line", "point", *SKETCH_CONSTRAINT_ACTIONS
+    )
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
     ACTIVE_MODE = "SOLID"
     SKETCH_MODE = "SKETCH"
@@ -115,9 +123,10 @@ class Workspace:
         on_new_sketch: Callable[[], None],
         on_extrude: Callable[[], None],
         on_add_point: Callable[[Point], None],
-        on_add_line: Callable[[Point, Point], None],
+        on_add_line: Callable[[Point, Point, Optional[str]], None],
         on_move_point: Callable[[int, Point], None],
         on_move_edge: Callable[[int, Point, Point], None],
+        on_set_edge_constraint: Callable[[int, str], None],
         on_select_sketch: Callable[[int], None],
         on_history_jump: Callable[[int], None],
         on_history_delete: Callable[[int], None],
@@ -130,6 +139,7 @@ class Workspace:
         self.on_add_line = on_add_line
         self.on_move_point = on_move_point
         self.on_move_edge = on_move_edge
+        self.on_set_edge_constraint = on_set_edge_constraint
         self.on_select_sketch = on_select_sketch
         self.on_history_jump = on_history_jump
         self.on_history_delete = on_history_delete
@@ -729,6 +739,13 @@ class Workspace:
                 self.sketch_palette_window.close()
                 return True
             for item in group.items:
+                if item.action in self.SKETCH_CONSTRAINT_ACTIONS:
+                    if self._toolbar_item_hit_rect(item).collidepoint(pos):
+                        self._apply_edge_constraint(
+                            item.action, document
+                        )
+                        return True
+                    continue
                 if item.action not in ("line", "point"):
                     continue
                 if item.action == "line":
@@ -742,6 +759,22 @@ class Workspace:
                 self._select_tool(item.action)
                 return True
         return False
+
+    def _apply_edge_constraint(
+        self, action: str, document: Document
+    ) -> None:
+        sketch = document.sketch(document.active_sketch_id)
+        selected = self._selected_sketch_entity
+        if sketch is None or selected is None or selected[0] != "line":
+            return
+        if not 0 <= selected[1] < len(sketch.edges):
+            return
+        constraint = (
+            "vertical"
+            if action == "constraint_vertical"
+            else "horizontal"
+        )
+        self.on_set_edge_constraint(selected[1], constraint)
 
     def _draw_toolbar(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -865,6 +898,16 @@ class Workspace:
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
         groups = self._sketch_toolbar_groups(region, document)
+        sketch = document.sketch(document.active_sketch_id)
+        selected_constraint: Optional[str] = None
+        selected = self._selected_sketch_entity
+        if (
+            sketch is not None
+            and selected is not None
+            and selected[0] == "line"
+            and 0 <= selected[1] < len(sketch.edges)
+        ):
+            selected_constraint = sketch.edge_constraint(selected[1])
         previous_clip = surface.get_clip()
         surface.set_clip(region.rect.clip(previous_clip))
         for index, group in enumerate(groups):
@@ -885,9 +928,12 @@ class Workspace:
                 active = (
                     item.action in ("line", "point")
                     and self._selected_tool == item.action
+                ) or (
+                    selected_constraint is not None
+                    and item.action == f"constraint_{selected_constraint}"
                 )
                 item_hover = (
-                    item.action in ("line", "point")
+                    item.action in self.SKETCH_INTERACTIVE_ACTIONS
                     and self._hover_tool == item.action
                 ) or (
                     item.action == "finish_sketch"
@@ -911,6 +957,11 @@ class Workspace:
                     item_color = self.text_secondary
                 elif item.action == "finish_sketch":
                     item_color = color
+                elif (
+                    active
+                    and item.action in self.SKETCH_CONSTRAINT_ACTIONS
+                ):
+                    item_color = self.accent
                 else:
                     item_color = self._kind_color(item.action)
                 self._draw_action_icon(
@@ -1092,6 +1143,7 @@ class Workspace:
                 surface, sketch, region, hovered,
                 self.geometry_hover, False,
             )
+        self._draw_sketch_constraints(surface, sketch, region)
         if selected is not None and not (
             self._drag_edge_index is not None
             and selected == ("line", self._drag_edge_index)
@@ -1102,6 +1154,56 @@ class Workspace:
         self._draw_point_drag_preview(surface, sketch, region)
         self._draw_edge_drag_preview(surface, sketch, region)
         surface.set_clip(previous_clip)
+
+    def _draw_sketch_constraints(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        if not self.sketch_palette_window.options.get(
+            "constraints", True
+        ):
+            return
+        for index, (start, end) in enumerate(sketch.lines):
+            constraint = sketch.edge_constraint(index)
+            if constraint is None:
+                continue
+            screen_start = self._project_sketch_point(
+                sketch, start, region
+            )
+            screen_end = self._project_sketch_point(
+                sketch, end, region
+            )
+            midpoint = (
+                (screen_start[0] + screen_end[0]) / 2,
+                (screen_start[1] + screen_end[1]) / 2,
+            )
+            if constraint == "horizontal":
+                anchor = (
+                    midpoint[0], midpoint[1] - self._s(12)
+                )
+                glyph = "H"
+            else:
+                anchor = (
+                    midpoint[0] + self._s(14), midpoint[1]
+                )
+                glyph = "V"
+            if not region.collidepoint(anchor):
+                continue
+            label = self._font_small.render(
+                glyph, True, self.accent
+            )
+            box = label.get_rect(center=(
+                round(anchor[0]), round(anchor[1])
+            ))
+            box.inflate_ip(self._s(6), self._s(2))
+            pygame.draw.rect(
+                surface, self.header_bg, box,
+                border_radius=self._s(3),
+            )
+            pygame.draw.rect(
+                surface, self.border_color, box,
+                width=1, border_radius=self._s(3),
+            )
+            surface.blit(label, label.get_rect(center=box.center))
 
     def _draw_point_drag_preview(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -1129,6 +1231,7 @@ class Workspace:
             )
         preview_points = list(sketch.points)
         preview_points[index] = current
+        sketch.constrain_axis_changes(preview_points, {index})
         for start, end in connected_edges:
             screen_start = self._project_sketch_point(
                 sketch, preview_points[start], region
@@ -1161,6 +1264,9 @@ class Workspace:
         preview_points = list(sketch.points)
         preview_points[first] = current[0]
         preview_points[second] = current[1]
+        sketch.constrain_axis_changes(
+            preview_points, {first, second}
+        )
         for edge_index, (start, end) in enumerate(sketch.edges):
             if first not in (start, end) and second not in (start, end):
                 continue
@@ -2554,6 +2660,7 @@ class Workspace:
                 snap_index = self._pick_sketch_point(
                     event.pos, layout.viewport, sketch
                 )
+                snapped = snap_index is not None
                 if snap_index is not None:
                     point = sketch.points[snap_index]
                 else:
@@ -2566,9 +2673,16 @@ class Workspace:
                     self._clear_sketch_selection()
                     if self._line_start is None:
                         self._line_start = point
-                    elif point != self._line_start:
-                        self.on_add_line(self._line_start, point)
-                        self._line_start = point
+                    else:
+                        point, constraint = self._auto_axis_point(
+                            sketch, self._line_start, point,
+                            layout.viewport, snapped,
+                        )
+                        if point != self._line_start:
+                            self.on_add_line(
+                                self._line_start, point, constraint
+                            )
+                            self._line_start = point
                     self._line_preview = point
                 return True
 
@@ -2744,6 +2858,62 @@ class Workspace:
             return
         self.on_move_edge(index, current[0], current[1])
 
+    def _auto_axis_point(
+        self,
+        sketch: Sketch,
+        start: Point,
+        point: Point,
+        region: Rect,
+        snapped: bool,
+    ) -> Tuple[Point, Optional[str]]:
+        if not self.sketch_palette_window.options.get(
+            "constraints", True
+        ):
+            return point, None
+        if snapped:
+            if start[1] == point[1] and start[0] != point[0]:
+                return point, "horizontal"
+            if start[0] == point[0] and start[1] != point[1]:
+                return point, "vertical"
+            return point, None
+        start_screen = self._project_sketch_point(sketch, start, region)
+        x_screen = self._project_sketch_point(
+            sketch, (start[0] + 1, start[1]), region
+        )
+        y_screen = self._project_sketch_point(
+            sketch, (start[0], start[1] + 1), region
+        )
+        pixels_per_x = max(
+            math.hypot(
+                x_screen[0] - start_screen[0],
+                x_screen[1] - start_screen[1],
+            ),
+            1e-6,
+        )
+        pixels_per_y = max(
+            math.hypot(
+                y_screen[0] - start_screen[0],
+                y_screen[1] - start_screen[1],
+            ),
+            1e-6,
+        )
+        tolerance = self._s(6)
+        tolerance_x = tolerance / pixels_per_x
+        tolerance_y = tolerance / pixels_per_y
+        dx = abs(point[0] - start[0])
+        dy = abs(point[1] - start[1])
+        if dy <= tolerance_y and dx > tolerance_x:
+            return (
+                aligned_edge_endpoint(start, point, "horizontal"),
+                "horizontal",
+            )
+        if dx <= tolerance_x and dy > tolerance_y:
+            return (
+                aligned_edge_endpoint(start, point, "vertical"),
+                "vertical",
+            )
+        return point, None
+
     def _finish_point_drag(self, document: Document) -> None:
         index = self._drag_point_index
         current = self._drag_point_current
@@ -2840,17 +3010,24 @@ class Workspace:
             snap_index = self._pick_sketch_point(
                 pos, layout.viewport, sketch
             )
+            snapped = snap_index is not None
             if snap_index is not None:
-                self._line_preview = sketch.points[snap_index]
+                preview = sketch.points[snap_index]
             else:
                 world = self.viewport.unproject_on_plane(
                     pos, layout.viewport, sketch.frame()
                 )
-                self._line_preview = (
+                preview = (
                     (round(world[0]), round(world[1]))
                     if world is not None
                     else None
                 )
+            if preview is not None and self._line_start is not None:
+                preview, _ = self._auto_axis_point(
+                    sketch, self._line_start, preview,
+                    layout.viewport, snapped,
+                )
+            self._line_preview = preview
         else:
             self._line_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
@@ -2870,7 +3047,7 @@ class Workspace:
                     self._hover_tool = "finish_sketch"
                     break
                 for item in group.items:
-                    if item.action not in ("line", "point"):
+                    if item.action not in self.SKETCH_INTERACTIVE_ACTIONS:
                         continue
                     if self._toolbar_item_hit_rect(item).collidepoint(pos):
                         self._hover_tool = item.action

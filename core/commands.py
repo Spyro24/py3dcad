@@ -1,10 +1,18 @@
 """Undoable document editing commands."""
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from .document import Document
-from .sketch import Extrude, PlaneFrame, Point, Sketch, normalize_plane
+from .sketch import (
+    Extrude,
+    PlaneFrame,
+    Point,
+    Sketch,
+    aligned_edge_endpoint,
+    normalize_edge_constraint,
+    normalize_plane,
+)
 
 
 class Command(ABC):
@@ -121,7 +129,7 @@ class AddPointCommand(Command):
 
 
 class MovePointCommand(Command):
-    """Move an existing sketch point."""
+    """Move an existing sketch point and its axis-constrained neighbours."""
 
     kind = "move_point"
     timeline_visible = False
@@ -137,11 +145,14 @@ class MovePointCommand(Command):
         self.sketch = sketch
         self.index = index
         self.point = point
-        self.previous: Optional[Point] = (
-            sketch.points[index]
-            if 0 <= index < len(sketch.points)
-            else None
-        )
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
+        if 0 <= index < len(sketch.points):
+            self.previous_points = list(sketch.points)
+            next_points = list(sketch.points)
+            next_points[index] = point
+            sketch.constrain_axis_changes(next_points, {index})
+            self.next_points = next_points
 
     @property
     def label(self) -> str:
@@ -152,20 +163,16 @@ class MovePointCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        if (
-            self.previous is not None
-            and 0 <= self.index < len(self.sketch.points)
-        ):
-            self.sketch.points[self.index] = self.point
-            self.document.dirty = True
+        if self.next_points is None:
+            return
+        self.sketch.points[:] = self.next_points
+        self.document.dirty = True
 
     def undo(self) -> None:
-        if (
-            self.previous is not None
-            and 0 <= self.index < len(self.sketch.points)
-        ):
-            self.sketch.points[self.index] = self.previous
-            self.document.dirty = True
+        if self.previous_points is None:
+            return
+        self.sketch.points[:] = self.previous_points
+        self.document.dirty = True
 
 
 class MoveEdgeCommand(Command):
@@ -187,19 +194,26 @@ class MoveEdgeCommand(Command):
         self.index = index
         self.start = start
         self.end = end
-        self.indices: Optional[Tuple[int, int]] = None
-        self.previous: Optional[Tuple[Point, Point]] = None
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
         if 0 <= index < len(sketch.edges):
             first, second = sketch.edges[index]
             if (
                 0 <= first < len(sketch.points)
                 and 0 <= second < len(sketch.points)
             ):
-                self.indices = (first, second)
-                self.previous = (
-                    sketch.points[first],
-                    sketch.points[second],
+                constraint = sketch.edge_constraint(index)
+                aligned_end = aligned_edge_endpoint(
+                    start, end, constraint
                 )
+                self.previous_points = list(sketch.points)
+                next_points = list(sketch.points)
+                next_points[first] = start
+                next_points[second] = aligned_end
+                sketch.constrain_axis_changes(
+                    next_points, {first, second}
+                )
+                self.next_points = next_points
 
     @property
     def label(self) -> str:
@@ -210,28 +224,86 @@ class MoveEdgeCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        if self.indices is None:
+        if self.next_points is None:
             return
-        first, second = self.indices
-        if (
-            0 <= first < len(self.sketch.points)
-            and 0 <= second < len(self.sketch.points)
-        ):
-            self.sketch.points[first] = self.start
-            self.sketch.points[second] = self.end
-            self.document.dirty = True
+        self.sketch.points[:] = self.next_points
+        self.document.dirty = True
 
     def undo(self) -> None:
-        if self.indices is None or self.previous is None:
+        if self.previous_points is None:
             return
-        first, second = self.indices
+        self.sketch.points[:] = self.previous_points
+        self.document.dirty = True
+
+
+class SetEdgeConstraintCommand(Command):
+    """Apply or replace a horizontal or vertical edge constraint."""
+
+    kind = "constraint"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        index: int,
+        constraint: str,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.index = index
+        self.constraint = normalize_edge_constraint(constraint)
+        self.previous_constraint = sketch.edge_constraint(index)
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
         if (
-            0 <= first < len(self.sketch.points)
-            and 0 <= second < len(self.sketch.points)
+            self.constraint is not None
+            and 0 <= index < len(sketch.edges)
         ):
-            self.sketch.points[first] = self.previous[0]
-            self.sketch.points[second] = self.previous[1]
-            self.document.dirty = True
+            first, second = sketch.edges[index]
+            if (
+                0 <= first < len(sketch.points)
+                and 0 <= second < len(sketch.points)
+            ):
+                self.previous_points = list(sketch.points)
+                next_points = list(sketch.points)
+                next_points[second] = aligned_edge_endpoint(
+                    next_points[first],
+                    next_points[second],
+                    self.constraint,
+                )
+                sketch.constrain_axis_changes(
+                    next_points, {second}, {first, second}
+                )
+                self.next_points = next_points
+
+    @property
+    def label(self) -> str:
+        return "Edge Constraint"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self.constraint is None or not 0 <= self.index < len(
+            self.sketch.edges
+        ):
+            return
+        if self.next_points is not None:
+            self.sketch.points[:] = self.next_points
+        self.sketch.edge_constraints[self.index] = self.constraint
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if not 0 <= self.index < len(self.sketch.edges):
+            return
+        if self.previous_points is not None:
+            self.sketch.points[:] = self.previous_points
+        self.sketch.edge_constraints[self.index] = (
+            self.previous_constraint
+        )
+        self.document.dirty = True
 
 
 class AddLineCommand(Command):
@@ -246,11 +318,15 @@ class AddLineCommand(Command):
         sketch: Sketch,
         start: Point,
         end: Point,
+        constraint: Optional[str] = None,
     ) -> None:
         self.document = document
         self.sketch = sketch
         self.start = start
-        self.end = end
+        self.constraint = normalize_edge_constraint(constraint)
+        self.end = aligned_edge_endpoint(
+            start, end, self.constraint
+        )
         self.index: Optional[int] = None
         self.created_points: List[int] = []
 
@@ -284,6 +360,9 @@ class AddLineCommand(Command):
         self.sketch.edges.insert(
             self.index, (start_index, end_index)
         )
+        self.sketch.edge_constraints.insert(
+            self.index, self.constraint
+        )
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -292,6 +371,8 @@ class AddLineCommand(Command):
             and self.index < len(self.sketch.edges)
         ):
             self.sketch.edges.pop(self.index)
+            if self.index < len(self.sketch.edge_constraints):
+                self.sketch.edge_constraints.pop(self.index)
         referenced = {
             index
             for edge in self.sketch.edges

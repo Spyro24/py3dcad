@@ -14,6 +14,7 @@ from .commands import (
     CommandStack,
     MoveEdgeCommand,
     MovePointCommand,
+    SetEdgeConstraintCommand,
 )
 from .config import Config, format_opened
 from .document import Document
@@ -59,6 +60,7 @@ class Application:
             on_add_line=self.add_line,
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
+            on_set_edge_constraint=self.set_edge_constraint,
             on_select_sketch=self.select_sketch,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
@@ -297,7 +299,10 @@ class Application:
             return
         stack.execute(AddPointCommand(document, sketch, point))
 
-    def add_line(self, start: Point, end: Point) -> None:
+    def add_line(
+        self, start: Point, end: Point,
+        constraint: Optional[str] = None,
+    ) -> None:
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
@@ -306,7 +311,9 @@ class Application:
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or start == end:
             return
-        stack.execute(AddLineCommand(document, sketch, start, end))
+        stack.execute(
+            AddLineCommand(document, sketch, start, end, constraint)
+        )
 
     def move_point(self, index: int, point: Point) -> None:
         self._playing = False
@@ -345,6 +352,27 @@ class Application:
             return
         stack.execute(
             MoveEdgeCommand(document, sketch, index, start, end)
+        )
+
+    def set_edge_constraint(
+        self, index: int, constraint: str
+    ) -> None:
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.edges):
+            return
+        if constraint not in ("horizontal", "vertical"):
+            return
+        if sketch.edge_constraint(index) == constraint:
+            return
+        stack.execute(
+            SetEdgeConstraintCommand(
+                document, sketch, index, constraint
+            )
         )
 
     def extrude_active(self) -> None:
