@@ -151,7 +151,7 @@ class MovePointCommand(Command):
             self.previous_points = list(sketch.points)
             next_points = list(sketch.points)
             next_points[index] = point
-            sketch.constrain_axis_changes(next_points, {index})
+            sketch.constrain_axis_changes(next_points, [index])
             self.next_points = next_points
 
     @property
@@ -211,7 +211,7 @@ class MoveEdgeCommand(Command):
                 next_points[first] = start
                 next_points[second] = aligned_end
                 sketch.constrain_axis_changes(
-                    next_points, {first, second}
+                    next_points, [first, second]
                 )
                 self.next_points = next_points
 
@@ -273,7 +273,10 @@ class SetEdgeConstraintCommand(Command):
                     self.constraint,
                 )
                 sketch.constrain_axis_changes(
-                    next_points, {second}, {first, second}
+                    next_points,
+                    [second],
+                    [first, second],
+                    excluded_edges=[index],
                 )
                 self.next_points = next_points
 

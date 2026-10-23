@@ -1452,7 +1452,7 @@ class Workspace:
             )
         preview_points = list(sketch.points)
         preview_points[index] = current
-        sketch.constrain_axis_changes(preview_points, {index})
+        sketch.constrain_axis_changes(preview_points, [index])
         for start, end in connected_edges:
             screen_start = self._project_sketch_point(
                 sketch, preview_points[start], region
@@ -1486,7 +1486,7 @@ class Workspace:
         preview_points[first] = current[0]
         preview_points[second] = current[1]
         sketch.constrain_axis_changes(
-            preview_points, {first, second}
+            preview_points, [first, second]
         )
         for edge_index, (start, end) in enumerate(sketch.edges):
             if first not in (start, end) and second not in (start, end):

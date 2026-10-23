@@ -2,7 +2,9 @@
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import (
+    Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union,
+)
 
 Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
@@ -185,38 +187,91 @@ class Sketch:
     def constrain_axis_changes(
         self,
         points: List[Point],
-        changed: set[int],
-        locked: Optional[set[int]] = None,
+        changed: Iterable[int],
+        locked: Optional[Iterable[int]] = None,
+        excluded_edges: Optional[Iterable[int]] = None,
     ) -> None:
-        """Propagate axis constraints after points have been changed."""
-        active = set(changed)
-        locked = set(changed) if locked is None else set(locked)
-        for _ in range(max(1, len(self.points))):
-            adjusted = False
-            for index, (first, second) in enumerate(self.edges):
-                constraint = self.edge_constraint(index)
-                if constraint is None:
-                    continue
-                for mover, other in (
-                    (first, second), (second, first)
-                ):
-                    if (
-                        mover not in active
-                        or other in active
-                        or other in locked
-                    ):
+        """Enforce all axis constraints after points have been changed.
+
+        Horizontal constraints make the y-coordinates of their endpoints
+        equal, and vertical constraints do the same for x-coordinates.  Each
+        connected group is therefore solved independently for the affected
+        axis.  ``locked`` lists the preferred anchor points in priority
+        order; the first anchor in a group provides its target coordinate.
+        Remaining points in the group follow, which keeps every constraint
+        satisfied even when several previously constrained edges meet.
+
+        Edges in ``excluded_edges`` are ignored, allowing an edge's old
+        constraint to be replaced without it fighting the new alignment.
+        """
+        count = len(points)
+        if count == 0:
+            return
+        changed_order = list(changed)
+        locked_order = (
+            list(locked) if locked is not None else list(changed_order)
+        )
+        excluded = set(excluded_edges or ())
+
+        horizontal = list(range(count))
+        vertical = list(range(count))
+
+        def root(parent: List[int], index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def join(parent: List[int], first: int, second: int) -> None:
+            first_root = root(parent, first)
+            second_root = root(parent, second)
+            if first_root != second_root:
+                parent[second_root] = first_root
+
+        for index, (first, second) in enumerate(self.edges):
+            if index in excluded:
+                continue
+            if not (
+                0 <= first < count
+                and 0 <= second < count
+            ):
+                continue
+            constraint = self.edge_constraint(index)
+            if constraint == "horizontal":
+                join(horizontal, first, second)
+            elif constraint == "vertical":
+                join(vertical, first, second)
+
+        for parent, axis in ((horizontal, 1), (vertical, 0)):
+            groups: Dict[int, List[int]] = {}
+            for index in range(count):
+                groups.setdefault(root(parent, index), []).append(index)
+            for members in groups.values():
+                member_set = set(members)
+                target: Optional[float] = None
+                anchor = members[0]
+                for index in locked_order:
+                    if index in member_set:
+                        target = points[index][axis]
+                        anchor = index
+                        break
+                if target is None:
+                    for index in changed_order:
+                        if index in member_set:
+                            target = points[index][axis]
+                            anchor = index
+                            break
+                if target is None:
+                    target = points[anchor][axis]
+                for index in members:
+                    if index == anchor:
                         continue
-                    moved_x, moved_y = points[mover]
-                    other_x, other_y = points[other]
-                    points[other] = (
-                        (other_x, moved_y)
-                        if constraint == "horizontal"
-                        else (moved_x, other_y)
+                    point = points[index]
+                    points[index] = (
+                        (target, point[1])
+                        if axis == 0
+                        else (point[0], target)
                     )
-                    active.add(other)
-                    adjusted = True
-            if not adjusted:
-                break
 
     @property
     def lines(self) -> List[Tuple[Point, Point]]:
