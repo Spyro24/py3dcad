@@ -17,11 +17,16 @@ from .commands import (
     MovePointCommand,
     SetEdgeConstraintCommand,
     SetMeasurementPlacementCommand,
+    SetMeasurementValueCommand,
 )
 from .config import Config, format_opened
 from .document import Document
 from .faces import face_for_ref
-from .sketch import Point, normalize_measurement_placement
+from .sketch import (
+    Point,
+    normalize_measurement_placement,
+    normalize_measurement_value,
+)
 from .ui import (
     Window,
     UILayout,
@@ -70,6 +75,7 @@ class Application:
             on_settings=self.open_settings,
             on_add_measurement=self.add_measurement,
             on_set_measurement_placement=self.set_measurement_placement,
+            on_set_measurement_value=self.set_measurement_value,
         )
         self.save_dialog = SaveDialog(self._save_to)
         self.settings_dialog = SettingsDialog(self._set_orientation_cube)
@@ -385,6 +391,7 @@ class Application:
         first: tuple[str, int],
         second: tuple[str, int],
         placement: Optional[float] = None,
+        value: Optional[float] = None,
     ) -> None:
         self._playing = False
         document = self.active_document()
@@ -401,6 +408,11 @@ class Application:
             if normalized is None:
                 return
             placement = normalized
+        if value is not None:
+            normalized = normalize_measurement_value(value)
+            if normalized is None:
+                return
+            value = normalized
         for entity_kind, index in (first, second):
             if entity_kind == "point":
                 if not 0 <= index < len(sketch.points):
@@ -418,6 +430,7 @@ class Application:
                 first,
                 second,
                 placement,
+                value,
             )
         )
 
@@ -440,6 +453,27 @@ class Application:
             return
         stack.execute(
             SetMeasurementPlacementCommand(
+                document, sketch, index, normalized
+            )
+        )
+
+    def set_measurement_value(self, index: int, value: float) -> None:
+        """Set a measurement value; the engine never overwrites it."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.measurements):
+            return
+        normalized = normalize_measurement_value(value)
+        if normalized is None:
+            return
+        if sketch.measurements[index].value == normalized:
+            return
+        stack.execute(
+            SetMeasurementValueCommand(
                 document, sketch, index, normalized
             )
         )

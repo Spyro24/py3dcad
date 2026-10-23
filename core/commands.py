@@ -13,6 +13,7 @@ from .sketch import (
     aligned_edge_endpoint,
     normalize_edge_constraint,
     normalize_measurement_placement,
+    normalize_measurement_value,
     normalize_plane,
 )
 
@@ -325,14 +326,21 @@ class AddMeasurementCommand(Command):
         first: Tuple[str, int],
         second: Tuple[str, int],
         placement: Optional[float] = None,
+        value: Optional[float] = None,
     ) -> None:
         self.document = document
         self.sketch = sketch
+        normalized_value = normalize_measurement_value(value)
+        if normalized_value is None:
+            normalized_value = sketch.measurement_value(
+                measurement_kind, first, second
+            )
         self.measurement = Measurement(
             measurement_kind,
             first,
             second,
             normalize_measurement_placement(placement),
+            normalized_value,
         )
         self.index: Optional[int] = None
 
@@ -417,6 +425,7 @@ class SetMeasurementPlacementCommand(Command):
             measurement.first,
             measurement.second,
             placement,
+            measurement.value,
         )
         self.document.dirty = True
 
@@ -429,6 +438,63 @@ class SetMeasurementPlacementCommand(Command):
             ].placement
             self.has_previous = True
         self._replace(self.placement)
+
+    def undo(self) -> None:
+        if not self.has_previous:
+            return
+        self._replace(self.previous)
+
+
+class SetMeasurementValueCommand(Command):
+    """Set the user-owned value of a measurement annotation."""
+
+    kind = "measurement_value"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        index: int,
+        value: Optional[float],
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.index = index
+        self.value = normalize_measurement_value(value)
+        self.previous: Optional[float] = None
+        self.has_previous = False
+
+    @property
+    def label(self) -> str:
+        return "Edit Measurement"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def _replace(self, value: Optional[float]) -> None:
+        if not 0 <= self.index < len(self.sketch.measurements):
+            return
+        measurement = self.sketch.measurements[self.index]
+        self.sketch.measurements[self.index] = Measurement(
+            measurement.kind,
+            measurement.first,
+            measurement.second,
+            measurement.placement,
+            value,
+        )
+        self.document.dirty = True
+
+    def do(self) -> None:
+        if not 0 <= self.index < len(self.sketch.measurements):
+            return
+        if not self.has_previous:
+            self.previous = self.sketch.measurements[
+                self.index
+            ].value
+            self.has_previous = True
+        self._replace(self.value)
 
     def undo(self) -> None:
         if not self.has_previous:

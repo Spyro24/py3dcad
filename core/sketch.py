@@ -57,6 +57,24 @@ def normalize_measurement_placement(value: Any) -> Optional[float]:
     return result
 
 
+def normalize_measurement_value(value: Any) -> Optional[float]:
+    """Return a finite, non-negative measurement value or None.
+
+    Distance values are stored in sketch units; angle values are stored in
+    degrees.  Unlike placements, these values are owned by the user and are
+    never recomputed from the geometry after creation.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result) or result < 0:
+        return None
+    return result
+
+
 def normalize_edge_constraint(value: Any) -> Optional[str]:
     """Return a supported edge constraint key or None."""
     if isinstance(value, str):
@@ -194,6 +212,10 @@ class Measurement:
     # measurements store the arc radius.  None selects a computed default
     # for older documents.
     placement: Optional[float] = None
+    # User-owned measurement value.  Distance values use sketch units and
+    # angle values use degrees.  The engine sets this once when the
+    # measurement is created and only the user may change it afterwards.
+    value: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -201,6 +223,7 @@ class Measurement:
             "first": [self.first[0], self.first[1]],
             "second": [self.second[0], self.second[1]],
             "placement": self.placement,
+            "value": self.value,
         }
 
     @classmethod
@@ -217,6 +240,7 @@ class Measurement:
             first,
             second,
             normalize_measurement_placement(data.get("placement")),
+            normalize_measurement_value(data.get("value")),
         )
 
 
@@ -294,9 +318,298 @@ class Sketch:
                         normalize_measurement_placement(
                             measurement.placement
                         ),
+                        normalize_measurement_value(
+                            measurement.value
+                        ),
                     )
                 )
         self.measurements = measurements
+        # Older documents did not store a measurement value.  Freeze one
+        # from the current geometry exactly once so the engine never
+        # overwrites a measurement afterwards.
+        for index, measurement in enumerate(self.measurements):
+            if measurement.value is not None:
+                continue
+            value = self.measurement_value(
+                measurement.kind,
+                measurement.first,
+                measurement.second,
+            )
+            if value is None:
+                continue
+            self.measurements[index] = Measurement(
+                measurement.kind,
+                measurement.first,
+                measurement.second,
+                measurement.placement,
+                value,
+            )
+
+    def measurement_entity_points(
+        self, ref: Tuple[str, int]
+    ) -> Optional[Tuple[Point, Point]]:
+        """Return the endpoints used by a point or line measurement ref."""
+        kind, index = ref
+        if kind == "point":
+            if 0 <= index < len(self.points):
+                point = self.points[index]
+                return point, point
+            return None
+        if kind == "line":
+            if 0 <= index < len(self.edges):
+                start, end = self.edges[index]
+                if (
+                    0 <= start < len(self.points)
+                    and 0 <= end < len(self.points)
+                ):
+                    return self.points[start], self.points[end]
+        return None
+
+    @staticmethod
+    def closest_point_on_segment(
+        point: Point, start: Point, end: Point
+    ) -> Point:
+        delta_x = end[0] - start[0]
+        delta_y = end[1] - start[1]
+        length_squared = delta_x * delta_x + delta_y * delta_y
+        if length_squared <= 1e-12:
+            return start
+        factor = (
+            (point[0] - start[0]) * delta_x
+            + (point[1] - start[1]) * delta_y
+        ) / length_squared
+        factor = max(0.0, min(1.0, factor))
+        return (
+            start[0] + factor * delta_x,
+            start[1] + factor * delta_y,
+        )
+
+    @classmethod
+    def segments_closest_points(
+        cls,
+        first_start: Point,
+        first_end: Point,
+        second_start: Point,
+        second_end: Point,
+    ) -> Tuple[Point, Point]:
+        intersection = cls.segments_intersection(
+            first_start, first_end, second_start, second_end
+        )
+        if intersection is not None:
+            return intersection, intersection
+        candidates = [
+            (
+                first_start,
+                cls.closest_point_on_segment(
+                    first_start, second_start, second_end
+                ),
+            ),
+            (
+                first_end,
+                cls.closest_point_on_segment(
+                    first_end, second_start, second_end
+                ),
+            ),
+            (
+                cls.closest_point_on_segment(
+                    second_start, first_start, first_end
+                ),
+                second_start,
+            ),
+            (
+                cls.closest_point_on_segment(
+                    second_end, first_start, first_end
+                ),
+                second_end,
+            ),
+        ]
+        return min(
+            candidates,
+            key=lambda pair: math.hypot(
+                pair[1][0] - pair[0][0],
+                pair[1][1] - pair[0][1],
+            ),
+        )
+
+    @staticmethod
+    def segments_intersection(
+        first_start: Point,
+        first_end: Point,
+        second_start: Point,
+        second_end: Point,
+    ) -> Optional[Point]:
+        epsilon = 1e-9
+
+        def cross(
+            ax: float, ay: float, bx: float, by: float
+        ) -> float:
+            return ax * by - ay * bx
+
+        def orientation(a: Point, b: Point, c: Point) -> float:
+            return cross(
+                b[0] - a[0], b[1] - a[1],
+                c[0] - a[0], c[1] - a[1],
+            )
+
+        def on_segment(a: Point, b: Point, point: Point) -> bool:
+            return (
+                min(a[0], b[0]) - epsilon
+                <= point[0] <= max(a[0], b[0]) + epsilon
+                and min(a[1], b[1]) - epsilon
+                <= point[1] <= max(a[1], b[1]) + epsilon
+            )
+
+        first_cross = orientation(
+            first_start, first_end, second_start
+        )
+        second_cross = orientation(
+            first_start, first_end, second_end
+        )
+        third_cross = orientation(
+            second_start, second_end, first_start
+        )
+        fourth_cross = orientation(
+            second_start, second_end, first_end
+        )
+        if (
+            (first_cross > epsilon and second_cross < -epsilon)
+            or (first_cross < -epsilon and second_cross > epsilon)
+        ) and (
+            (third_cross > epsilon and fourth_cross < -epsilon)
+            or (third_cross < -epsilon and fourth_cross > epsilon)
+        ):
+            delta_x = first_end[0] - first_start[0]
+            delta_y = first_end[1] - first_start[1]
+            other_x = second_end[0] - second_start[0]
+            other_y = second_end[1] - second_start[1]
+            denominator = cross(delta_x, delta_y, other_x, other_y)
+            if abs(denominator) <= epsilon:
+                return None
+            factor = cross(
+                second_start[0] - first_start[0],
+                second_start[1] - first_start[1],
+                other_x,
+                other_y,
+            ) / denominator
+            return (
+                first_start[0] + factor * delta_x,
+                first_start[1] + factor * delta_y,
+            )
+        if (
+            abs(first_cross) <= epsilon
+            and on_segment(first_start, first_end, second_start)
+        ):
+            return second_start
+        if (
+            abs(second_cross) <= epsilon
+            and on_segment(first_start, first_end, second_end)
+        ):
+            return second_end
+        if (
+            abs(third_cross) <= epsilon
+            and on_segment(second_start, second_end, first_start)
+        ):
+            return first_start
+        if (
+            abs(fourth_cross) <= epsilon
+            and on_segment(second_start, second_end, first_end)
+        ):
+            return first_end
+        return None
+
+    def angle_geometry(
+        self, first: Tuple[str, int], second: Tuple[str, int]
+    ) -> Optional[Tuple[float, Point, Point, Point]]:
+        """Return angle, shared vertex, and rays, if the edges meet."""
+        if first[0] != "line" or second[0] != "line":
+            return None
+        if not (
+            0 <= first[1] < len(self.edges)
+            and 0 <= second[1] < len(self.edges)
+        ):
+            return None
+        first_edge = self.edges[first[1]]
+        second_edge = self.edges[second[1]]
+        shared = set(first_edge) & set(second_edge)
+        if len(shared) != 1:
+            return None
+        vertex_index = next(iter(shared))
+        first_far = (
+            first_edge[0]
+            if first_edge[1] == vertex_index
+            else first_edge[1]
+        )
+        second_far = (
+            second_edge[0]
+            if second_edge[1] == vertex_index
+            else second_edge[1]
+        )
+        if first_far == vertex_index or second_far == vertex_index:
+            return None
+        vertex = self.points[vertex_index]
+        first_point = self.points[first_far]
+        second_point = self.points[second_far]
+        first_x = first_point[0] - vertex[0]
+        first_y = first_point[1] - vertex[1]
+        second_x = second_point[0] - vertex[0]
+        second_y = second_point[1] - vertex[1]
+        first_length = math.hypot(first_x, first_y)
+        second_length = math.hypot(second_x, second_y)
+        if first_length <= 1e-9 or second_length <= 1e-9:
+            return None
+        cosine = (
+            first_x * second_x + first_y * second_y
+        ) / (first_length * second_length)
+        cosine = max(-1.0, min(1.0, cosine))
+        angle = math.degrees(math.acos(cosine))
+        return angle, vertex, first_point, second_point
+
+    def distance_geometry(
+        self, first: Tuple[str, int], second: Tuple[str, int]
+    ) -> Optional[Tuple[float, Point, Point]]:
+        """Return the shortest distance and the measured points."""
+        first_points = self.measurement_entity_points(first)
+        second_points = self.measurement_entity_points(second)
+        if first_points is None or second_points is None:
+            return None
+        if first[0] == "point" and second[0] == "point":
+            first_point = first_points[0]
+            second_point = second_points[0]
+        elif first[0] == "point":
+            first_point = first_points[0]
+            second_point = self.closest_point_on_segment(
+                first_point, second_points[0], second_points[1]
+            )
+        elif second[0] == "point":
+            second_point = second_points[0]
+            first_point = self.closest_point_on_segment(
+                second_point, first_points[0], first_points[1]
+            )
+        else:
+            first_point, second_point = self.segments_closest_points(
+                first_points[0], first_points[1],
+                second_points[0], second_points[1],
+            )
+        distance = math.hypot(
+            second_point[0] - first_point[0],
+            second_point[1] - first_point[1],
+        )
+        return distance, first_point, second_point
+
+    def measurement_value(
+        self,
+        kind: str,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> Optional[float]:
+        """Return the initial value for a measurement from the geometry."""
+        if kind == "angle":
+            geometry = self.angle_geometry(first, second)
+        elif kind == "distance":
+            geometry = self.distance_geometry(first, second)
+        else:
+            return None
+        return geometry[0] if geometry is not None else None
 
     def edge_constraint(self, index: int) -> Optional[str]:
         """Return the axis constraint for an edge, if any."""
@@ -518,6 +831,7 @@ class Sketch:
                         first,
                         second,
                         measurement.placement,
+                        measurement.value,
                     )
                 )
         self.measurements = measurements

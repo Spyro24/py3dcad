@@ -143,11 +143,20 @@ class Workspace:
         on_settings: Optional[Callable[[], None]] = None,
         on_add_measurement: Optional[
             Callable[
-                [str, Tuple[str, int], Tuple[str, int], Optional[float]],
+                [
+                    str,
+                    Tuple[str, int],
+                    Tuple[str, int],
+                    Optional[float],
+                    Optional[float],
+                ],
                 None,
             ]
         ] = None,
         on_set_measurement_placement: Optional[
+            Callable[[int, float], None]
+        ] = None,
+        on_set_measurement_value: Optional[
             Callable[[int, float], None]
         ] = None,
     ) -> None:
@@ -167,6 +176,7 @@ class Workspace:
         self.on_set_measurement_placement = (
             on_set_measurement_placement
         )
+        self.on_set_measurement_value = on_set_measurement_value
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -193,6 +203,13 @@ class Workspace:
         self._drag_measurement_original: Optional[float] = None
         self._drag_measurement_current: Optional[float] = None
         self._drag_measurement_grab_delta = 0.0
+        self._drag_measurement_start_pos: Optional[Tuple[int, int]] = None
+        self._drag_measurement_moved = False
+        self._editing_measurement_index: Optional[int] = None
+        self._measurement_edit_text = ""
+        self._measurement_edit_error = ""
+        self._measurement_edit_rect: Optional[pygame.Rect] = None
+        self._measurement_edit_pristine = False
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
         self._drag_point_index: Optional[int] = None
@@ -238,6 +255,7 @@ class Workspace:
         self.tree_selection = pygame.Color(44, 94, 154)
         self.geometry_selection = pygame.Color(255, 193, 110)
         self.geometry_hover = pygame.Color(255, 224, 180)
+        self.error_color = pygame.Color(235, 100, 100)
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.scale) < 1e-6:
@@ -261,6 +279,13 @@ class Workspace:
         self._drag_measurement_original = None
         self._drag_measurement_current = None
         self._drag_measurement_grab_delta = 0.0
+        self._drag_measurement_start_pos = None
+        self._drag_measurement_moved = False
+        self._editing_measurement_index = None
+        self._measurement_edit_text = ""
+        self._measurement_edit_error = ""
+        self._measurement_edit_rect = None
+        self._measurement_edit_pristine = False
         self.create_sketch_window.set_scale(scale)
         self.sketch_palette_window.set_scale(scale)
         self._font_label = None
@@ -303,6 +328,13 @@ class Workspace:
         self._drag_measurement_original = None
         self._drag_measurement_current = None
         self._drag_measurement_grab_delta = 0.0
+        self._drag_measurement_start_pos = None
+        self._drag_measurement_moved = False
+        self._editing_measurement_index = None
+        self._measurement_edit_text = ""
+        self._measurement_edit_error = ""
+        self._measurement_edit_rect = None
+        self._measurement_edit_pristine = False
 
     def _clear_sketch_selection(self) -> None:
         self._selected_sketch_entity = None
@@ -1186,11 +1218,19 @@ class Workspace:
             # Angle-only mode needs two edges with one shared vertex.
             self._measure_selection = [first]
             return
+        value = self._measurement_value_from_geometry(
+            sketch, kind, first, second
+        )
+        if value is None:
+            self._measure_selection.clear()
+            return
         if self.on_add_measurement is not None:
             placement = self._default_measurement_placement(
                 sketch, kind, first, second
             )
-            self.on_add_measurement(kind, first, second, placement)
+            self.on_add_measurement(
+                kind, first, second, placement, value
+            )
         self._measure_selection.clear()
 
     def _resolve_measurement_kind(
@@ -1217,49 +1257,7 @@ class Workspace:
         first: Tuple[str, int],
         second: Tuple[str, int],
     ) -> Optional[Tuple[float, Point, Point, Point]]:
-        """Return angle, shared vertex, and rays, if the edges meet."""
-        if first[0] != "line" or second[0] != "line":
-            return None
-        if not (
-            0 <= first[1] < len(sketch.edges)
-            and 0 <= second[1] < len(sketch.edges)
-        ):
-            return None
-        first_edge = sketch.edges[first[1]]
-        second_edge = sketch.edges[second[1]]
-        shared = set(first_edge) & set(second_edge)
-        if len(shared) != 1:
-            return None
-        vertex_index = next(iter(shared))
-        first_far = (
-            first_edge[0]
-            if first_edge[1] == vertex_index
-            else first_edge[1]
-        )
-        second_far = (
-            second_edge[0]
-            if second_edge[1] == vertex_index
-            else second_edge[1]
-        )
-        if first_far == vertex_index or second_far == vertex_index:
-            return None
-        vertex = sketch.points[vertex_index]
-        first_point = sketch.points[first_far]
-        second_point = sketch.points[second_far]
-        first_x = first_point[0] - vertex[0]
-        first_y = first_point[1] - vertex[1]
-        second_x = second_point[0] - vertex[0]
-        second_y = second_point[1] - vertex[1]
-        first_length = math.hypot(first_x, first_y)
-        second_length = math.hypot(second_x, second_y)
-        if first_length <= 1e-9 or second_length <= 1e-9:
-            return None
-        cosine = (
-            first_x * second_x + first_y * second_y
-        ) / (first_length * second_length)
-        cosine = max(-1.0, min(1.0, cosine))
-        angle = math.degrees(math.acos(cosine))
-        return angle, vertex, first_point, second_point
+        return sketch.angle_geometry(first, second)
 
     def _distance_geometry(
         self,
@@ -1267,33 +1265,7 @@ class Workspace:
         first: Tuple[str, int],
         second: Tuple[str, int],
     ) -> Optional[Tuple[float, Point, Point]]:
-        first_points = self._measurement_entity_points(sketch, first)
-        second_points = self._measurement_entity_points(sketch, second)
-        if first_points is None or second_points is None:
-            return None
-        if first[0] == "point" and second[0] == "point":
-            first_point = first_points[0]
-            second_point = second_points[0]
-        elif first[0] == "point":
-            first_point = first_points[0]
-            second_point = self._closest_point_on_segment(
-                first_point, second_points[0], second_points[1]
-            )
-        elif second[0] == "point":
-            second_point = second_points[0]
-            first_point = self._closest_point_on_segment(
-                second_point, first_points[0], first_points[1]
-            )
-        else:
-            first_point, second_point = self._segments_closest_points(
-                first_points[0], first_points[1],
-                second_points[0], second_points[1],
-            )
-        distance = math.hypot(
-            second_point[0] - first_point[0],
-            second_point[1] - first_point[1],
-        )
-        return distance, first_point, second_point
+        return sketch.distance_geometry(first, second)
 
     @staticmethod
     def _measurement_axis(
@@ -1321,6 +1293,16 @@ class Workspace:
             sum(point[0] for point in sketch.points) / count,
             sum(point[1] for point in sketch.points) / count,
         )
+
+    def _measurement_value_from_geometry(
+        self,
+        sketch: Sketch,
+        kind: str,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> Optional[float]:
+        """Compute the initial value once, when a measurement is created."""
+        return sketch.measurement_value(kind, first, second)
 
     def _default_measurement_placement(
         self,
@@ -1454,172 +1436,6 @@ class Workspace:
                     world[1] - vertex[1],
                 ),
             )
-        return None
-
-    @staticmethod
-    def _measurement_entity_points(
-        sketch: Sketch, ref: Tuple[str, int]
-    ) -> Optional[Tuple[Point, Point]]:
-        kind, index = ref
-        if kind == "point":
-            if 0 <= index < len(sketch.points):
-                point = sketch.points[index]
-                return point, point
-            return None
-        if kind == "line":
-            if 0 <= index < len(sketch.edges):
-                start, end = sketch.edges[index]
-                if (
-                    0 <= start < len(sketch.points)
-                    and 0 <= end < len(sketch.points)
-                ):
-                    return sketch.points[start], sketch.points[end]
-        return None
-
-    @staticmethod
-    def _closest_point_on_segment(
-        point: Point, start: Point, end: Point
-    ) -> Point:
-        delta_x = end[0] - start[0]
-        delta_y = end[1] - start[1]
-        length_squared = delta_x * delta_x + delta_y * delta_y
-        if length_squared <= 1e-12:
-            return start
-        factor = (
-            (point[0] - start[0]) * delta_x
-            + (point[1] - start[1]) * delta_y
-        ) / length_squared
-        factor = max(0.0, min(1.0, factor))
-        return (
-            start[0] + factor * delta_x,
-            start[1] + factor * delta_y,
-        )
-
-    @classmethod
-    def _segments_closest_points(
-        cls, first_start: Point, first_end: Point,
-        second_start: Point, second_end: Point,
-    ) -> Tuple[Point, Point]:
-        intersection = cls._segments_intersection(
-            first_start, first_end, second_start, second_end
-        )
-        if intersection is not None:
-            return intersection, intersection
-        candidates = [
-            (
-                first_start,
-                cls._closest_point_on_segment(
-                    first_start, second_start, second_end
-                ),
-            ),
-            (
-                first_end,
-                cls._closest_point_on_segment(
-                    first_end, second_start, second_end
-                ),
-            ),
-            (
-                cls._closest_point_on_segment(
-                    second_start, first_start, first_end
-                ),
-                second_start,
-            ),
-            (
-                cls._closest_point_on_segment(
-                    second_end, first_start, first_end
-                ),
-                second_end,
-            ),
-        ]
-        return min(
-            candidates,
-            key=lambda pair: math.hypot(
-                pair[1][0] - pair[0][0],
-                pair[1][1] - pair[0][1],
-            ),
-        )
-
-    @classmethod
-    def _segments_intersection(
-        cls, first_start: Point, first_end: Point,
-        second_start: Point, second_end: Point,
-    ) -> Optional[Point]:
-        epsilon = 1e-9
-
-        def cross(
-            ax: float, ay: float, bx: float, by: float
-        ) -> float:
-            return ax * by - ay * bx
-
-        def orientation(a: Point, b: Point, c: Point) -> float:
-            return cross(
-                b[0] - a[0], b[1] - a[1],
-                c[0] - a[0], c[1] - a[1],
-            )
-
-        def on_segment(a: Point, b: Point, point: Point) -> bool:
-            return (
-                min(a[0], b[0]) - epsilon
-                <= point[0] <= max(a[0], b[0]) + epsilon
-                and min(a[1], b[1]) - epsilon
-                <= point[1] <= max(a[1], b[1]) + epsilon
-            )
-
-        first_cross = orientation(
-            first_start, first_end, second_start
-        )
-        second_cross = orientation(
-            first_start, first_end, second_end
-        )
-        third_cross = orientation(
-            second_start, second_end, first_start
-        )
-        fourth_cross = orientation(
-            second_start, second_end, first_end
-        )
-        if (
-            (first_cross > epsilon and second_cross < -epsilon)
-            or (first_cross < -epsilon and second_cross > epsilon)
-        ) and (
-            (third_cross > epsilon and fourth_cross < -epsilon)
-            or (third_cross < -epsilon and fourth_cross > epsilon)
-        ):
-            delta_x = first_end[0] - first_start[0]
-            delta_y = first_end[1] - first_start[1]
-            other_x = second_end[0] - second_start[0]
-            other_y = second_end[1] - second_start[1]
-            denominator = cross(delta_x, delta_y, other_x, other_y)
-            if abs(denominator) <= epsilon:
-                return None
-            factor = cross(
-                second_start[0] - first_start[0],
-                second_start[1] - first_start[1],
-                other_x, other_y,
-            ) / denominator
-            return (
-                first_start[0] + factor * delta_x,
-                first_start[1] + factor * delta_y,
-            )
-        if (
-            abs(first_cross) <= epsilon
-            and on_segment(first_start, first_end, second_start)
-        ):
-            return second_start
-        if (
-            abs(second_cross) <= epsilon
-            and on_segment(first_start, first_end, second_end)
-        ):
-            return second_end
-        if (
-            abs(third_cross) <= epsilon
-            and on_segment(second_start, second_end, first_start)
-        ):
-            return first_start
-        if (
-            abs(fourth_cross) <= epsilon
-            and on_segment(second_start, second_end, first_end)
-        ):
-            return first_end
         return None
 
     def _draw_toolbar(
@@ -2068,6 +1884,7 @@ class Workspace:
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
     ) -> None:
         self._measurement_label_rects = []
+        self._measurement_edit_rect = None
         if not self.sketch_palette_window.options.get("dimensions", True):
             return
         for index, measurement in enumerate(sketch.measurements):
@@ -2084,9 +1901,14 @@ class Workspace:
             anchor, text = result
             if not region.collidepoint(anchor):
                 continue
-            box = self._draw_measurement_label(
-                surface, anchor, text, index
-            )
+            if index == self._editing_measurement_index:
+                box = self._draw_measurement_editor(
+                    surface, region, anchor, measurement
+                )
+            else:
+                box = self._draw_measurement_label(
+                    surface, anchor, text, index
+                )
             self._measurement_label_rects.append((index, box))
 
     def _draw_distance_measurement(
@@ -2103,6 +1925,11 @@ class Workspace:
         if geometry is None:
             return None
         value, first_point, second_point = geometry
+        display_value = (
+            measurement.value
+            if measurement.value is not None
+            else value
+        )
         offset = self._measurement_current_placement(
             sketch, index, measurement
         )
@@ -2188,7 +2015,7 @@ class Workspace:
             label_x, label_y, label_length = 0.0, -1.0, 1.0
         normal_x = label_x / label_length
         normal_y = label_y / label_length
-        text = f"{value:.2f}"
+        text = f"{display_value:.2f}"
         label_width, label_height = self._font_small.size(text)
         half_width = (label_width + self._s(10)) / 2
         half_height = (label_height + self._s(4)) / 2
@@ -2216,6 +2043,11 @@ class Workspace:
         if geometry is None:
             return None
         value, vertex, first_point, second_point = geometry
+        display_value = (
+            measurement.value
+            if measurement.value is not None
+            else value
+        )
         radius = self._measurement_current_placement(
             sketch, index, measurement
         )
@@ -2261,7 +2093,7 @@ class Workspace:
                 surface, points[-1], points[-2], color
             )
         anchor = points[len(points) // 2]
-        return anchor, f"{value:.1f}°"
+        return anchor, f"{display_value:.1f}°"
 
     def _draw_extension_line(
         self,
@@ -2358,6 +2190,81 @@ class Workspace:
         surface.blit(label, label.get_rect(center=box.center))
         return box
 
+    def _draw_measurement_editor(
+        self,
+        surface: pygame.Surface,
+        region: Rect,
+        anchor: Tuple[float, float],
+        measurement: Measurement,
+    ) -> pygame.Rect:
+        suffix = "°" if measurement.kind == "angle" else ""
+        text_surface = self._font_small.render(
+            self._measurement_edit_text, True, self.text_primary
+        )
+        suffix_surface = (
+            self._font_small.render(suffix, True, self.text_secondary)
+            if suffix else None
+        )
+        padding = self._s(9)
+        cursor_gap = self._s(2)
+        cursor_width = max(1, self._s(1))
+        content_width = text_surface.get_width() + cursor_gap * 2 + cursor_width
+        if suffix_surface is not None:
+            content_width += suffix_surface.get_width()
+        box = pygame.Rect(
+            0, 0,
+            max(self._s(88), content_width + padding * 2),
+            self._s(25),
+        )
+        box.center = (round(anchor[0]), round(anchor[1]))
+        pygame.draw.rect(
+            surface, self.panel_bg, box, border_radius=self._s(3)
+        )
+        pygame.draw.rect(
+            surface, self.accent, box, width=max(1, self._s(2)),
+            border_radius=self._s(3),
+        )
+        text_x = box.x + padding
+        surface.blit(
+            text_surface,
+            text_surface.get_rect(x=text_x, centery=box.centery),
+        )
+        text_x += text_surface.get_width() + cursor_gap
+        if (pygame.time.get_ticks() // 500) % 2 == 0:
+            pygame.draw.line(
+                surface, self.text_primary,
+                (text_x, box.y + self._s(5)),
+                (text_x, box.bottom - self._s(5)),
+                cursor_width,
+            )
+        text_x += cursor_width + cursor_gap
+        if suffix_surface is not None:
+            surface.blit(
+                suffix_surface,
+                suffix_surface.get_rect(
+                    x=text_x, centery=box.centery
+                ),
+            )
+        if self._measurement_edit_error:
+            hint_text = self._measurement_edit_error
+            hint_color = self.error_color
+        else:
+            hint_text = "Enter to apply  ·  Esc to cancel"
+            hint_color = self.text_muted
+        hint = self._font_small.render(hint_text, True, hint_color)
+        hint_rect = hint.get_rect()
+        hint_rect.centerx = box.centerx
+        hint_rect.y = box.y - hint_rect.height - self._s(4)
+        if hint_rect.y < region.y + self._s(2):
+            hint_rect.y = box.bottom + self._s(4)
+        hint_rect.x = max(
+            region.x + self._s(2),
+            min(hint_rect.x, region.right - hint_rect.width - self._s(2)),
+        )
+        surface.blit(hint, hint_rect)
+        self._measurement_edit_rect = box
+        return box
+
     def _measurement_label_at(
         self, pos: Tuple[int, int]
     ) -> Optional[int]:
@@ -2396,23 +2303,163 @@ class Workspace:
         self._drag_measurement_original = current
         self._drag_measurement_current = current
         self._drag_measurement_grab_delta = grab_delta
+        self._drag_measurement_start_pos = pos
+        self._drag_measurement_moved = False
         self._hover_measurement_index = index
         self._reset_line_state()
 
-    def _finish_measurement_drag(self) -> None:
+    def _finish_measurement_drag(self) -> bool:
         index = self._drag_measurement_index
         current = self._drag_measurement_current
         original = self._drag_measurement_original
+        moved = self._drag_measurement_moved
         self._drag_measurement_index = None
         self._drag_measurement_original = None
         self._drag_measurement_current = None
         self._drag_measurement_grab_delta = 0.0
-        if index is None or current is None:
-            return
+        self._drag_measurement_start_pos = None
+        self._drag_measurement_moved = False
+        if not moved or index is None or current is None:
+            return moved
         if original is not None and abs(current - original) <= 1e-6:
-            return
+            return moved
         if self.on_set_measurement_placement is not None:
             self.on_set_measurement_placement(index, current)
+        return moved
+
+    def _begin_measurement_edit(
+        self, index: int, sketch: Sketch
+    ) -> None:
+        if not 0 <= index < len(sketch.measurements):
+            return
+        measurement = sketch.measurements[index]
+        value = measurement.value
+        if value is None:
+            value = self._measurement_value_from_geometry(
+                sketch,
+                measurement.kind,
+                measurement.first,
+                measurement.second,
+            )
+        if value is None:
+            return
+        self._editing_measurement_index = index
+        self._measurement_edit_text = (
+            f"{value:.1f}" if measurement.kind == "angle"
+            else f"{value:.2f}"
+        )
+        self._measurement_edit_error = ""
+        self._measurement_edit_rect = None
+        self._measurement_edit_pristine = True
+        self._hover_measurement_index = index
+        self._measure_selection.clear()
+        self._reset_line_state()
+
+    def _cancel_measurement_edit(self) -> None:
+        self._editing_measurement_index = None
+        self._measurement_edit_text = ""
+        self._measurement_edit_error = ""
+        self._measurement_edit_rect = None
+        self._measurement_edit_pristine = False
+
+    def _parse_measurement_edit_value(
+        self, kind: str
+    ) -> Optional[float]:
+        text = self._measurement_edit_text.strip().replace(",", ".")
+        if text.endswith("°"):
+            text = text[:-1].strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        if not math.isfinite(value) or value < 0:
+            return None
+        if kind == "angle" and value > 360:
+            return None
+        return value
+
+    def _commit_measurement_edit(self, document: Document) -> bool:
+        index = self._editing_measurement_index
+        if index is None:
+            return False
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.measurements):
+            self._cancel_measurement_edit()
+            return False
+        measurement = sketch.measurements[index]
+        previous = measurement.value
+        if self._measurement_edit_pristine and previous is not None:
+            self._cancel_measurement_edit()
+            return True
+        value = self._parse_measurement_edit_value(measurement.kind)
+        if value is None:
+            if measurement.kind == "angle":
+                self._measurement_edit_error = (
+                    "Enter a value between 0 and 360"
+                )
+            else:
+                self._measurement_edit_error = "Enter a positive number"
+            return False
+        self._cancel_measurement_edit()
+        if previous is None or abs(previous - value) > 1e-9:
+            if self.on_set_measurement_value is not None:
+                self.on_set_measurement_value(index, value)
+        return True
+
+    def _handle_measurement_edit_event(
+        self, event: pygame.event.Event, document: Document
+    ) -> bool:
+        if self._editing_measurement_index is None:
+            return False
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self._cancel_measurement_edit()
+            elif event.key in (
+                pygame.K_RETURN, pygame.K_KP_ENTER
+            ):
+                self._commit_measurement_edit(document)
+            elif event.key == pygame.K_BACKSPACE:
+                self._measurement_edit_text = (
+                    self._measurement_edit_text[:-1]
+                )
+                self._measurement_edit_error = ""
+                self._measurement_edit_pristine = False
+            elif event.key == pygame.K_DELETE:
+                self._measurement_edit_text = ""
+                self._measurement_edit_error = ""
+                self._measurement_edit_pristine = False
+            elif event.mod & pygame.KMOD_CTRL:
+                return True
+            elif event.unicode and (
+                event.unicode.isdigit()
+                or event.unicode in ".,-°"
+            ):
+                if self._measurement_edit_pristine:
+                    self._measurement_edit_text = ""
+                    self._measurement_edit_pristine = False
+                if len(self._measurement_edit_text) < 12:
+                    self._measurement_edit_text += event.unicode
+                    self._measurement_edit_error = ""
+            return True
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if (
+                self._measurement_edit_rect is not None
+                and self._measurement_edit_rect.collidepoint(
+                    event.pos
+                )
+            ):
+                return True
+            self._commit_measurement_edit(document)
+            return True
+        if event.type in (
+            pygame.MOUSEBUTTONUP,
+            pygame.MOUSEMOTION,
+            pygame.MOUSEWHEEL,
+        ):
+            return True
+        return False
 
     def _draw_point_drag_preview(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -3682,6 +3729,9 @@ class Workspace:
 
         active_sketch = document.sketch(document.active_sketch_id)
 
+        if self._handle_measurement_edit_event(event, document):
+            return True
+
         # A click outside the open line-style menu dismisses it without
         # activating the control underneath.
         if (
@@ -3763,7 +3813,12 @@ class Workspace:
             and event.button == 1
             and self._drag_measurement_index is not None
         ):
-            self._finish_measurement_drag()
+            index = self._drag_measurement_index
+            moved = self._finish_measurement_drag()
+            if not moved and index is not None:
+                sketch = document.sketch(document.active_sketch_id)
+                if sketch is not None:
+                    self._begin_measurement_edit(index, sketch)
             return True
         if (
             event.type == pygame.MOUSEBUTTONUP
@@ -4308,6 +4363,15 @@ class Workspace:
         sketch = document.sketch(document.active_sketch_id)
         if self._drag_measurement_index is not None and sketch is not None:
             index = self._drag_measurement_index
+            if self._drag_measurement_start_pos is not None:
+                delta_x = pos[0] - self._drag_measurement_start_pos[0]
+                delta_y = pos[1] - self._drag_measurement_start_pos[1]
+                threshold = self._s(4)
+                if (
+                    delta_x * delta_x + delta_y * delta_y
+                    > threshold * threshold
+                ):
+                    self._drag_measurement_moved = True
             if layout.viewport.collidepoint(pos) and 0 <= index < len(
                 sketch.measurements
             ):
