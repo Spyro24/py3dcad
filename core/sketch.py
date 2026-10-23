@@ -10,6 +10,33 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
+MEASUREMENT_KINDS = ("distance", "angle")
+MEASUREMENT_REF_KINDS = ("point", "line")
+
+
+def normalize_measurement_kind(value: Any) -> Optional[str]:
+    """Return a supported measurement kind or None."""
+    if isinstance(value, str):
+        value = value.lower()
+        if value in MEASUREMENT_KINDS:
+            return value
+    return None
+
+
+def normalize_measurement_ref(value: Any) -> Optional[Tuple[str, int]]:
+    """Return a supported measurement entity reference or None."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    kind = str(value[0]).lower()
+    if kind not in MEASUREMENT_REF_KINDS:
+        return None
+    try:
+        index = int(value[1])
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    return kind, index
 
 
 def normalize_edge_constraint(value: Any) -> Optional[str]:
@@ -137,6 +164,33 @@ def point_on_plane(
     )
 
 
+@dataclass(frozen=True)
+class Measurement:
+    """A persistent distance or angle annotation between two entities."""
+
+    kind: str
+    first: Tuple[str, int]
+    second: Tuple[str, int]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "first": [self.first[0], self.first[1]],
+            "second": [self.second[0], self.second[1]],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["Measurement"]:
+        if not isinstance(data, dict):
+            return None
+        kind = normalize_measurement_kind(data.get("kind"))
+        first = normalize_measurement_ref(data.get("first"))
+        second = normalize_measurement_ref(data.get("second"))
+        if kind is None or first is None or second is None:
+            return None
+        return cls(kind, first, second)
+
+
 @dataclass
 class Sketch:
     """A named set of points on a plane, in millimetres.
@@ -158,6 +212,7 @@ class Sketch:
     line_type: str = "normal"
     edges: List[Tuple[int, int]] = field(default_factory=list)
     edge_constraints: List[Optional[str]] = field(default_factory=list)
+    measurements: List[Measurement] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.edges = [
@@ -177,6 +232,33 @@ class Sketch:
             [None] * (len(self.edges) - len(constraints))
         )
         self.edge_constraints = constraints
+        measurements: List[Measurement] = []
+        for item in self.measurements:
+            if isinstance(item, Measurement):
+                measurement = item
+            elif isinstance(item, dict):
+                measurement = Measurement.from_dict(item)
+            else:
+                measurement = None
+            if measurement is None:
+                continue
+            kind = normalize_measurement_kind(measurement.kind)
+            first = normalize_measurement_ref(measurement.first)
+            second = normalize_measurement_ref(measurement.second)
+            if kind is None or first is None or second is None:
+                continue
+            refs_valid = True
+            for ref_kind, ref_index in (first, second):
+                limit = (
+                    len(self.points) if ref_kind == "point"
+                    else len(self.edges)
+                )
+                if not 0 <= ref_index < limit:
+                    refs_valid = False
+                    break
+            if refs_valid:
+                measurements.append(Measurement(kind, first, second))
+        self.measurements = measurements
 
     def edge_constraint(self, index: int) -> Optional[str]:
         """Return the axis constraint for an edge, if any."""
@@ -364,15 +446,17 @@ class Sketch:
         return index
 
     def remove_point(self, index: int) -> None:
-        """Remove a point and any edges that referenced it."""
+        """Remove a point, its edges, and measurements that depend on them."""
         if not 0 <= index < len(self.points):
             return
         self.points.pop(index)
         shifted: List[Tuple[int, int]] = []
         constraints: List[Optional[str]] = []
+        edge_map: Dict[int, int] = {}
         for edge_index, (start, end) in enumerate(self.edges):
             if start == index or end == index:
                 continue
+            edge_map[edge_index] = len(shifted)
             shifted.append((
                 start if start < index else start - 1,
                 end if end < index else end - 1,
@@ -380,6 +464,36 @@ class Sketch:
             constraints.append(self.edge_constraint(edge_index))
         self.edges = shifted
         self.edge_constraints = constraints
+
+        measurements: List[Measurement] = []
+        for measurement in self.measurements:
+            first = self._remap_measurement_ref(
+                measurement.first, index, edge_map
+            )
+            second = self._remap_measurement_ref(
+                measurement.second, index, edge_map
+            )
+            if first is not None and second is not None:
+                measurements.append(
+                    Measurement(measurement.kind, first, second)
+                )
+        self.measurements = measurements
+
+    @staticmethod
+    def _remap_measurement_ref(
+        ref: Tuple[str, int],
+        removed_point: int,
+        edge_map: Dict[int, int],
+    ) -> Optional[Tuple[str, int]]:
+        kind, index = ref
+        if kind == "point":
+            if index == removed_point:
+                return None
+            return (kind, index - 1 if index > removed_point else index)
+        if kind == "line":
+            mapped = edge_map.get(index)
+            return (kind, mapped) if mapped is not None else None
+        return None
 
     @property
     def is_custom_plane(self) -> bool:
@@ -420,6 +534,10 @@ class Sketch:
                 [start, end] for start, end in self.edges
             ],
             "edge_constraints": list(self.edge_constraints),
+            "measurements": [
+                measurement.to_dict()
+                for measurement in self.measurements
+            ],
             "line_type": self.line_type,
             # Kept for older readers; edges are the source of truth.
             "lines": [
@@ -521,6 +639,13 @@ class Sketch:
                 cls._add_edge(edges, start_index, end_index)
 
         constraints.extend([None] * (len(edges) - len(constraints)))
+        measurements: List[Measurement] = []
+        raw_measurements = data.get("measurements", [])
+        if isinstance(raw_measurements, (list, tuple)):
+            for raw in raw_measurements:
+                measurement = Measurement.from_dict(raw)
+                if measurement is not None:
+                    measurements.append(measurement)
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Sketch")),
@@ -534,6 +659,7 @@ class Sketch:
             line_type=line_type,
             edges=edges,
             edge_constraints=constraints[:len(edges)],
+            measurements=measurements,
         )
 
     @staticmethod

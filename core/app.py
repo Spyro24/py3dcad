@@ -9,6 +9,7 @@ import pygame
 from .commands import (
     AddExtrudeCommand,
     AddLineCommand,
+    AddMeasurementCommand,
     AddPointCommand,
     AddSketchCommand,
     CommandStack,
@@ -66,6 +67,7 @@ class Application:
             on_history_delete=self.history_delete,
             on_history_play=self.toggle_playback,
             on_settings=self.open_settings,
+            on_add_measurement=self.add_measurement,
         )
         self.save_dialog = SaveDialog(self._save_to)
         self.settings_dialog = SettingsDialog(self._set_orientation_cube)
@@ -372,6 +374,37 @@ class Application:
         stack.execute(
             SetEdgeConstraintCommand(
                 document, sketch, index, constraint
+            )
+        )
+
+    def add_measurement(
+        self,
+        measurement_kind: str,
+        first: tuple[str, int],
+        second: tuple[str, int],
+    ) -> None:
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or measurement_kind not in (
+            "distance", "angle"
+        ):
+            return
+        for entity_kind, index in (first, second):
+            if entity_kind == "point":
+                if not 0 <= index < len(sketch.points):
+                    return
+            elif entity_kind == "line":
+                if not 0 <= index < len(sketch.edges):
+                    return
+            else:
+                return
+        stack.execute(
+            AddMeasurementCommand(
+                document, sketch, measurement_kind, first, second
             )
         )
 

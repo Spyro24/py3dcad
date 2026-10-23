@@ -1,11 +1,12 @@
 """Undoable document editing commands."""
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .document import Document
 from .sketch import (
     Extrude,
+    Measurement,
     PlaneFrame,
     Point,
     Sketch,
@@ -306,6 +307,71 @@ class SetEdgeConstraintCommand(Command):
         self.sketch.edge_constraints[self.index] = (
             self.previous_constraint
         )
+        self.document.dirty = True
+
+
+class AddMeasurementCommand(Command):
+    """Add a persistent distance or angle annotation to a sketch."""
+
+    kind = "measurement"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        measurement_kind: str,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.measurement = Measurement(
+            measurement_kind, first, second
+        )
+        self.index: Optional[int] = None
+
+    @property
+    def label(self) -> str:
+        return "Measurement"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self.measurement.kind not in ("distance", "angle"):
+            return
+        for ref_kind, ref_index in (
+            self.measurement.first, self.measurement.second
+        ):
+            limit = (
+                len(self.sketch.points) if ref_kind == "point"
+                else len(self.sketch.edges)
+            )
+            if ref_kind not in ("point", "line"):
+                return
+            if not 0 <= ref_index < limit:
+                return
+        if self.index is None:
+            self.index = len(self.sketch.measurements)
+        self.index = min(self.index, len(self.sketch.measurements))
+        self.sketch.measurements.insert(self.index, self.measurement)
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.index is None:
+            return
+        if (
+            self.index < len(self.sketch.measurements)
+            and self.sketch.measurements[self.index] == self.measurement
+        ):
+            self.sketch.measurements.pop(self.index)
+        else:
+            try:
+                self.sketch.measurements.remove(self.measurement)
+            except ValueError:
+                pass
         self.document.dirty = True
 
 

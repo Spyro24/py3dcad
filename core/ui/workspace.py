@@ -53,9 +53,10 @@ class Workspace:
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
         "constraint_auto": "Auto Constraint",
+        "measure": "Auto Measurement",
     }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
-    SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto",)
+    SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
     SKETCH_INTERACTIVE_ACTIONS = (
         "line", "point", *SKETCH_CONSTRAINT_ACTIONS
     )
@@ -87,9 +88,9 @@ class Workspace:
         )),
         ("CONSTRAINTS", (
             ("constraint_auto", "V/H", True),
+            ("measure", "Measure", True),
         )),
         ("INSPECT", (
-            ("measure", None, True),
             ("section_view", None, False),
         )),
         ("INSERT", (
@@ -103,7 +104,9 @@ class Workspace:
             ("finish_sketch", None, False),
         )),
     )
-    ACTIVE_SKETCH_TOOLS = ("line", "point", "finish_sketch")
+    ACTIVE_SKETCH_TOOLS = (
+        "line", "point", "measure", "finish_sketch"
+    )
     LINE_MENU_ITEMS = (
         ("normal", "Line"),
         ("construction", "Construction Line"),
@@ -112,6 +115,10 @@ class Workspace:
     CONSTRAINT_MENU_ITEMS = (
         ("vertical", "Vertical Only"),
         ("horizontal", "Horizontal Only"),
+    )
+    MEASURE_MENU_ITEMS = (
+        ("angle", "Angle Only"),
+        ("distance", "Distance Only"),
     )
 
     def __init__(
@@ -128,6 +135,9 @@ class Workspace:
         on_history_delete: Callable[[int], None],
         on_history_play: Callable[[], None],
         on_settings: Optional[Callable[[], None]] = None,
+        on_add_measurement: Optional[
+            Callable[[str, Tuple[str, int], Tuple[str, int]], None]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -141,6 +151,7 @@ class Workspace:
         self.on_history_delete = on_history_delete
         self.on_history_play = on_history_play
         self.on_settings = on_settings
+        self.on_add_measurement = on_add_measurement
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -155,6 +166,10 @@ class Workspace:
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
         self._constraint_tool: Optional[str] = None
+        self._measure_menu_open = False
+        self._measure_menu_hover = -1
+        self._measure_tool: Optional[str] = None
+        self._measure_selection: List[Tuple[str, int]] = []
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
         self._drag_point_index: Optional[int] = None
@@ -237,6 +252,7 @@ class Workspace:
         self._active_mode_name = self.SKETCH_MODE
         self._selected_tool = "point"
         self._constraint_tool = None
+        self._clear_measure_state()
         self._reset_line_state()
         self._clear_sketch_selection()
 
@@ -244,8 +260,16 @@ class Workspace:
         """Clear the current sketch tool without leaving sketch mode."""
         self._selected_tool = None
         self._constraint_tool = None
+        self._clear_measure_state()
         self._reset_line_state()
         self._clear_sketch_selection()
+
+    def _clear_measure_state(self) -> None:
+        """Stop the measurement tool and discard pending entity picks."""
+        self._measure_tool = None
+        self._measure_selection.clear()
+        self._measure_menu_open = False
+        self._measure_menu_hover = -1
 
     def _clear_sketch_selection(self) -> None:
         self._selected_sketch_entity = None
@@ -265,10 +289,13 @@ class Workspace:
         self._line_menu_hover = -1
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
+        self._measure_menu_open = False
+        self._measure_menu_hover = -1
 
     def _select_tool(self, tool: Optional[str]) -> None:
         self._selected_tool = tool
         self._constraint_tool = None
+        self._clear_measure_state()
         self._reset_line_state()
         self._clear_sketch_selection()
 
@@ -361,15 +388,16 @@ class Workspace:
             self.create_sketch_window.draw(surface, layout.viewport)
         self._draw_line_menu(surface, layout.toolbar, document)
         self._draw_constraint_menu(surface, layout.toolbar, document)
+        self._draw_measure_menu(surface, layout.toolbar, document)
 
-    def _draw_constraint_menu(
-        self, surface: pygame.Surface, region: Rect, document: Document
+    def _draw_dropdown_panel(
+        self,
+        surface: pygame.Surface,
+        geometry: Tuple[Rect, List[pygame.Rect], Optional[pygame.Rect]],
+        items: Tuple[Tuple[str, str], ...],
+        hover: int,
+        selected_key: Optional[str],
     ) -> None:
-        if not self._constraint_menu_open:
-            return
-        geometry = self._constraint_menu_geometry(region, document)
-        if geometry is None:
-            return
         panel, rows, _ = geometry
         pygame.draw.rect(
             surface, self.panel_bg, panel, border_radius=self._s(6)
@@ -378,11 +406,9 @@ class Workspace:
             surface, self.border_color, panel, width=1,
             border_radius=self._s(6),
         )
-        for index, ((key, label), rect) in enumerate(
-            zip(self.CONSTRAINT_MENU_ITEMS, rows)
-        ):
-            hovered = index == self._constraint_menu_hover
-            selected = key == self._constraint_tool
+        for index, ((key, label), rect) in enumerate(zip(items, rows)):
+            hovered = index == hover
+            selected = key == selected_key
             if hovered:
                 pygame.draw.rect(
                     surface, self.header_bg, rect,
@@ -409,6 +435,32 @@ class Workspace:
                 ),
             )
 
+    def _draw_constraint_menu(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        if not self._constraint_menu_open:
+            return
+        geometry = self._constraint_menu_geometry(region, document)
+        if geometry is None:
+            return
+        self._draw_dropdown_panel(
+            surface, geometry, self.CONSTRAINT_MENU_ITEMS,
+            self._constraint_menu_hover, self._constraint_tool,
+        )
+
+    def _draw_measure_menu(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        if not self._measure_menu_open:
+            return
+        geometry = self._measure_menu_geometry(region, document)
+        if geometry is None:
+            return
+        self._draw_dropdown_panel(
+            surface, geometry, self.MEASURE_MENU_ITEMS,
+            self._measure_menu_hover, self._measure_tool,
+        )
+
     def _sync_history_document(self, document: Document) -> None:
         if document.id != self._history_document:
             self._history_document = document.id
@@ -424,18 +476,21 @@ class Workspace:
             self._hover_sketches_folder = False
             self._sketches_expanded = True
             self._constraint_tool = None
+            self._clear_measure_state()
             self._reset_line_state()
             self._clear_sketch_selection()
             self.close_create_sketch_dialog()
         if document.active_sketch_id != self._selection_sketch_id:
             self._selection_sketch_id = document.active_sketch_id
             self._constraint_tool = None
+            self._clear_measure_state()
             self._reset_line_state()
             self._clear_sketch_selection()
         active = document.sketch(document.active_sketch_id)
         if active is None:
             self._selected_tool = None
             self._constraint_tool = None
+            self._clear_measure_state()
             self._reset_line_state()
             self._clear_sketch_selection()
             if self._active_mode_name == self.SKETCH_MODE:
@@ -585,10 +640,11 @@ class Workspace:
 
         for caption, specs in self.SKETCH_GROUPS:
             create_group = caption == "CREATE"
+            label_group = caption in ("CREATE", "CONSTRAINTS")
             finish_group = caption == "FINISH SKETCH"
             widths: List[int] = []
             for action, label, dropdown in specs:
-                if create_group and not compact and label:
+                if label_group and not compact and label:
                     caret = self._s(8) if dropdown else self._s(4)
                     widths.append(max(
                         self._s(30),
@@ -840,16 +896,22 @@ class Workspace:
         if item is None:
             return None
         return self._dropdown_menu_geometry(
-            item, len(self.CONSTRAINT_MENU_ITEMS)
+            item, self.CONSTRAINT_MENU_ITEMS
         )
 
     def _dropdown_menu_geometry(
-        self, item: ToolbarItem, item_count: int
+        self,
+        item: ToolbarItem,
+        items: Tuple[Tuple[str, str], ...],
     ) -> Tuple[Rect, List[pygame.Rect], Optional[pygame.Rect]]:
         self._init_fonts()
         padding = self._s(6)
         row_height = self._s(28)
-        max_label = max(self._font_small.size(label)[0] for _, label in self.CONSTRAINT_MENU_ITEMS)
+        max_label = max(
+            self._font_small.size(label)[0]
+            for _, label in items
+        )
+        item_count = len(items)
         width = max(item.rect.w, max_label + padding * 2)
         panel = pygame.Rect(
             item.rect.x,
@@ -883,11 +945,62 @@ class Workspace:
                 return index
         return -1
 
+    def _measure_toolbar_item(
+        self, region: Rect, document: Document
+    ) -> Optional[ToolbarItem]:
+        for group in self._sketch_toolbar_groups(region, document):
+            for item in group.items:
+                if item.action == "measure":
+                    return item
+        return None
+
+    def _measure_menu_geometry(
+        self, region: Rect, document: Document
+    ) -> Optional[Tuple[Rect, List[pygame.Rect], Optional[pygame.Rect]]]:
+        item = self._measure_toolbar_item(region, document)
+        if item is None:
+            return None
+        return self._dropdown_menu_geometry(
+            item, self.MEASURE_MENU_ITEMS
+        )
+
+    def _measure_menu_index_at(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> int:
+        geometry = self._measure_menu_geometry(region, document)
+        if geometry is None:
+            return -1
+        _, rows, _ = geometry
+        for index, rect in enumerate(rows):
+            if rect.collidepoint(pos):
+                return index
+        return -1
+
+    def _activate_measure_tool(
+        self, kind: str, document: Document
+    ) -> None:
+        """Arm automatic, angle-only, or distance-only measurement."""
+        self._measure_tool = kind
+        self._constraint_tool = None
+        self._selected_tool = None
+        self._measure_selection.clear()
+        self._reset_line_state()
+        self._clear_sketch_selection()
+        self._measure_menu_open = False
+        self._measure_menu_hover = -1
+
+    def _choose_measure(self, index: int, document: Document) -> None:
+        if not 0 <= index < len(self.MEASURE_MENU_ITEMS):
+            return
+        key, _ = self.MEASURE_MENU_ITEMS[index]
+        self._activate_measure_tool(key, document)
+
     def _activate_constraint_tool(
         self, kind: str, document: Document
     ) -> None:
         """Arm a constraint tool and apply it to the current selection."""
         self._constraint_tool = kind
+        self._clear_measure_state()
         if kind == "auto":
             self._set_auto_constraints(True)
         # Constraint tools replace drawing tools but keep the selection so it
@@ -922,6 +1035,7 @@ class Workspace:
                 document.active_sketch_id = None
                 self._selected_tool = None
                 self._constraint_tool = None
+                self._clear_measure_state()
                 self._reset_line_state()
                 self._clear_sketch_selection()
                 self.sketch_palette_window.close()
@@ -933,6 +1047,8 @@ class Workspace:
                         dropdown_hit is not None
                         and dropdown_hit.collidepoint(pos)
                     ):
+                        self._line_menu_open = False
+                        self._measure_menu_open = False
                         self._constraint_menu_open = not self._constraint_menu_open
                         self._constraint_menu_hover = -1
                         return True
@@ -945,11 +1061,28 @@ class Workspace:
                         document.dirty = True
                         return True
                     continue
+                if item.action == "measure":
+                    dropdown_hit = self._toolbar_dropdown_hit_rect(item)
+                    if (
+                        dropdown_hit is not None
+                        and dropdown_hit.collidepoint(pos)
+                    ):
+                        self._line_menu_open = False
+                        self._constraint_menu_open = False
+                        self._measure_menu_open = not self._measure_menu_open
+                        self._measure_menu_hover = -1
+                        return True
+                    if item.rect.collidepoint(pos):
+                        self._activate_measure_tool("auto", document)
+                        return True
+                    continue
                 if item.action not in ("line", "point"):
                     continue
                 if item.action == "line":
                     caret = self._toolbar_dropdown_rect(item)
                     if caret is not None and caret.collidepoint(pos):
+                        self._constraint_menu_open = False
+                        self._measure_menu_open = False
                         self._line_menu_open = not self._line_menu_open
                         self._line_menu_hover = -1
                         return True
@@ -993,6 +1126,304 @@ class Workspace:
             return False
         self.on_set_edge_constraint(selected[1], constraint)
         return True
+
+    def _measure_click(
+        self, document: Document, hit: Tuple[str, int]
+    ) -> None:
+        """Add an entity to the pending measurement pair."""
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        if self._measure_tool == "angle" and hit[0] != "line":
+            return
+        if hit in self._measure_selection:
+            self._measure_selection.remove(hit)
+        else:
+            if len(self._measure_selection) >= 2:
+                self._measure_selection.clear()
+            self._measure_selection.append(hit)
+        self._selected_sketch_entity = None
+        self._hover_sketch_entity = hit
+        self._reset_line_state()
+        if len(self._measure_selection) != 2:
+            return
+        first, second = self._measure_selection
+        kind = self._resolve_measurement_kind(sketch, first, second)
+        if kind is None:
+            # Angle-only mode needs two edges with one shared vertex.
+            self._measure_selection = [first]
+            return
+        if self.on_add_measurement is not None:
+            self.on_add_measurement(kind, first, second)
+        self._measure_selection.clear()
+
+    def _resolve_measurement_kind(
+        self,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> Optional[str]:
+        if self._measure_tool == "angle":
+            return (
+                "angle"
+                if self._angle_geometry(sketch, first, second) is not None
+                else None
+            )
+        if self._measure_tool == "distance":
+            return "distance"
+        if self._angle_geometry(sketch, first, second) is not None:
+            return "angle"
+        return "distance"
+
+    def _angle_geometry(
+        self,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> Optional[Tuple[float, Point, Point, Point]]:
+        """Return angle, shared vertex, and rays, if the edges meet."""
+        if first[0] != "line" or second[0] != "line":
+            return None
+        if not (
+            0 <= first[1] < len(sketch.edges)
+            and 0 <= second[1] < len(sketch.edges)
+        ):
+            return None
+        first_edge = sketch.edges[first[1]]
+        second_edge = sketch.edges[second[1]]
+        shared = set(first_edge) & set(second_edge)
+        if len(shared) != 1:
+            return None
+        vertex_index = next(iter(shared))
+        first_far = (
+            first_edge[0]
+            if first_edge[1] == vertex_index
+            else first_edge[1]
+        )
+        second_far = (
+            second_edge[0]
+            if second_edge[1] == vertex_index
+            else second_edge[1]
+        )
+        if first_far == vertex_index or second_far == vertex_index:
+            return None
+        vertex = sketch.points[vertex_index]
+        first_point = sketch.points[first_far]
+        second_point = sketch.points[second_far]
+        first_x = first_point[0] - vertex[0]
+        first_y = first_point[1] - vertex[1]
+        second_x = second_point[0] - vertex[0]
+        second_y = second_point[1] - vertex[1]
+        first_length = math.hypot(first_x, first_y)
+        second_length = math.hypot(second_x, second_y)
+        if first_length <= 1e-9 or second_length <= 1e-9:
+            return None
+        cosine = (
+            first_x * second_x + first_y * second_y
+        ) / (first_length * second_length)
+        cosine = max(-1.0, min(1.0, cosine))
+        angle = math.degrees(math.acos(cosine))
+        return angle, vertex, first_point, second_point
+
+    def _distance_geometry(
+        self,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> Optional[Tuple[float, Point, Point]]:
+        first_points = self._measurement_entity_points(sketch, first)
+        second_points = self._measurement_entity_points(sketch, second)
+        if first_points is None or second_points is None:
+            return None
+        if first[0] == "point" and second[0] == "point":
+            first_point = first_points[0]
+            second_point = second_points[0]
+        elif first[0] == "point":
+            first_point = first_points[0]
+            second_point = self._closest_point_on_segment(
+                first_point, second_points[0], second_points[1]
+            )
+        elif second[0] == "point":
+            second_point = second_points[0]
+            first_point = self._closest_point_on_segment(
+                second_point, first_points[0], first_points[1]
+            )
+        else:
+            first_point, second_point = self._segments_closest_points(
+                first_points[0], first_points[1],
+                second_points[0], second_points[1],
+            )
+        distance = math.hypot(
+            second_point[0] - first_point[0],
+            second_point[1] - first_point[1],
+        )
+        return distance, first_point, second_point
+
+    @staticmethod
+    def _measurement_entity_points(
+        sketch: Sketch, ref: Tuple[str, int]
+    ) -> Optional[Tuple[Point, Point]]:
+        kind, index = ref
+        if kind == "point":
+            if 0 <= index < len(sketch.points):
+                point = sketch.points[index]
+                return point, point
+            return None
+        if kind == "line":
+            if 0 <= index < len(sketch.edges):
+                start, end = sketch.edges[index]
+                if (
+                    0 <= start < len(sketch.points)
+                    and 0 <= end < len(sketch.points)
+                ):
+                    return sketch.points[start], sketch.points[end]
+        return None
+
+    @staticmethod
+    def _closest_point_on_segment(
+        point: Point, start: Point, end: Point
+    ) -> Point:
+        delta_x = end[0] - start[0]
+        delta_y = end[1] - start[1]
+        length_squared = delta_x * delta_x + delta_y * delta_y
+        if length_squared <= 1e-12:
+            return start
+        factor = (
+            (point[0] - start[0]) * delta_x
+            + (point[1] - start[1]) * delta_y
+        ) / length_squared
+        factor = max(0.0, min(1.0, factor))
+        return (
+            start[0] + factor * delta_x,
+            start[1] + factor * delta_y,
+        )
+
+    @classmethod
+    def _segments_closest_points(
+        cls, first_start: Point, first_end: Point,
+        second_start: Point, second_end: Point,
+    ) -> Tuple[Point, Point]:
+        intersection = cls._segments_intersection(
+            first_start, first_end, second_start, second_end
+        )
+        if intersection is not None:
+            return intersection, intersection
+        candidates = [
+            (
+                first_start,
+                cls._closest_point_on_segment(
+                    first_start, second_start, second_end
+                ),
+            ),
+            (
+                first_end,
+                cls._closest_point_on_segment(
+                    first_end, second_start, second_end
+                ),
+            ),
+            (
+                cls._closest_point_on_segment(
+                    second_start, first_start, first_end
+                ),
+                second_start,
+            ),
+            (
+                cls._closest_point_on_segment(
+                    second_end, first_start, first_end
+                ),
+                second_end,
+            ),
+        ]
+        return min(
+            candidates,
+            key=lambda pair: math.hypot(
+                pair[1][0] - pair[0][0],
+                pair[1][1] - pair[0][1],
+            ),
+        )
+
+    @classmethod
+    def _segments_intersection(
+        cls, first_start: Point, first_end: Point,
+        second_start: Point, second_end: Point,
+    ) -> Optional[Point]:
+        epsilon = 1e-9
+
+        def cross(
+            ax: float, ay: float, bx: float, by: float
+        ) -> float:
+            return ax * by - ay * bx
+
+        def orientation(a: Point, b: Point, c: Point) -> float:
+            return cross(
+                b[0] - a[0], b[1] - a[1],
+                c[0] - a[0], c[1] - a[1],
+            )
+
+        def on_segment(a: Point, b: Point, point: Point) -> bool:
+            return (
+                min(a[0], b[0]) - epsilon
+                <= point[0] <= max(a[0], b[0]) + epsilon
+                and min(a[1], b[1]) - epsilon
+                <= point[1] <= max(a[1], b[1]) + epsilon
+            )
+
+        first_cross = orientation(
+            first_start, first_end, second_start
+        )
+        second_cross = orientation(
+            first_start, first_end, second_end
+        )
+        third_cross = orientation(
+            second_start, second_end, first_start
+        )
+        fourth_cross = orientation(
+            second_start, second_end, first_end
+        )
+        if (
+            (first_cross > epsilon and second_cross < -epsilon)
+            or (first_cross < -epsilon and second_cross > epsilon)
+        ) and (
+            (third_cross > epsilon and fourth_cross < -epsilon)
+            or (third_cross < -epsilon and fourth_cross > epsilon)
+        ):
+            delta_x = first_end[0] - first_start[0]
+            delta_y = first_end[1] - first_start[1]
+            other_x = second_end[0] - second_start[0]
+            other_y = second_end[1] - second_start[1]
+            denominator = cross(delta_x, delta_y, other_x, other_y)
+            if abs(denominator) <= epsilon:
+                return None
+            factor = cross(
+                second_start[0] - first_start[0],
+                second_start[1] - first_start[1],
+                other_x, other_y,
+            ) / denominator
+            return (
+                first_start[0] + factor * delta_x,
+                first_start[1] + factor * delta_y,
+            )
+        if (
+            abs(first_cross) <= epsilon
+            and on_segment(first_start, first_end, second_start)
+        ):
+            return second_start
+        if (
+            abs(second_cross) <= epsilon
+            and on_segment(first_start, first_end, second_end)
+        ):
+            return second_end
+        if (
+            abs(third_cross) <= epsilon
+            and on_segment(second_start, second_end, first_start)
+        ):
+            return first_start
+        if (
+            abs(fourth_cross) <= epsilon
+            and on_segment(second_start, second_end, first_end)
+        ):
+            return first_end
+        return None
 
     def _draw_toolbar(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -1152,6 +1583,9 @@ class Workspace:
                 ) or (
                     item.action == "constraint_auto"
                     and self._constraint_tool is not None
+                ) or (
+                    item.action == "measure"
+                    and self._measure_tool is not None
                 )
                 item_hover = (
                     item.action in self.SKETCH_INTERACTIVE_ACTIONS
@@ -1364,7 +1798,14 @@ class Workspace:
                 surface, sketch, region, hovered,
                 self.geometry_hover, False,
             )
+        if self._measure_tool is not None:
+            for entity in self._measure_selection:
+                self._draw_sketch_entity_highlight(
+                    surface, sketch, region, entity,
+                    self.geometry_selection, True,
+                )
         self._draw_sketch_constraints(surface, sketch, region)
+        self._draw_sketch_measurements(surface, sketch, region)
         if selected is not None and not (
             self._drag_edge_index is not None
             and selected == ("line", self._drag_edge_index)
@@ -1425,6 +1866,159 @@ class Workspace:
                 width=1, border_radius=self._s(3),
             )
             surface.blit(label, label.get_rect(center=box.center))
+
+    def _draw_sketch_measurements(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        if not self.sketch_palette_window.options.get("dimensions", True):
+            return
+        for measurement in sketch.measurements:
+            if measurement.kind == "distance":
+                geometry = self._distance_geometry(
+                    sketch, measurement.first, measurement.second
+                )
+                if geometry is None:
+                    continue
+                value, first_point, second_point = geometry
+                screen_first = self._project_sketch_point(
+                    sketch, first_point, region
+                )
+                screen_second = self._project_sketch_point(
+                    sketch, second_point, region
+                )
+                anchor = (
+                    (screen_first[0] + screen_second[0]) / 2,
+                    (screen_first[1] + screen_second[1]) / 2,
+                )
+                self._draw_measurement_line(
+                    surface, screen_first, screen_second
+                )
+                text = f"{value:.2f} mm"
+            else:
+                geometry = self._angle_geometry(
+                    sketch, measurement.first, measurement.second
+                )
+                if geometry is None:
+                    continue
+                value, vertex, first_point, second_point = geometry
+                screen_vertex = self._project_sketch_point(
+                    sketch, vertex, region
+                )
+                screen_first = self._project_sketch_point(
+                    sketch, first_point, region
+                )
+                screen_second = self._project_sketch_point(
+                    sketch, second_point, region
+                )
+                anchor = self._draw_measurement_arc(
+                    surface, screen_vertex, screen_first, screen_second
+                )
+                if anchor is None:
+                    anchor = (
+                        screen_vertex[0], screen_vertex[1]
+                        - self._s(28),
+                    )
+                text = f"{value:.1f}°"
+            if region.collidepoint(anchor):
+                self._draw_measurement_label(surface, anchor, text)
+
+    def _draw_measurement_line(
+        self,
+        surface: pygame.Surface,
+        first: Tuple[int, int],
+        second: Tuple[int, int],
+    ) -> None:
+        thickness = max(1, self._s(1))
+        if first == second:
+            pygame.draw.circle(
+                surface, self.accent, first, max(1, self._s(2))
+            )
+            return
+        pygame.draw.line(
+            surface, self.accent, first, second, thickness
+        )
+        delta_x = second[0] - first[0]
+        delta_y = second[1] - first[1]
+        length = math.hypot(delta_x, delta_y)
+        if length <= 1e-6:
+            return
+        tick = self._s(4)
+        normal_x = -delta_y / length * tick
+        normal_y = delta_x / length * tick
+        for point in (first, second):
+            pygame.draw.line(
+                surface,
+                self.accent,
+                (
+                    round(point[0] - normal_x),
+                    round(point[1] - normal_y),
+                ),
+                (
+                    round(point[0] + normal_x),
+                    round(point[1] + normal_y),
+                ),
+                thickness,
+            )
+
+    def _draw_measurement_arc(
+        self,
+        surface: pygame.Surface,
+        vertex: Tuple[int, int],
+        first: Tuple[int, int],
+        second: Tuple[int, int],
+    ) -> Optional[Tuple[float, float]]:
+        first_x = first[0] - vertex[0]
+        first_y = first[1] - vertex[1]
+        second_x = second[0] - vertex[0]
+        second_y = second[1] - vertex[1]
+        first_length = math.hypot(first_x, first_y)
+        second_length = math.hypot(second_x, second_y)
+        if first_length <= 1e-6 or second_length <= 1e-6:
+            return None
+        first_angle = math.atan2(first_y, first_x)
+        second_angle = math.atan2(second_y, second_x)
+        sweep = (second_angle - first_angle + math.pi) % (
+            math.tau
+        ) - math.pi
+        radius = self._s(20)
+        segments = 20
+        points = []
+        for step in range(segments + 1):
+            angle = first_angle + sweep * step / segments
+            points.append((
+                round(vertex[0] + radius * math.cos(angle)),
+                round(vertex[1] + radius * math.sin(angle)),
+            ))
+        pygame.draw.lines(
+            surface, self.accent, False, points,
+            max(1, self._s(1)),
+        )
+        midpoint_angle = first_angle + sweep / 2
+        label_radius = radius + self._s(14)
+        return (
+            vertex[0] + label_radius * math.cos(midpoint_angle),
+            vertex[1] + label_radius * math.sin(midpoint_angle),
+        )
+
+    def _draw_measurement_label(
+        self,
+        surface: pygame.Surface,
+        anchor: Tuple[float, float],
+        text: str,
+    ) -> None:
+        label = self._font_small.render(text, True, self.text_primary)
+        box = label.get_rect(center=(
+            round(anchor[0]), round(anchor[1])
+        ))
+        box.inflate_ip(self._s(8), self._s(4))
+        pygame.draw.rect(
+            surface, self.header_bg, box, border_radius=self._s(3)
+        )
+        pygame.draw.rect(
+            surface, self.accent, box, width=1,
+            border_radius=self._s(3),
+        )
+        surface.blit(label, label.get_rect(center=box.center))
 
     def _draw_point_drag_preview(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -1671,7 +2265,7 @@ class Workspace:
     def _draw_tool_tooltip(
         self, surface: pygame.Surface, region: Rect
     ) -> None:
-        if self._line_menu_open:
+        if self._line_menu_open or self._measure_menu_open:
             return
         if self._hover_tool not in self.TOOL_LABELS:
             return
@@ -1682,6 +2276,10 @@ class Workspace:
             and self._constraint_tool in ("vertical", "horizontal")
         ):
             text = f"{self._constraint_tool.title()} Constraint"
+        elif action == "measure" and self._measure_tool in (
+            "angle", "distance"
+        ):
+            text = f"{self._measure_tool.title()} Measurement"
         shortcut = self.TOOL_SHORTCUTS.get(action)
         if shortcut is not None:
             text = f"{text}  ({shortcut})"
@@ -2740,6 +3338,31 @@ class Workspace:
                 document.dirty = True
             return True
 
+        if (
+            self._measure_menu_open
+            and event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+        ):
+            geometry = self._measure_menu_geometry(layout.toolbar, document)
+            if geometry is not None:
+                panel, item_rects, caret = geometry
+                if panel.collidepoint(event.pos):
+                    for index, rect in enumerate(item_rects):
+                        if rect.collidepoint(event.pos):
+                            self._choose_measure(index, document)
+                            break
+                    return True
+                if caret is not None and caret.collidepoint(event.pos):
+                    self._measure_menu_open = False
+                    self._measure_menu_hover = -1
+                    return True
+            self._measure_menu_open = False
+            self._measure_menu_hover = -1
+            item = self._measure_toolbar_item(layout.toolbar, document)
+            if item is not None and item.rect.collidepoint(event.pos):
+                self._activate_measure_tool("auto", document)
+            return True
+
         # Commit a drag before any panel can consume the release.
         if (
             event.type == pygame.MOUSEBUTTONUP
@@ -2768,6 +3391,7 @@ class Workspace:
                     document.active_sketch_id = None
                     self._selected_tool = None
                     self._constraint_tool = None
+                    self._clear_measure_state()
                     self._reset_line_state()
                     self._clear_sketch_selection()
                     self.sketch_palette_window.close()
@@ -2831,6 +3455,7 @@ class Workspace:
                     # tool armed while another mode is visible.
                     self._selected_tool = None
                     self._constraint_tool = None
+                    self._clear_measure_state()
                     self._reset_line_state()
                     self._clear_sketch_selection()
                 return True
@@ -2879,6 +3504,7 @@ class Workspace:
                             document.active_sketch_id = None
                             self._selected_tool = None
                             self._constraint_tool = None
+                            self._clear_measure_state()
                             self._reset_line_state()
                             self._clear_sketch_selection()
                         return True
@@ -2898,6 +3524,16 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
+                if self._measure_tool is not None:
+                    hit = self._pick_sketch_entity(
+                        event.pos, layout.viewport, sketch
+                    )
+                    if hit is not None:
+                        self._measure_click(document, hit)
+                    else:
+                        self._measure_selection.clear()
+                        self._clear_sketch_selection()
+                    return True
                 point_hit = self._pick_sketch_point(
                     event.pos, layout.viewport, sketch
                 )
@@ -3216,10 +3852,13 @@ class Workspace:
             self.on_new_sketch()
         elif action == "extrude":
             self.on_extrude()
+        elif action == "measure":
+            self._activate_measure_tool("auto", document)
         elif action == "finish_sketch":
             document.active_sketch_id = None
             self._selected_tool = None
             self._constraint_tool = None
+            self._clear_measure_state()
             self._reset_line_state()
             self._clear_sketch_selection()
             self.sketch_palette_window.close()
@@ -3251,6 +3890,12 @@ class Workspace:
             )
         else:
             self._constraint_menu_hover = -1
+        if self._measure_menu_open:
+            self._measure_menu_hover = self._measure_menu_index_at(
+                pos, layout.toolbar, document
+            )
+        else:
+            self._measure_menu_hover = -1
         sketch = document.sketch(document.active_sketch_id)
         if self._drag_point_index is not None and sketch is not None:
             if layout.viewport.collidepoint(pos):
