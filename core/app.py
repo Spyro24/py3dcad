@@ -473,8 +473,6 @@ class Application:
         measurement = sketch.measurements[index]
         if measurement.kind == "angle" and normalized > 180:
             return
-        if measurement.value == normalized:
-            return
         stack.execute(
             SetMeasurementValueCommand(
                 document, sketch, index, normalized

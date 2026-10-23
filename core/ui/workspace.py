@@ -2403,9 +2403,10 @@ class Workspace:
                 self._measurement_edit_error = "Enter a positive number"
             return False
         self._cancel_measurement_edit()
-        if previous is None or abs(previous - value) > 1e-9:
-            if self.on_set_measurement_value is not None:
-                self.on_set_measurement_value(index, value)
+        # Commit even when the number is unchanged: re-entering a stored
+        # value is how an inconsistent sketch is brought back into line.
+        if self.on_set_measurement_value is not None:
+            self.on_set_measurement_value(index, value)
         return True
 
     def _handle_measurement_edit_event(

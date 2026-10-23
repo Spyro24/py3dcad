@@ -344,6 +344,9 @@ class Sketch:
                 measurement.placement,
                 value,
             )
+        # A loaded sketch may predate dimension enforcement.  Make its
+        # stored values authoritative immediately, without a command.
+        self.enforce_measurements(self.points)
 
     def measurement_entity_points(
         self,
