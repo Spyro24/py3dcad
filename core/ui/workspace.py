@@ -110,7 +110,6 @@ class Workspace:
         ("center", "Centerline"),
     )
     CONSTRAINT_MENU_ITEMS = (
-        ("auto", "Auto (Vertical/Horizontal)"),
         ("vertical", "Vertical Only"),
         ("horizontal", "Horizontal Only"),
     )
@@ -726,8 +725,16 @@ class Workspace:
     def _toolbar_dropdown_rect(
         self, item: ToolbarItem
     ) -> Optional[pygame.Rect]:
-        if item.label is None or not item.dropdown:
+        if not item.dropdown:
             return None
+        if item.label is None:
+            # Compact toolbar: use the right edge of the icon as the caret.
+            return pygame.Rect(
+                item.rect.right - self._s(10),
+                item.rect.y,
+                self._s(10),
+                item.rect.h,
+            )
         self._init_fonts()
         label_width = self._font_small.size(item.label)[0]
         label_right = item.rect.centerx + label_width // 2
@@ -741,6 +748,26 @@ class Workspace:
             self._s(15),
             self._s(16),
         )
+
+    def _toolbar_dropdown_hit_rect(
+        self, item: ToolbarItem
+    ) -> Optional[pygame.Rect]:
+        """Return the clickable label/caret area that opens a dropdown."""
+        caret = self._toolbar_dropdown_rect(item)
+        if caret is None:
+            return None
+        if item.label is None:
+            return caret
+        self._init_fonts()
+        label_width = self._font_small.size(item.label)[0]
+        height = self._font_small.get_height()
+        label_rect = pygame.Rect(
+            item.rect.centerx - label_width // 2,
+            item.rect.bottom + self._s(8) - height // 2,
+            label_width,
+            height,
+        )
+        return label_rect.union(caret).inflate(self._s(2), self._s(2))
 
     def _line_menu_geometry(
         self, region: Rect, document: Document
@@ -812,15 +839,24 @@ class Workspace:
         self._clear_sketch_selection()
         document.dirty = True
 
+    def _constraint_toolbar_item(
+        self, region: Rect, document: Document
+    ) -> Optional[ToolbarItem]:
+        for group in self._sketch_toolbar_groups(region, document):
+            for item in group.items:
+                if item.action == "constraint_auto":
+                    return item
+        return None
+
     def _constraint_menu_geometry(
         self, region: Rect, document: Document
     ) -> Optional[Tuple[Rect, List[pygame.Rect], Optional[pygame.Rect]]]:
-        groups = self._sketch_toolbar_groups(region, document)
-        for group in groups:
-            for item in group.items:
-                if item.action == "constraint_auto":
-                    return self._dropdown_menu_geometry(item, len(self.CONSTRAINT_MENU_ITEMS))
-        return None
+        item = self._constraint_toolbar_item(region, document)
+        if item is None:
+            return None
+        return self._dropdown_menu_geometry(
+            item, len(self.CONSTRAINT_MENU_ITEMS)
+        )
 
     def _dropdown_menu_geometry(
         self, item: ToolbarItem, item_count: int
@@ -866,16 +902,13 @@ class Workspace:
         if not 0 <= index < len(self.CONSTRAINT_MENU_ITEMS):
             return
         key, _ = self.CONSTRAINT_MENU_ITEMS[index]
-        if key == "auto":
-            self._set_auto_constraints(True)
-        else:
-            self._manual_constraint = key
-            self._constraint_mode = key
-            # Deselect any active drawing tool when choosing a manual
-            # constraint; the selection itself is kept so it can be changed.
-            self._selected_tool = None
-            self._reset_line_state()
-            self._apply_edge_constraint(key, document)
+        self._manual_constraint = key
+        self._constraint_mode = key
+        # Deselect any active drawing tool when choosing a manual
+        # constraint; the selection itself is kept so it can be changed.
+        self._selected_tool = None
+        self._reset_line_state()
+        self._apply_edge_constraint(key, document)
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
         document.dirty = True
@@ -893,30 +926,20 @@ class Workspace:
                 return True
             for item in group.items:
                 if item.action == "constraint_auto":
-                    hit_rect = self._toolbar_item_hit_rect(item)
-                    caret = self._toolbar_dropdown_rect(item)
-                    if hit_rect.collidepoint(pos) or (caret is not None and caret.collidepoint(pos)):
-                        if caret is not None and caret.collidepoint(pos):
-                            self._constraint_menu_open = not self._constraint_menu_open
-                            self._constraint_menu_hover = -1
-                            return True
-                        if self._selected_sketch_entity is not None and (
-                            self._selected_sketch_entity[0] == "line"
-                        ):
-                            constraint = (
-                                self._constraint_mode
-                                if self._constraint_mode in ("vertical", "horizontal")
-                                else self._manual_constraint
-                            )
-                            self._manual_constraint = constraint
-                            self._constraint_mode = constraint
-                            self._apply_edge_constraint(constraint, document)
-                            self._selected_tool = None
-                            self._reset_line_state()
-                        else:
-                            self._set_auto_constraints(
-                                not self._auto_constraints_enabled()
-                            )
+                    dropdown_hit = self._toolbar_dropdown_hit_rect(item)
+                    if (
+                        dropdown_hit is not None
+                        and dropdown_hit.collidepoint(pos)
+                    ):
+                        self._constraint_menu_open = not self._constraint_menu_open
+                        self._constraint_menu_hover = -1
+                        return True
+                    if item.rect.collidepoint(pos):
+                        # The main V/H button selects automatic snapping;
+                        # the dropdown picks Vertical or Horizontal only.
+                        self._set_auto_constraints(True)
+                        self._constraint_menu_open = False
+                        self._constraint_menu_hover = -1
                         document.dirty = True
                         return True
                     continue
@@ -1107,14 +1130,9 @@ class Workspace:
                     and item.action == f"constraint_{selected_constraint}"
                 ) or (
                     item.action == "constraint_auto"
-                    and (
-                        (
-                            self._constraint_mode == "auto"
-                            and self.sketch_palette_window.options.get(
-                                "constraints", True
-                            )
-                        )
-                        or self._constraint_mode in ("vertical", "horizontal")
+                    and self._constraint_mode == "auto"
+                    and self.sketch_palette_window.options.get(
+                        "constraints", True
                     )
                 )
                 item_hover = (
@@ -2694,6 +2712,10 @@ class Workspace:
                     return True
             self._constraint_menu_open = False
             self._constraint_menu_hover = -1
+            item = self._constraint_toolbar_item(layout.toolbar, document)
+            if item is not None and item.rect.collidepoint(event.pos):
+                self._set_auto_constraints(True)
+                document.dirty = True
             return True
 
         # Commit a drag before any panel can consume the release.
