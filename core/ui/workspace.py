@@ -935,9 +935,13 @@ class Workspace:
                         self._constraint_menu_hover = -1
                         return True
                     if item.rect.collidepoint(pos):
-                        # The main V/H button selects automatic snapping;
-                        # the dropdown picks Vertical or Horizontal only.
+                        # The main V/H button selects automatic constraints:
+                        # infer the axis from a selected edge, otherwise just
+                        # enable automatic snapping for new lines.
                         self._set_auto_constraints(True)
+                        self._apply_auto_constraint(document)
+                        self._selected_tool = None
+                        self._reset_line_state()
                         self._constraint_menu_open = False
                         self._constraint_menu_hover = -1
                         document.dirty = True
@@ -956,6 +960,25 @@ class Workspace:
                 self._select_tool(item.action)
                 return True
         return False
+
+    def _apply_auto_constraint(self, document: Document) -> bool:
+        """Apply horizontal or vertical to the selected edge by its angle."""
+        sketch = document.sketch(document.active_sketch_id)
+        selected = self._selected_sketch_entity
+        if (
+            sketch is None
+            or selected is None
+            or selected[0] != "line"
+            or not 0 <= selected[1] < len(sketch.lines)
+        ):
+            return False
+        start, end = sketch.lines[selected[1]]
+        constraint = (
+            "horizontal"
+            if abs(end[0] - start[0]) >= abs(end[1] - start[1])
+            else "vertical"
+        )
+        return self._apply_edge_constraint(constraint, document)
 
     def _apply_edge_constraint(
         self, constraint: str, document: Document
@@ -2715,6 +2738,9 @@ class Workspace:
             item = self._constraint_toolbar_item(layout.toolbar, document)
             if item is not None and item.rect.collidepoint(event.pos):
                 self._set_auto_constraints(True)
+                self._apply_auto_constraint(document)
+                self._selected_tool = None
+                self._reset_line_state()
                 document.dirty = True
             return True
 
