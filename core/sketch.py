@@ -346,23 +346,26 @@ class Sketch:
             )
 
     def measurement_entity_points(
-        self, ref: Tuple[str, int]
+        self,
+        ref: Tuple[str, int],
+        points: Optional[List[Point]] = None,
     ) -> Optional[Tuple[Point, Point]]:
         """Return the endpoints used by a point or line measurement ref."""
+        source = self.points if points is None else points
         kind, index = ref
         if kind == "point":
-            if 0 <= index < len(self.points):
-                point = self.points[index]
+            if 0 <= index < len(source):
+                point = source[index]
                 return point, point
             return None
         if kind == "line":
             if 0 <= index < len(self.edges):
                 start, end = self.edges[index]
                 if (
-                    0 <= start < len(self.points)
-                    and 0 <= end < len(self.points)
+                    0 <= start < len(source)
+                    and 0 <= end < len(source)
                 ):
-                    return self.points[start], self.points[end]
+                    return source[start], source[end]
         return None
 
     @staticmethod
@@ -518,9 +521,13 @@ class Sketch:
         return None
 
     def angle_geometry(
-        self, first: Tuple[str, int], second: Tuple[str, int]
+        self,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+        points: Optional[List[Point]] = None,
     ) -> Optional[Tuple[float, Point, Point, Point]]:
         """Return angle, shared vertex, and rays, if the edges meet."""
+        source = self.points if points is None else points
         if first[0] != "line" or second[0] != "line":
             return None
         if not (
@@ -546,9 +553,9 @@ class Sketch:
         )
         if first_far == vertex_index or second_far == vertex_index:
             return None
-        vertex = self.points[vertex_index]
-        first_point = self.points[first_far]
-        second_point = self.points[second_far]
+        vertex = source[vertex_index]
+        first_point = source[first_far]
+        second_point = source[second_far]
         first_x = first_point[0] - vertex[0]
         first_y = first_point[1] - vertex[1]
         second_x = second_point[0] - vertex[0]
@@ -565,11 +572,14 @@ class Sketch:
         return angle, vertex, first_point, second_point
 
     def distance_geometry(
-        self, first: Tuple[str, int], second: Tuple[str, int]
+        self,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+        points: Optional[List[Point]] = None,
     ) -> Optional[Tuple[float, Point, Point]]:
         """Return the shortest distance and the measured points."""
-        first_points = self.measurement_entity_points(first)
-        second_points = self.measurement_entity_points(second)
+        first_points = self.measurement_entity_points(first, points)
+        second_points = self.measurement_entity_points(second, points)
         if first_points is None or second_points is None:
             return None
         if first[0] == "point" and second[0] == "point":
@@ -601,15 +611,349 @@ class Sketch:
         kind: str,
         first: Tuple[str, int],
         second: Tuple[str, int],
+        points: Optional[List[Point]] = None,
     ) -> Optional[float]:
-        """Return the initial value for a measurement from the geometry."""
+        """Return the value for a measurement from the geometry."""
         if kind == "angle":
-            geometry = self.angle_geometry(first, second)
+            geometry = self.angle_geometry(first, second, points)
         elif kind == "distance":
-            geometry = self.distance_geometry(first, second)
+            geometry = self.distance_geometry(first, second, points)
         else:
             return None
         return geometry[0] if geometry is not None else None
+
+    def measurement_residual(
+        self, measurement: Measurement, points: List[Point]
+    ) -> Optional[float]:
+        """Return target minus current for one measurement, if usable."""
+        if measurement.value is None:
+            return None
+        current = self.measurement_value(
+            measurement.kind,
+            measurement.first,
+            measurement.second,
+            points,
+        )
+        if current is None:
+            return None
+        target = measurement.value
+        if measurement.kind == "angle" and target > 180:
+            target = 360.0 - target
+        return target - current
+
+    def measurement_max_error(self, points: List[Point]) -> float:
+        """Return the largest absolute measurement residual."""
+        maximum = 0.0
+        for measurement in self.measurements:
+            residual = self.measurement_residual(measurement, points)
+            if residual is not None:
+                maximum = max(maximum, abs(residual))
+        return maximum
+
+    def enforce_measurements(
+        self,
+        points: List[Point],
+        iterations: int = 48,
+        tolerance: float = 1e-6,
+    ) -> bool:
+        """Project points until all fixed measurement values are satisfied."""
+        if not self.measurements or len(points) != len(self.points):
+            return True
+        for _ in range(max(1, iterations)):
+            projected = False
+            for measurement in self.measurements:
+                residual = self.measurement_residual(
+                    measurement, points
+                )
+                if residual is None or abs(residual) <= tolerance:
+                    continue
+                if measurement.kind == "distance":
+                    changed = self._project_distance(
+                        points, measurement, residual
+                    )
+                    projected = projected or changed
+                elif measurement.kind == "angle":
+                    changed = self._project_angle(
+                        points, measurement, residual
+                    )
+                    projected = projected or changed
+            if not projected:
+                return (
+                    self.measurement_max_error(points)
+                    <= tolerance
+                )
+            self.constrain_axis_changes(
+                points, range(len(points))
+            )
+            if self.measurement_max_error(points) <= tolerance:
+                return True
+        return self.measurement_max_error(points) <= tolerance
+
+    def enforced_points(self, points: List[Point]) -> List[Point]:
+        """Return a copy of points with measurement constraints applied."""
+        result = list(points)
+        self.enforce_measurements(result)
+        return result
+
+    def _project_distance(
+        self,
+        points: List[Point],
+        measurement: Measurement,
+        residual: float,
+    ) -> bool:
+        geometry = self.distance_geometry(
+            measurement.first, measurement.second, points
+        )
+        if geometry is None or abs(residual) <= 1e-12:
+            return False
+        current, first_point, second_point = geometry
+        if current > 1e-9:
+            direction_x = (
+                second_point[0] - first_point[0]
+            ) / current
+            direction_y = (
+                second_point[1] - first_point[1]
+            ) / current
+        else:
+            direction_x, direction_y = (
+                self._distance_separation_direction(
+                    points, measurement, first_point, second_point
+                )
+            )
+        first_group = self._measurement_side_points(
+            points, measurement.first, first_point
+        )
+        second_group = self._measurement_side_points(
+            points, measurement.second, second_point
+        )
+        if (
+            measurement.first[0] == "line"
+            and measurement.second[0] == "line"
+            and self._lines_parallel(points, measurement)
+        ):
+            first_group = self._edge_point_indices(
+                measurement.first
+            )
+            second_group = self._edge_point_indices(
+                measurement.second
+            )
+        if not first_group and not second_group:
+            return False
+        if set(first_group) & set(second_group):
+            return False
+        if first_group and second_group:
+            first_weight = second_weight = 0.5
+        elif first_group:
+            first_weight, second_weight = 1.0, 0.0
+        else:
+            first_weight, second_weight = 0.0, 1.0
+        offsets: Dict[int, Tuple[float, float]] = {}
+        self._add_offsets(
+            offsets,
+            first_group,
+            -direction_x * residual * first_weight,
+            -direction_y * residual * first_weight,
+        )
+        self._add_offsets(
+            offsets,
+            second_group,
+            direction_x * residual * second_weight,
+            direction_y * residual * second_weight,
+        )
+        self._apply_point_offsets(points, offsets)
+        return True
+
+    def _measurement_side_points(
+        self,
+        points: List[Point],
+        ref: Tuple[str, int],
+        closest: Point,
+    ) -> List[int]:
+        kind, index = ref
+        if kind == "point":
+            return [index] if 0 <= index < len(points) else []
+        if kind != "line" or not 0 <= index < len(self.edges):
+            return []
+        start, end = self.edges[index]
+        if not (
+            0 <= start < len(points)
+            and 0 <= end < len(points)
+        ):
+            return []
+        start_point = points[start]
+        end_point = points[end]
+        if math.hypot(
+            closest[0] - start_point[0],
+            closest[1] - start_point[1],
+        ) <= 1e-7:
+            return [start]
+        if math.hypot(
+            closest[0] - end_point[0],
+            closest[1] - end_point[1],
+        ) <= 1e-7:
+            return [end]
+        return [start, end]
+
+    def _edge_point_indices(
+        self, ref: Tuple[str, int]
+    ) -> List[int]:
+        if ref[0] != "line" or not 0 <= ref[1] < len(self.edges):
+            return []
+        start, end = self.edges[ref[1]]
+        if not (
+            0 <= start < len(self.points)
+            and 0 <= end < len(self.points)
+        ):
+            return []
+        return [start, end]
+
+    def _lines_parallel(
+        self,
+        points: List[Point],
+        measurement: Measurement,
+    ) -> bool:
+        first = self.measurement_entity_points(
+            measurement.first, points
+        )
+        second = self.measurement_entity_points(
+            measurement.second, points
+        )
+        if first is None or second is None:
+            return False
+        first_x = first[1][0] - first[0][0]
+        first_y = first[1][1] - first[0][1]
+        second_x = second[1][0] - second[0][0]
+        second_y = second[1][1] - second[0][1]
+        first_length = math.hypot(first_x, first_y)
+        second_length = math.hypot(second_x, second_y)
+        if first_length <= 1e-9 or second_length <= 1e-9:
+            return False
+        cross = abs(
+            first_x * second_y - first_y * second_x
+        ) / (first_length * second_length)
+        return cross <= 1e-7
+
+    def _distance_separation_direction(
+        self,
+        points: List[Point],
+        measurement: Measurement,
+        first_point: Point,
+        second_point: Point,
+    ) -> Tuple[float, float]:
+        for ref in (measurement.first, measurement.second):
+            if ref[0] != "line":
+                continue
+            entity = self.measurement_entity_points(ref, points)
+            if entity is None:
+                continue
+            delta_x = entity[1][0] - entity[0][0]
+            delta_y = entity[1][1] - entity[0][1]
+            length = math.hypot(delta_x, delta_y)
+            if length > 1e-9:
+                return -delta_y / length, delta_x / length
+        delta_x = second_point[0] - first_point[0]
+        delta_y = second_point[1] - first_point[1]
+        length = math.hypot(delta_x, delta_y)
+        if length > 1e-9:
+            return delta_x / length, delta_y / length
+        return 1.0, 0.0
+
+    def _project_angle(
+        self,
+        points: List[Point],
+        measurement: Measurement,
+        residual: float,
+    ) -> bool:
+        geometry = self.angle_geometry(
+            measurement.first, measurement.second, points
+        )
+        if geometry is None or abs(residual) <= 1e-12:
+            return False
+        current, vertex, first_point, second_point = geometry
+        target = measurement.value
+        if target is None:
+            return False
+        if target > 180:
+            target = 360.0 - target
+        delta = math.radians(target - current)
+        if abs(delta) <= 1e-12:
+            return False
+        first_edge = self.edges[measurement.first[1]]
+        second_edge = self.edges[measurement.second[1]]
+        shared = set(first_edge) & set(second_edge)
+        if len(shared) != 1:
+            return False
+        vertex_index = next(iter(shared))
+        first_far = (
+            first_edge[0]
+            if first_edge[1] == vertex_index
+            else first_edge[1]
+        )
+        second_far = (
+            second_edge[0]
+            if second_edge[1] == vertex_index
+            else second_edge[1]
+        )
+        first_x = first_point[0] - vertex[0]
+        first_y = first_point[1] - vertex[1]
+        second_x = second_point[0] - vertex[0]
+        second_y = second_point[1] - vertex[1]
+        cross = first_x * second_y - first_y * second_x
+        sign = 1.0 if cross >= 0 else -1.0
+        half = sign * delta / 2.0
+        first_rotated = self._rotate_vector(
+            first_x, first_y, -half
+        )
+        second_rotated = self._rotate_vector(
+            second_x, second_y, half
+        )
+        points[first_far] = (
+            vertex[0] + first_rotated[0],
+            vertex[1] + first_rotated[1],
+        )
+        points[second_far] = (
+            vertex[0] + second_rotated[0],
+            vertex[1] + second_rotated[1],
+        )
+        return True
+
+    @staticmethod
+    def _rotate_vector(
+        delta_x: float, delta_y: float, angle: float
+    ) -> Tuple[float, float]:
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        return (
+            delta_x * cosine - delta_y * sine,
+            delta_x * sine + delta_y * cosine,
+        )
+
+    @staticmethod
+    def _add_offsets(
+        offsets: Dict[int, Tuple[float, float]],
+        indices: Iterable[int],
+        delta_x: float,
+        delta_y: float,
+    ) -> None:
+        for index in indices:
+            previous = offsets.get(index, (0.0, 0.0))
+            offsets[index] = (
+                previous[0] + delta_x,
+                previous[1] + delta_y,
+            )
+
+    @staticmethod
+    def _apply_point_offsets(
+        points: List[Point],
+        offsets: Dict[int, Tuple[float, float]],
+    ) -> None:
+        for index, (delta_x, delta_y) in offsets.items():
+            if 0 <= index < len(points):
+                point = points[index]
+                points[index] = (
+                    point[0] + delta_x,
+                    point[1] + delta_y,
+                )
 
     def edge_constraint(self, index: int) -> Optional[str]:
         """Return the axis constraint for an edge, if any."""

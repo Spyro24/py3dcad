@@ -2376,7 +2376,7 @@ class Workspace:
             return None
         if not math.isfinite(value) or value < 0:
             return None
-        if kind == "angle" and value > 360:
+        if kind == "angle" and value > 180:
             return None
         return value
 
@@ -2397,7 +2397,7 @@ class Workspace:
         if value is None:
             if measurement.kind == "angle":
                 self._measurement_edit_error = (
-                    "Enter a value between 0 and 360"
+                    "Enter a value between 0 and 180"
                 )
             else:
                 self._measurement_edit_error = "Enter a positive number"

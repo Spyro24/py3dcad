@@ -470,7 +470,10 @@ class Application:
         normalized = normalize_measurement_value(value)
         if normalized is None:
             return
-        if sketch.measurements[index].value == normalized:
+        measurement = sketch.measurements[index]
+        if measurement.kind == "angle" and normalized > 180:
+            return
+        if measurement.value == normalized:
             return
         stack.execute(
             SetMeasurementValueCommand(

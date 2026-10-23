@@ -155,7 +155,9 @@ class MovePointCommand(Command):
             next_points = list(sketch.points)
             next_points[index] = point
             sketch.constrain_axis_changes(next_points, [index])
-            self.next_points = next_points
+            self.next_points = sketch.enforced_points(
+                next_points
+            )
 
     @property
     def label(self) -> str:
@@ -216,7 +218,9 @@ class MoveEdgeCommand(Command):
                 sketch.constrain_axis_changes(
                     next_points, [first, second]
                 )
-                self.next_points = next_points
+                self.next_points = sketch.enforced_points(
+                    next_points
+                )
 
     @property
     def label(self) -> str:
@@ -281,7 +285,15 @@ class SetEdgeConstraintCommand(Command):
                     [first, second],
                     excluded_edges=[index],
                 )
-                self.next_points = next_points
+                sketch.edge_constraints[index] = self.constraint
+                try:
+                    self.next_points = sketch.enforced_points(
+                        next_points
+                    )
+                finally:
+                    sketch.edge_constraints[index] = (
+                        self.previous_constraint
+                    )
 
     @property
     def label(self) -> str:
@@ -343,6 +355,9 @@ class AddMeasurementCommand(Command):
             normalized_value,
         )
         self.index: Optional[int] = None
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
+        self.has_applied = False
 
     @property
     def label(self) -> str:
@@ -366,10 +381,18 @@ class AddMeasurementCommand(Command):
                 return
             if not 0 <= ref_index < limit:
                 return
+        if not self.has_applied:
+            self.previous_points = list(self.sketch.points)
+            self.has_applied = True
         if self.index is None:
             self.index = len(self.sketch.measurements)
         self.index = min(self.index, len(self.sketch.measurements))
         self.sketch.measurements.insert(self.index, self.measurement)
+        if self.next_points is None:
+            self.next_points = self.sketch.enforced_points(
+                self.sketch.points
+            )
+        self.sketch.points[:] = self.next_points
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -385,6 +408,8 @@ class AddMeasurementCommand(Command):
                 self.sketch.measurements.remove(self.measurement)
             except ValueError:
                 pass
+        if self.previous_points is not None:
+            self.sketch.points[:] = self.previous_points
         self.document.dirty = True
 
 
@@ -463,7 +488,10 @@ class SetMeasurementValueCommand(Command):
         self.index = index
         self.value = normalize_measurement_value(value)
         self.previous: Optional[float] = None
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
         self.has_previous = False
+        self.has_applied = False
 
     @property
     def label(self) -> str:
@@ -487,19 +515,36 @@ class SetMeasurementValueCommand(Command):
         self.document.dirty = True
 
     def do(self) -> None:
-        if not 0 <= self.index < len(self.sketch.measurements):
+        if (
+            self.value is None
+            or not 0 <= self.index < len(self.sketch.measurements)
+        ):
             return
-        if not self.has_previous:
-            self.previous = self.sketch.measurements[
-                self.index
-            ].value
+        measurement = self.sketch.measurements[self.index]
+        if measurement.kind == "angle" and self.value > 180:
+            return
+        if not self.has_applied:
+            self.previous = measurement.value
+            self.previous_points = list(self.sketch.points)
             self.has_previous = True
-        self._replace(self.value)
+            self.has_applied = True
+            self._replace(self.value)
+            next_points = list(self.sketch.points)
+            self.sketch.enforce_measurements(next_points)
+            self.next_points = next_points
+        else:
+            self._replace(self.value)
+        if self.next_points is not None:
+            self.sketch.points[:] = self.next_points
+        self.document.dirty = True
 
     def undo(self) -> None:
         if not self.has_previous:
             return
         self._replace(self.previous)
+        if self.previous_points is not None:
+            self.sketch.points[:] = self.previous_points
+        self.document.dirty = True
 
 
 class AddLineCommand(Command):
