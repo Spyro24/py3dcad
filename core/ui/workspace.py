@@ -154,8 +154,7 @@ class Workspace:
         self._line_menu_hover = -1
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
-        self._constraint_mode = "auto"
-        self._manual_constraint = "horizontal"
+        self._constraint_tool: Optional[str] = None
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
         self._drag_point_index: Optional[int] = None
@@ -182,9 +181,6 @@ class Workspace:
             property_label="Plane",
         )
         self.sketch_palette_window = SketchPaletteWindow()
-        self._constraints_option_state = (
-            self.sketch_palette_window.options.get("constraints", True)
-        )
         self._history_document: Optional[int] = None
         self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
@@ -240,12 +236,14 @@ class Workspace:
         """Start sketch editing with the point tool selected."""
         self._active_mode_name = self.SKETCH_MODE
         self._selected_tool = "point"
+        self._constraint_tool = None
         self._reset_line_state()
         self._clear_sketch_selection()
 
     def deselect_tool(self) -> None:
         """Clear the current sketch tool without leaving sketch mode."""
         self._selected_tool = None
+        self._constraint_tool = None
         self._reset_line_state()
         self._clear_sketch_selection()
 
@@ -270,35 +268,20 @@ class Workspace:
 
     def _select_tool(self, tool: Optional[str]) -> None:
         self._selected_tool = tool
+        self._constraint_tool = None
         self._reset_line_state()
         self._clear_sketch_selection()
 
     def _auto_constraints_enabled(self) -> bool:
         """Return whether new lines snap automatically to the axes."""
         return (
-            self._constraint_mode == "auto"
+            self._constraint_tool not in ("vertical", "horizontal")
             and self.sketch_palette_window.options.get("constraints", True)
         )
 
     def _set_auto_constraints(self, enabled: bool) -> None:
         """Enable or disable automatic axis snapping."""
         self.sketch_palette_window.options["constraints"] = enabled
-        self._constraints_option_state = enabled
-        if enabled:
-            self._constraint_mode = "auto"
-        elif self._constraint_mode == "auto":
-            self._constraint_mode = self._manual_constraint
-
-    def _sync_constraint_option(self) -> None:
-        """Keep the toolbar mode in step with the palette toggle."""
-        auto_on = self.sketch_palette_window.options.get("constraints", True)
-        if auto_on == self._constraints_option_state:
-            return
-        self._constraints_option_state = auto_on
-        if auto_on:
-            self._constraint_mode = "auto"
-        elif self._constraint_mode == "auto":
-            self._constraint_mode = self._manual_constraint
 
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
@@ -351,7 +334,6 @@ class Workspace:
     ) -> None:
         self._init_fonts()
         self._sync_history_document(document)
-        self._sync_constraint_option()
         self._draw_toolbar(surface, layout.toolbar, document)
         self._draw_tree(surface, layout.document_tree, document)
         self.viewport.draw(
@@ -400,7 +382,7 @@ class Workspace:
             zip(self.CONSTRAINT_MENU_ITEMS, rows)
         ):
             hovered = index == self._constraint_menu_hover
-            selected = key == self._constraint_mode
+            selected = key == self._constraint_tool
             if hovered:
                 pygame.draw.rect(
                     surface, self.header_bg, rect,
@@ -441,16 +423,19 @@ class Workspace:
             self._hover_control = None
             self._hover_sketches_folder = False
             self._sketches_expanded = True
+            self._constraint_tool = None
             self._reset_line_state()
             self._clear_sketch_selection()
             self.close_create_sketch_dialog()
         if document.active_sketch_id != self._selection_sketch_id:
             self._selection_sketch_id = document.active_sketch_id
+            self._constraint_tool = None
             self._reset_line_state()
             self._clear_sketch_selection()
         active = document.sketch(document.active_sketch_id)
         if active is None:
             self._selected_tool = None
+            self._constraint_tool = None
             self._reset_line_state()
             self._clear_sketch_selection()
             if self._active_mode_name == self.SKETCH_MODE:
@@ -898,17 +883,33 @@ class Workspace:
                 return index
         return -1
 
+    def _activate_constraint_tool(
+        self, kind: str, document: Document
+    ) -> None:
+        """Arm a constraint tool and apply it to the current selection."""
+        self._constraint_tool = kind
+        if kind == "auto":
+            self._set_auto_constraints(True)
+        # Constraint tools replace drawing tools but keep the selection so it
+        # can be constrained immediately and the next edge can be picked.
+        self._selected_tool = None
+        self._reset_line_state()
+        self._apply_constraint_tool(document)
+
+    def _apply_constraint_tool(self, document: Document) -> bool:
+        if self._constraint_tool == "auto":
+            return self._apply_auto_constraint(document)
+        if self._constraint_tool in ("vertical", "horizontal"):
+            return self._apply_edge_constraint(
+                self._constraint_tool, document
+            )
+        return False
+
     def _choose_constraint(self, index: int, document: Document) -> None:
         if not 0 <= index < len(self.CONSTRAINT_MENU_ITEMS):
             return
         key, _ = self.CONSTRAINT_MENU_ITEMS[index]
-        self._manual_constraint = key
-        self._constraint_mode = key
-        # Deselect any active drawing tool when choosing a manual
-        # constraint; the selection itself is kept so it can be changed.
-        self._selected_tool = None
-        self._reset_line_state()
-        self._apply_edge_constraint(key, document)
+        self._activate_constraint_tool(key, document)
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
         document.dirty = True
@@ -920,6 +921,7 @@ class Workspace:
             if group.finish and group.rect.collidepoint(pos):
                 document.active_sketch_id = None
                 self._selected_tool = None
+                self._constraint_tool = None
                 self._reset_line_state()
                 self._clear_sketch_selection()
                 self.sketch_palette_window.close()
@@ -935,13 +937,9 @@ class Workspace:
                         self._constraint_menu_hover = -1
                         return True
                     if item.rect.collidepoint(pos):
-                        # The main V/H button selects automatic constraints:
-                        # infer the axis from a selected edge, otherwise just
-                        # enable automatic snapping for new lines.
-                        self._set_auto_constraints(True)
-                        self._apply_auto_constraint(document)
-                        self._selected_tool = None
-                        self._reset_line_state()
+                        # The main V/H button arms the automatic constraint
+                        # tool; selecting an edge then constrains it.
+                        self._activate_constraint_tool("auto", document)
                         self._constraint_menu_open = False
                         self._constraint_menu_hover = -1
                         document.dirty = True
@@ -1153,10 +1151,7 @@ class Workspace:
                     and item.action == f"constraint_{selected_constraint}"
                 ) or (
                     item.action == "constraint_auto"
-                    and self._constraint_mode == "auto"
-                    and self.sketch_palette_window.options.get(
-                        "constraints", True
-                    )
+                    and self._constraint_tool is not None
                 )
                 item_hover = (
                     item.action in self.SKETCH_INTERACTIVE_ACTIONS
@@ -1682,6 +1677,11 @@ class Workspace:
             return
         action = self._hover_tool
         text = self.TOOL_LABELS[action]
+        if (
+            action == "constraint_auto"
+            and self._constraint_tool in ("vertical", "horizontal")
+        ):
+            text = f"{self._constraint_tool.title()} Constraint"
         shortcut = self.TOOL_SHORTCUTS.get(action)
         if shortcut is not None:
             text = f"{text}  ({shortcut})"
@@ -2687,7 +2687,6 @@ class Workspace:
     ) -> bool:
         self._init_fonts()
         self._sync_history_document(document)
-        self._sync_constraint_option()
 
         active_sketch = document.sketch(document.active_sketch_id)
 
@@ -2737,10 +2736,7 @@ class Workspace:
             self._constraint_menu_hover = -1
             item = self._constraint_toolbar_item(layout.toolbar, document)
             if item is not None and item.rect.collidepoint(event.pos):
-                self._set_auto_constraints(True)
-                self._apply_auto_constraint(document)
-                self._selected_tool = None
-                self._reset_line_state()
+                self._activate_constraint_tool("auto", document)
                 document.dirty = True
             return True
 
@@ -2771,6 +2767,7 @@ class Workspace:
                 elif action == SketchPaletteAction.FINISH_SKETCH:
                     document.active_sketch_id = None
                     self._selected_tool = None
+                    self._constraint_tool = None
                     self._reset_line_state()
                     self._clear_sketch_selection()
                     self.sketch_palette_window.close()
@@ -2833,6 +2830,7 @@ class Workspace:
                     # Keep the sketch open, but do not leave a hidden sketch
                     # tool armed while another mode is visible.
                     self._selected_tool = None
+                    self._constraint_tool = None
                     self._reset_line_state()
                     self._clear_sketch_selection()
                 return True
@@ -2880,6 +2878,7 @@ class Workspace:
                             document.selected_face = None
                             document.active_sketch_id = None
                             self._selected_tool = None
+                            self._constraint_tool = None
                             self._reset_line_state()
                             self._clear_sketch_selection()
                         return True
@@ -2915,6 +2914,12 @@ class Workspace:
                         self._selected_sketch_entity = hit
                         self._hover_sketch_entity = hit
                         self._reset_line_state()
+                        if (
+                            kind == "line"
+                            and self._constraint_tool is not None
+                        ):
+                            self._apply_constraint_tool(document)
+                            return True
                         if kind == "point":
                             self._drag_point_index = index
                             self._drag_point_origin = sketch.points[index]
@@ -3214,6 +3219,7 @@ class Workspace:
         elif action == "finish_sketch":
             document.active_sketch_id = None
             self._selected_tool = None
+            self._constraint_tool = None
             self._reset_line_state()
             self._clear_sketch_selection()
             self.sketch_palette_window.close()
