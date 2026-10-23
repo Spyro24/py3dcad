@@ -155,6 +155,8 @@ class Workspace:
         self._line_menu_hover = -1
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
+        self._constraint_mode = "auto"
+        self._manual_constraint = "horizontal"
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
         self._drag_point_index: Optional[int] = None
@@ -181,6 +183,9 @@ class Workspace:
             property_label="Plane",
         )
         self.sketch_palette_window = SketchPaletteWindow()
+        self._constraints_option_state = (
+            self.sketch_palette_window.options.get("constraints", True)
+        )
         self._history_document: Optional[int] = None
         self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
@@ -269,6 +274,33 @@ class Workspace:
         self._reset_line_state()
         self._clear_sketch_selection()
 
+    def _auto_constraints_enabled(self) -> bool:
+        """Return whether new lines snap automatically to the axes."""
+        return (
+            self._constraint_mode == "auto"
+            and self.sketch_palette_window.options.get("constraints", True)
+        )
+
+    def _set_auto_constraints(self, enabled: bool) -> None:
+        """Enable or disable automatic axis snapping."""
+        self.sketch_palette_window.options["constraints"] = enabled
+        self._constraints_option_state = enabled
+        if enabled:
+            self._constraint_mode = "auto"
+        elif self._constraint_mode == "auto":
+            self._constraint_mode = self._manual_constraint
+
+    def _sync_constraint_option(self) -> None:
+        """Keep the toolbar mode in step with the palette toggle."""
+        auto_on = self.sketch_palette_window.options.get("constraints", True)
+        if auto_on == self._constraints_option_state:
+            return
+        self._constraints_option_state = auto_on
+        if auto_on:
+            self._constraint_mode = "auto"
+        elif self._constraint_mode == "auto":
+            self._constraint_mode = self._manual_constraint
+
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
         self.create_sketch_window.open()
@@ -320,6 +352,7 @@ class Workspace:
     ) -> None:
         self._init_fonts()
         self._sync_history_document(document)
+        self._sync_constraint_option()
         self._draw_toolbar(surface, layout.toolbar, document)
         self._draw_tree(surface, layout.document_tree, document)
         self.viewport.draw(
@@ -364,14 +397,11 @@ class Workspace:
             surface, self.border_color, panel, width=1,
             border_radius=self._s(6),
         )
-        auto_on = self.sketch_palette_window.options.get("constraints", True)
         for index, ((key, label), rect) in enumerate(
             zip(self.CONSTRAINT_MENU_ITEMS, rows)
         ):
             hovered = index == self._constraint_menu_hover
-            selected = (key == "auto" and auto_on) or (
-                key in ("vertical", "horizontal") and not auto_on
-            )
+            selected = key == self._constraint_mode
             if hovered:
                 pygame.draw.rect(
                     surface, self.header_bg, rect,
@@ -837,20 +867,17 @@ class Workspace:
             return
         key, _ = self.CONSTRAINT_MENU_ITEMS[index]
         if key == "auto":
-            self.sketch_palette_window.options["constraints"] = True
+            self._set_auto_constraints(True)
         else:
-            self.sketch_palette_window.options["constraints"] = False
-            selected = self._selected_sketch_entity
-            if selected is not None and selected[0] == "line":
-                sketch = document.sketch(document.active_sketch_id)
-                if sketch is not None and 0 <= selected[1] < len(sketch.edges):
-                    self.on_set_edge_constraint(selected[1], key)
-            # Deselect any active tool when applying a constraint
+            self._manual_constraint = key
+            self._constraint_mode = key
+            # Deselect any active drawing tool when choosing a manual
+            # constraint; the selection itself is kept so it can be changed.
             self._selected_tool = None
             self._reset_line_state()
+            self._apply_edge_constraint(key, document)
         self._constraint_menu_open = False
         self._constraint_menu_hover = -1
-        self._clear_sketch_selection()
         document.dirty = True
 
     def _handle_sketch_toolbar_click(
@@ -873,8 +900,23 @@ class Workspace:
                             self._constraint_menu_open = not self._constraint_menu_open
                             self._constraint_menu_hover = -1
                             return True
-                        # Click on the button itself toggles auto on/off
-                        self.sketch_palette_window.options["constraints"] = not self.sketch_palette_window.options.get("constraints", True)
+                        if self._selected_sketch_entity is not None and (
+                            self._selected_sketch_entity[0] == "line"
+                        ):
+                            constraint = (
+                                self._constraint_mode
+                                if self._constraint_mode in ("vertical", "horizontal")
+                                else self._manual_constraint
+                            )
+                            self._manual_constraint = constraint
+                            self._constraint_mode = constraint
+                            self._apply_edge_constraint(constraint, document)
+                            self._selected_tool = None
+                            self._reset_line_state()
+                        else:
+                            self._set_auto_constraints(
+                                not self._auto_constraints_enabled()
+                            )
                         document.dirty = True
                         return True
                     continue
@@ -893,20 +935,20 @@ class Workspace:
         return False
 
     def _apply_edge_constraint(
-        self, action: str, document: Document
-    ) -> None:
+        self, constraint: str, document: Document
+    ) -> bool:
         sketch = document.sketch(document.active_sketch_id)
         selected = self._selected_sketch_entity
-        if sketch is None or selected is None or selected[0] != "line":
-            return
-        if not 0 <= selected[1] < len(sketch.edges):
-            return
-        constraint = (
-            "vertical"
-            if action == "constraint_vertical"
-            else "horizontal"
-        )
+        if (
+            sketch is None
+            or selected is None
+            or selected[0] != "line"
+            or constraint not in ("vertical", "horizontal")
+            or not 0 <= selected[1] < len(sketch.edges)
+        ):
+            return False
         self.on_set_edge_constraint(selected[1], constraint)
+        return True
 
     def _draw_toolbar(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -1063,6 +1105,17 @@ class Workspace:
                 ) or (
                     selected_constraint is not None
                     and item.action == f"constraint_{selected_constraint}"
+                ) or (
+                    item.action == "constraint_auto"
+                    and (
+                        (
+                            self._constraint_mode == "auto"
+                            and self.sketch_palette_window.options.get(
+                                "constraints", True
+                            )
+                        )
+                        or self._constraint_mode in ("vertical", "horizontal")
+                    )
                 )
                 item_hover = (
                     item.action in self.SKETCH_INTERACTIVE_ACTIONS
@@ -2436,6 +2489,29 @@ class Workspace:
                     cy + int(radius * math.sin(angle)),
                 )
                 pygame.draw.circle(surface, color, point, dot)
+        elif kind == "constraint_auto":
+            thickness = max(1, self._s(2))
+            top = cy - radius // 2
+            bottom = cy + radius // 2
+            hx0 = cx - radius
+            hx1 = cx - radius // 3
+            pygame.draw.line(
+                surface, color, (hx0, top), (hx0, bottom), thickness
+            )
+            pygame.draw.line(
+                surface, color, (hx1, top), (hx1, bottom), thickness
+            )
+            pygame.draw.line(
+                surface, color, (hx0, cy), (hx1, cy), thickness
+            )
+            vx0 = cx + radius // 3
+            vx1 = cx + radius
+            vxm = (vx0 + vx1) // 2
+            pygame.draw.lines(
+                surface, color, False,
+                [(vx0, top), (vxm, bottom), (vx1, top)],
+                thickness,
+            )
         elif kind == "constraint_vertical":
             pygame.draw.line(
                 surface, color, (cx, cy - radius), (cx, cy + radius),
@@ -2570,6 +2646,7 @@ class Workspace:
     ) -> bool:
         self._init_fonts()
         self._sync_history_document(document)
+        self._sync_constraint_option()
 
         active_sketch = document.sketch(document.active_sketch_id)
 
@@ -3020,9 +3097,7 @@ class Workspace:
         region: Rect,
         snapped: bool,
     ) -> Tuple[Point, Optional[str]]:
-        if not self.sketch_palette_window.options.get(
-            "constraints", True
-        ):
+        if not self._auto_constraints_enabled():
             return point, None
         if snapped:
             if start[1] == point[1] and start[0] != point[0]:
