@@ -16,6 +16,7 @@ from .sketch import (
     normalize_measurement_value,
     normalize_plane,
 )
+from .solver.objects import point2d
 
 
 class Command(ABC):
@@ -110,7 +111,7 @@ class AddPointCommand(Command):
     def __init__(self, document: Document, sketch: Sketch, point: Point) -> None:
         self.document = document
         self.sketch = sketch
-        self.point = point
+        self.point = point2d(point)
         self.index: Optional[int] = None
 
     @property
@@ -147,13 +148,13 @@ class MovePointCommand(Command):
         self.document = document
         self.sketch = sketch
         self.index = index
-        self.point = point
+        self.point = point2d(point)
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
         if 0 <= index < len(sketch.points):
             self.previous_points = list(sketch.points)
             next_points = list(sketch.points)
-            next_points[index] = point
+            next_points[index] = self.point
             sketch.constrain_axis_changes(next_points, [index])
             self.next_points = sketch.enforced_points(
                 next_points
@@ -197,8 +198,8 @@ class MoveEdgeCommand(Command):
         self.document = document
         self.sketch = sketch
         self.index = index
-        self.start = start
-        self.end = end
+        self.start = point2d(start)
+        self.end = point2d(end)
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
         if 0 <= index < len(sketch.edges):
@@ -209,11 +210,11 @@ class MoveEdgeCommand(Command):
             ):
                 constraint = sketch.edge_constraint(index)
                 aligned_end = aligned_edge_endpoint(
-                    start, end, constraint
+                    self.start, self.end, constraint
                 )
                 self.previous_points = list(sketch.points)
                 next_points = list(sketch.points)
-                next_points[first] = start
+                next_points[first] = self.start
                 next_points[second] = aligned_end
                 sketch.constrain_axis_changes(
                     next_points, [first, second]
@@ -563,10 +564,10 @@ class AddLineCommand(Command):
     ) -> None:
         self.document = document
         self.sketch = sketch
-        self.start = start
+        self.start = point2d(start)
         self.constraint = normalize_edge_constraint(constraint)
         self.end = aligned_edge_endpoint(
-            start, end, self.constraint
+            self.start, end, self.constraint
         )
         self.index: Optional[int] = None
         self.created_points: List[int] = []

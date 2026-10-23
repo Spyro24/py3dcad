@@ -6,7 +6,9 @@ from typing import (
     Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union,
 )
 
-Point = Tuple[float, float]
+from .solver.objects import point2d
+
+Point = point2d
 Point3 = Tuple[float, float, float]
 
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
@@ -90,15 +92,15 @@ def aligned_edge_endpoint(
     """Return an endpoint aligned to an axis, preserving edge length."""
     constraint = normalize_edge_constraint(constraint)
     if constraint is None:
-        return end
+        return point2d(end)
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = max(1, int(round(math.hypot(dx, dy))))
     if constraint == "horizontal":
         direction = 1 if dx >= 0 else -1
-        return (start[0] + direction * length, start[1])
+        return point2d((start[0] + direction * length, start[1]))
     direction = 1 if dy >= 0 else -1
-    return (start[0], start[1] + direction * length)
+    return point2d((start[0], start[1] + direction * length))
 
 PLANE_KEYS = ("XY", "YZ", "ZX")
 PLANE_NAMES = {
@@ -268,6 +270,7 @@ class Sketch:
     measurements: List[Measurement] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.points = [point2d(point) for point in self.points]
         self.edges = [
             (start, end)
             for start, end in self.edges
@@ -379,16 +382,16 @@ class Sketch:
         delta_y = end[1] - start[1]
         length_squared = delta_x * delta_x + delta_y * delta_y
         if length_squared <= 1e-12:
-            return start
+            return point2d(start)
         factor = (
             (point[0] - start[0]) * delta_x
             + (point[1] - start[1]) * delta_y
         ) / length_squared
         factor = max(0.0, min(1.0, factor))
-        return (
+        return point2d((
             start[0] + factor * delta_x,
             start[1] + factor * delta_y,
-        )
+        ))
 
     @classmethod
     def segments_closest_points(
@@ -497,30 +500,30 @@ class Sketch:
                 other_x,
                 other_y,
             ) / denominator
-            return (
+            return point2d((
                 first_start[0] + factor * delta_x,
                 first_start[1] + factor * delta_y,
-            )
+            ))
         if (
             abs(first_cross) <= epsilon
             and on_segment(first_start, first_end, second_start)
         ):
-            return second_start
+            return point2d(second_start)
         if (
             abs(second_cross) <= epsilon
             and on_segment(first_start, first_end, second_end)
         ):
-            return second_end
+            return point2d(second_end)
         if (
             abs(third_cross) <= epsilon
             and on_segment(second_start, second_end, first_start)
         ):
-            return first_start
+            return point2d(first_start)
         if (
             abs(fourth_cross) <= epsilon
             and on_segment(second_start, second_end, first_end)
         ):
-            return first_end
+            return point2d(first_end)
         return None
 
     def angle_geometry(
@@ -701,7 +704,7 @@ class Sketch:
 
     def enforced_points(self, points: List[Point]) -> List[Point]:
         """Return a copy of points with measurement constraints applied."""
-        result = list(points)
+        result = [point2d(point) for point in points]
         self.enforce_measurements(result)
         return result
 
@@ -917,14 +920,14 @@ class Sketch:
         second_rotated = self._rotate_vector(
             second_x, second_y, half
         )
-        points[first_far] = (
+        points[first_far] = point2d((
             vertex[0] + first_rotated[0],
             vertex[1] + first_rotated[1],
-        )
-        points[second_far] = (
+        ))
+        points[second_far] = point2d((
             vertex[0] + second_rotated[0],
             vertex[1] + second_rotated[1],
-        )
+        ))
         return True
 
     @staticmethod
@@ -960,10 +963,10 @@ class Sketch:
         for index, (delta_x, delta_y) in offsets.items():
             if 0 <= index < len(points):
                 point = points[index]
-                points[index] = (
+                points[index] = point2d((
                     point[0] + delta_x,
                     point[1] + delta_y,
-                )
+                ))
 
     def edge_constraint(self, index: int) -> Optional[str]:
         """Return the axis constraint for an edge, if any."""
@@ -1071,11 +1074,11 @@ class Sketch:
                     target = points[anchor][axis]
                 for index in members:
                     point = points[index]
-                    points[index] = (
+                    points[index] = point2d((
                         (target, point[1])
                         if axis == 0
                         else (point[0], target)
-                    )
+                    ))
 
     @property
     def lines(self) -> List[Tuple[Point, Point]]:
@@ -1164,7 +1167,7 @@ class Sketch:
     def add_point(self, point: Point) -> int:
         """Append a standalone point."""
         index = len(self.points)
-        self.points.append(point)
+        self.points.append(point2d(point))
         return index
 
     def remove_point(self, index: int) -> None:
@@ -1437,7 +1440,7 @@ class Sketch:
         for index, existing in enumerate(points):
             if existing == point:
                 return index
-        points.append(point)
+        points.append(point2d(point))
         return len(points) - 1
 
 
