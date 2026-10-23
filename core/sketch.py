@@ -664,6 +664,7 @@ class Sketch:
             return True
         for _ in range(max(1, iterations)):
             projected = False
+            before_projection = list(points)
             for measurement in self.measurements:
                 residual = self.measurement_residual(
                     measurement, points
@@ -685,8 +686,14 @@ class Sketch:
                     self.measurement_max_error(points)
                     <= tolerance
                 )
+            # A projection may move only part of an axis-constrained
+            # edge.  Snap the other endpoints by translating the whole
+            # group by the correction instead of anchoring it to an
+            # arbitrary first point, which would undo the projection.
             self.constrain_axis_changes(
-                points, range(len(points))
+                points,
+                range(len(points)),
+                previous=before_projection,
             )
             if self.measurement_max_error(points) <= tolerance:
                 return True
@@ -970,6 +977,7 @@ class Sketch:
         changed: Iterable[int],
         locked: Optional[Iterable[int]] = None,
         excluded_edges: Optional[Iterable[int]] = None,
+        previous: Optional[List[Point]] = None,
     ) -> None:
         """Enforce all axis constraints after points have been changed.
 
@@ -983,6 +991,12 @@ class Sketch:
 
         Edges in ``excluded_edges`` are ignored, allowing an edge's old
         constraint to be replaced without it fighting the new alignment.
+
+        When ``previous`` is supplied, the group is translated by the mean
+        displacement of its moved points instead of being pinned to one
+        anchor.  Measurement enforcement uses this so that moving one
+        corner of a constrained edge moves the whole edge rather than being
+        snapped back to the other, stationary corner.
         """
         count = len(points)
         if count == 0:
@@ -1032,20 +1046,30 @@ class Sketch:
                 anchor = members[0]
                 for index in locked_order:
                     if index in member_set:
-                        target = points[index][axis]
                         anchor = index
                         break
-                if target is None:
+                else:
                     for index in changed_order:
                         if index in member_set:
-                            target = points[index][axis]
                             anchor = index
                             break
+                if previous is not None and len(previous) == count:
+                    shifts = [
+                        points[index][axis] - previous[index][axis]
+                        for index in members
+                        if abs(
+                            points[index][axis]
+                            - previous[index][axis]
+                        ) > 1e-12
+                    ]
+                    if shifts:
+                        target = (
+                            previous[anchor][axis]
+                            + sum(shifts) / len(shifts)
+                        )
                 if target is None:
                     target = points[anchor][axis]
                 for index in members:
-                    if index == anchor:
-                        continue
                     point = points[index]
                     points[index] = (
                         (target, point[1])
