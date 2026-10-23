@@ -16,11 +16,12 @@ from .commands import (
     MoveEdgeCommand,
     MovePointCommand,
     SetEdgeConstraintCommand,
+    SetMeasurementPlacementCommand,
 )
 from .config import Config, format_opened
 from .document import Document
 from .faces import face_for_ref
-from .sketch import Point
+from .sketch import Point, normalize_measurement_placement
 from .ui import (
     Window,
     UILayout,
@@ -68,6 +69,7 @@ class Application:
             on_history_play=self.toggle_playback,
             on_settings=self.open_settings,
             on_add_measurement=self.add_measurement,
+            on_set_measurement_placement=self.set_measurement_placement,
         )
         self.save_dialog = SaveDialog(self._save_to)
         self.settings_dialog = SettingsDialog(self._set_orientation_cube)
@@ -382,6 +384,7 @@ class Application:
         measurement_kind: str,
         first: tuple[str, int],
         second: tuple[str, int],
+        placement: Optional[float] = None,
     ) -> None:
         self._playing = False
         document = self.active_document()
@@ -393,6 +396,11 @@ class Application:
             "distance", "angle"
         ):
             return
+        if placement is not None:
+            normalized = normalize_measurement_placement(placement)
+            if normalized is None:
+                return
+            placement = normalized
         for entity_kind, index in (first, second):
             if entity_kind == "point":
                 if not 0 <= index < len(sketch.points):
@@ -404,7 +412,35 @@ class Application:
                 return
         stack.execute(
             AddMeasurementCommand(
-                document, sketch, measurement_kind, first, second
+                document,
+                sketch,
+                measurement_kind,
+                first,
+                second,
+                placement,
+            )
+        )
+
+    def set_measurement_placement(
+        self, index: int, placement: float
+    ) -> None:
+        """Update only the user-controlled annotation placement."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= index < len(sketch.measurements):
+            return
+        normalized = normalize_measurement_placement(placement)
+        if normalized is None:
+            return
+        if sketch.measurements[index].placement == normalized:
+            return
+        stack.execute(
+            SetMeasurementPlacementCommand(
+                document, sketch, index, normalized
             )
         )
 

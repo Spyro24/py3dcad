@@ -12,6 +12,7 @@ from .sketch import (
     Sketch,
     aligned_edge_endpoint,
     normalize_edge_constraint,
+    normalize_measurement_placement,
     normalize_plane,
 )
 
@@ -323,11 +324,15 @@ class AddMeasurementCommand(Command):
         measurement_kind: str,
         first: Tuple[str, int],
         second: Tuple[str, int],
+        placement: Optional[float] = None,
     ) -> None:
         self.document = document
         self.sketch = sketch
         self.measurement = Measurement(
-            measurement_kind, first, second
+            measurement_kind,
+            first,
+            second,
+            normalize_measurement_placement(placement),
         )
         self.index: Optional[int] = None
 
@@ -373,6 +378,62 @@ class AddMeasurementCommand(Command):
             except ValueError:
                 pass
         self.document.dirty = True
+
+
+class SetMeasurementPlacementCommand(Command):
+    """Move a measurement annotation without changing its geometry."""
+
+    kind = "measurement_placement"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        index: int,
+        placement: Optional[float],
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.index = index
+        self.placement = normalize_measurement_placement(placement)
+        self.previous: Optional[float] = None
+        self.has_previous = False
+
+    @property
+    def label(self) -> str:
+        return "Move Measurement"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def _replace(self, placement: Optional[float]) -> None:
+        if not 0 <= self.index < len(self.sketch.measurements):
+            return
+        measurement = self.sketch.measurements[self.index]
+        self.sketch.measurements[self.index] = Measurement(
+            measurement.kind,
+            measurement.first,
+            measurement.second,
+            placement,
+        )
+        self.document.dirty = True
+
+    def do(self) -> None:
+        if not 0 <= self.index < len(self.sketch.measurements):
+            return
+        if not self.has_previous:
+            self.previous = self.sketch.measurements[
+                self.index
+            ].placement
+            self.has_previous = True
+        self._replace(self.placement)
+
+    def undo(self) -> None:
+        if not self.has_previous:
+            return
+        self._replace(self.previous)
 
 
 class AddLineCommand(Command):

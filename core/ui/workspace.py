@@ -7,7 +7,13 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..sketch import Point, Sketch, aligned_edge_endpoint, point_on_plane
+from ..sketch import (
+    Measurement,
+    Point,
+    Sketch,
+    aligned_edge_endpoint,
+    point_on_plane,
+)
 from .layout import Rect, UILayout
 from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchPaletteWindow, SketchPaletteAction
 from .viewport import Viewport
@@ -136,7 +142,13 @@ class Workspace:
         on_history_play: Callable[[], None],
         on_settings: Optional[Callable[[], None]] = None,
         on_add_measurement: Optional[
-            Callable[[str, Tuple[str, int], Tuple[str, int]], None]
+            Callable[
+                [str, Tuple[str, int], Tuple[str, int], Optional[float]],
+                None,
+            ]
+        ] = None,
+        on_set_measurement_placement: Optional[
+            Callable[[int, float], None]
         ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
@@ -152,6 +164,9 @@ class Workspace:
         self.on_history_play = on_history_play
         self.on_settings = on_settings
         self.on_add_measurement = on_add_measurement
+        self.on_set_measurement_placement = (
+            on_set_measurement_placement
+        )
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -170,6 +185,14 @@ class Workspace:
         self._measure_menu_hover = -1
         self._measure_tool: Optional[str] = None
         self._measure_selection: List[Tuple[str, int]] = []
+        self._measurement_label_rects: List[
+            Tuple[int, pygame.Rect]
+        ] = []
+        self._hover_measurement_index: Optional[int] = None
+        self._drag_measurement_index: Optional[int] = None
+        self._drag_measurement_original: Optional[float] = None
+        self._drag_measurement_current: Optional[float] = None
+        self._drag_measurement_grab_delta = 0.0
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
         self._drag_point_index: Optional[int] = None
@@ -232,6 +255,12 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self._hover_sketch_entity = None
+        self._measurement_label_rects.clear()
+        self._hover_measurement_index = None
+        self._drag_measurement_index = None
+        self._drag_measurement_original = None
+        self._drag_measurement_current = None
+        self._drag_measurement_grab_delta = 0.0
         self.create_sketch_window.set_scale(scale)
         self.sketch_palette_window.set_scale(scale)
         self._font_label = None
@@ -270,6 +299,10 @@ class Workspace:
         self._measure_selection.clear()
         self._measure_menu_open = False
         self._measure_menu_hover = -1
+        self._drag_measurement_index = None
+        self._drag_measurement_original = None
+        self._drag_measurement_current = None
+        self._drag_measurement_grab_delta = 0.0
 
     def _clear_sketch_selection(self) -> None:
         self._selected_sketch_entity = None
@@ -1154,7 +1187,10 @@ class Workspace:
             self._measure_selection = [first]
             return
         if self.on_add_measurement is not None:
-            self.on_add_measurement(kind, first, second)
+            placement = self._default_measurement_placement(
+                sketch, kind, first, second
+            )
+            self.on_add_measurement(kind, first, second, placement)
         self._measure_selection.clear()
 
     def _resolve_measurement_kind(
@@ -1258,6 +1294,167 @@ class Workspace:
             second_point[1] - first_point[1],
         )
         return distance, first_point, second_point
+
+    @staticmethod
+    def _measurement_axis(
+        first_point: Point, second_point: Point
+    ) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+        """Return direction, left normal and length of a measured span."""
+        delta_x = second_point[0] - first_point[0]
+        delta_y = second_point[1] - first_point[1]
+        length = math.hypot(delta_x, delta_y)
+        if length <= 1e-9:
+            return (1.0, 0.0), (0.0, 1.0), 0.0
+        direction = (delta_x / length, delta_y / length)
+        return (
+            direction,
+            (-direction[1], direction[0]),
+            length,
+        )
+
+    @staticmethod
+    def _sketch_centroid(sketch: Sketch) -> Point:
+        if not sketch.points:
+            return (0.0, 0.0)
+        count = len(sketch.points)
+        return (
+            sum(point[0] for point in sketch.points) / count,
+            sum(point[1] for point in sketch.points) / count,
+        )
+
+    def _default_measurement_placement(
+        self,
+        sketch: Sketch,
+        kind: str,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> float:
+        if kind == "angle":
+            return self._default_angle_placement(
+                sketch, first, second
+            )
+        return self._default_distance_placement(
+            sketch, first, second
+        )
+
+    def _default_distance_placement(
+        self,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> float:
+        geometry = self._distance_geometry(sketch, first, second)
+        if geometry is None:
+            return 5.0
+        distance, first_point, second_point = geometry
+        _, normal, _ = self._measurement_axis(
+            first_point, second_point
+        )
+        midpoint = (
+            (first_point[0] + second_point[0]) / 2,
+            (first_point[1] + second_point[1]) / 2,
+        )
+        centroid = self._sketch_centroid(sketch)
+        outward = (
+            normal[0] * (midpoint[0] - centroid[0])
+            + normal[1] * (midpoint[1] - centroid[1])
+        )
+        if abs(outward) < 1e-9:
+            if abs(normal[1]) >= abs(normal[0]):
+                sign = 1.0 if normal[1] >= 0 else -1.0
+            else:
+                sign = 1.0 if normal[0] >= 0 else -1.0
+        else:
+            sign = 1.0 if outward > 0 else -1.0
+        magnitude = (
+            5.0 if distance <= 1e-9
+            else max(3.0, min(12.0, distance * 0.08))
+        )
+        return sign * magnitude
+
+    def _default_angle_placement(
+        self,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> float:
+        geometry = self._angle_geometry(sketch, first, second)
+        if geometry is None:
+            return 10.0
+        _, vertex, first_point, second_point = geometry
+        first_length = math.hypot(
+            first_point[0] - vertex[0],
+            first_point[1] - vertex[1],
+        )
+        second_length = math.hypot(
+            second_point[0] - vertex[0],
+            second_point[1] - vertex[1],
+        )
+        shorter = min(first_length, second_length)
+        return max(5.0, min(18.0, shorter * 0.2))
+
+    def _measurement_current_placement(
+        self,
+        sketch: Sketch,
+        index: int,
+        measurement: Measurement,
+    ) -> Optional[float]:
+        if (
+            self._drag_measurement_index == index
+            and self._drag_measurement_current is not None
+        ):
+            return self._drag_measurement_current
+        if measurement.placement is not None:
+            return measurement.placement
+        return self._default_measurement_placement(
+            sketch,
+            measurement.kind,
+            measurement.first,
+            measurement.second,
+        )
+
+    def _measurement_placement_from_cursor(
+        self,
+        sketch: Sketch,
+        index: int,
+        world: Point,
+    ) -> Optional[float]:
+        if not 0 <= index < len(sketch.measurements):
+            return None
+        measurement = sketch.measurements[index]
+        if measurement.kind == "distance":
+            geometry = self._distance_geometry(
+                sketch, measurement.first, measurement.second
+            )
+            if geometry is None:
+                return None
+            _, first_point, second_point = geometry
+            _, normal, _ = self._measurement_axis(
+                first_point, second_point
+            )
+            midpoint = (
+                (first_point[0] + second_point[0]) / 2,
+                (first_point[1] + second_point[1]) / 2,
+            )
+            return (
+                (world[0] - midpoint[0]) * normal[0]
+                + (world[1] - midpoint[1]) * normal[1]
+            )
+        if measurement.kind == "angle":
+            geometry = self._angle_geometry(
+                sketch, measurement.first, measurement.second
+            )
+            if geometry is None:
+                return None
+            _, vertex, _, _ = geometry
+            return max(
+                1.0,
+                math.hypot(
+                    world[0] - vertex[0],
+                    world[1] - vertex[1],
+                ),
+            )
+        return None
 
     @staticmethod
     def _measurement_entity_points(
@@ -1870,134 +2067,266 @@ class Workspace:
     def _draw_sketch_measurements(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
     ) -> None:
+        self._measurement_label_rects = []
         if not self.sketch_palette_window.options.get("dimensions", True):
             return
-        for measurement in sketch.measurements:
+        for index, measurement in enumerate(sketch.measurements):
             if measurement.kind == "distance":
-                geometry = self._distance_geometry(
-                    sketch, measurement.first, measurement.second
+                result = self._draw_distance_measurement(
+                    surface, sketch, region, index, measurement
                 )
-                if geometry is None:
-                    continue
-                value, first_point, second_point = geometry
-                screen_first = self._project_sketch_point(
-                    sketch, first_point, region
-                )
-                screen_second = self._project_sketch_point(
-                    sketch, second_point, region
-                )
-                anchor = (
-                    (screen_first[0] + screen_second[0]) / 2,
-                    (screen_first[1] + screen_second[1]) / 2,
-                )
-                self._draw_measurement_line(
-                    surface, screen_first, screen_second
-                )
-                text = f"{value:.2f} mm"
             else:
-                geometry = self._angle_geometry(
-                    sketch, measurement.first, measurement.second
+                result = self._draw_angle_measurement(
+                    surface, sketch, region, index, measurement
                 )
-                if geometry is None:
-                    continue
-                value, vertex, first_point, second_point = geometry
-                screen_vertex = self._project_sketch_point(
-                    sketch, vertex, region
-                )
-                screen_first = self._project_sketch_point(
-                    sketch, first_point, region
-                )
-                screen_second = self._project_sketch_point(
-                    sketch, second_point, region
-                )
-                anchor = self._draw_measurement_arc(
-                    surface, screen_vertex, screen_first, screen_second
-                )
-                if anchor is None:
-                    anchor = (
-                        screen_vertex[0], screen_vertex[1]
-                        - self._s(28),
-                    )
-                text = f"{value:.1f}°"
-            if region.collidepoint(anchor):
-                self._draw_measurement_label(surface, anchor, text)
+            if result is None:
+                continue
+            anchor, text = result
+            if not region.collidepoint(anchor):
+                continue
+            box = self._draw_measurement_label(
+                surface, anchor, text, index
+            )
+            self._measurement_label_rects.append((index, box))
 
-    def _draw_measurement_line(
+    def _draw_distance_measurement(
         self,
         surface: pygame.Surface,
-        first: Tuple[int, int],
-        second: Tuple[int, int],
-    ) -> None:
-        thickness = max(1, self._s(1))
-        if first == second:
-            pygame.draw.circle(
-                surface, self.accent, first, max(1, self._s(2))
-            )
-            return
-        pygame.draw.line(
-            surface, self.accent, first, second, thickness
+        sketch: Sketch,
+        region: Rect,
+        index: int,
+        measurement: Measurement,
+    ) -> Optional[Tuple[Tuple[float, float], str]]:
+        geometry = self._distance_geometry(
+            sketch, measurement.first, measurement.second
         )
-        delta_x = second[0] - first[0]
-        delta_y = second[1] - first[1]
+        if geometry is None:
+            return None
+        value, first_point, second_point = geometry
+        offset = self._measurement_current_placement(
+            sketch, index, measurement
+        )
+        if offset is None:
+            offset = self._default_distance_placement(
+                sketch, measurement.first, measurement.second
+            )
+        _, normal, _ = self._measurement_axis(
+            first_point, second_point
+        )
+        dimension_first = (
+            first_point[0] + normal[0] * offset,
+            first_point[1] + normal[1] * offset,
+        )
+        dimension_second = (
+            second_point[0] + normal[0] * offset,
+            second_point[1] + normal[1] * offset,
+        )
+        screen_first = self._project_sketch_point(
+            sketch, first_point, region
+        )
+        screen_second = self._project_sketch_point(
+            sketch, second_point, region
+        )
+        screen_dimension_first = self._project_sketch_point(
+            sketch, dimension_first, region
+        )
+        screen_dimension_second = self._project_sketch_point(
+            sketch, dimension_second, region
+        )
+        self._draw_extension_line(
+            surface, screen_first, screen_dimension_first
+        )
+        self._draw_extension_line(
+            surface, screen_second, screen_dimension_second
+        )
+        color = self.text_secondary
+        thickness = max(1, self._s(1))
+        if screen_dimension_first == screen_dimension_second:
+            pygame.draw.circle(
+                surface, color,
+                (round(screen_dimension_first[0]),
+                 round(screen_dimension_first[1])),
+                max(1, self._s(2)),
+            )
+        else:
+            pygame.draw.line(
+                surface, color,
+                screen_dimension_first, screen_dimension_second,
+                thickness,
+            )
+            self._draw_dimension_arrow(
+                surface, screen_dimension_first,
+                screen_dimension_second, color,
+            )
+            self._draw_dimension_arrow(
+                surface, screen_dimension_second,
+                screen_dimension_first, color,
+            )
+        screen_midpoint = (
+            (screen_dimension_first[0] + screen_dimension_second[0]) / 2,
+            (screen_dimension_first[1] + screen_dimension_second[1]) / 2,
+        )
+        measured_midpoint = (
+            (screen_first[0] + screen_second[0]) / 2,
+            (screen_first[1] + screen_second[1]) / 2,
+        )
+        label_x = screen_midpoint[0] - measured_midpoint[0]
+        label_y = screen_midpoint[1] - measured_midpoint[1]
+        label_length = math.hypot(label_x, label_y)
+        if label_length <= 1e-6:
+            step_point = (
+                first_point[0] + normal[0] * (offset + 1.0),
+                first_point[1] + normal[1] * (offset + 1.0),
+            )
+            screen_step = self._project_sketch_point(
+                sketch, step_point, region
+            )
+            label_x = screen_step[0] - screen_midpoint[0]
+            label_y = screen_step[1] - screen_midpoint[1]
+            label_length = math.hypot(label_x, label_y)
+        if label_length <= 1e-6:
+            label_x, label_y, label_length = 0.0, -1.0, 1.0
+        normal_x = label_x / label_length
+        normal_y = label_y / label_length
+        text = f"{value:.2f}"
+        label_width, label_height = self._font_small.size(text)
+        half_width = (label_width + self._s(10)) / 2
+        half_height = (label_height + self._s(4)) / 2
+        gap = (
+            abs(normal_x) * (half_width + self._s(3))
+            + abs(normal_y) * (half_height + self._s(3))
+        )
+        anchor = (
+            screen_midpoint[0] + normal_x * gap,
+            screen_midpoint[1] + normal_y * gap,
+        )
+        return anchor, text
+
+    def _draw_angle_measurement(
+        self,
+        surface: pygame.Surface,
+        sketch: Sketch,
+        region: Rect,
+        index: int,
+        measurement: Measurement,
+    ) -> Optional[Tuple[Tuple[float, float], str]]:
+        geometry = self._angle_geometry(
+            sketch, measurement.first, measurement.second
+        )
+        if geometry is None:
+            return None
+        value, vertex, first_point, second_point = geometry
+        radius = self._measurement_current_placement(
+            sketch, index, measurement
+        )
+        if radius is None:
+            radius = self._default_angle_placement(
+                sketch, measurement.first, measurement.second
+            )
+        radius = max(1.0, radius)
+        first_angle = math.atan2(
+            first_point[1] - vertex[1],
+            first_point[0] - vertex[0],
+        )
+        second_angle = math.atan2(
+            second_point[1] - vertex[1],
+            second_point[0] - vertex[0],
+        )
+        sweep = (
+            second_angle - first_angle + math.pi
+        ) % math.tau - math.pi
+        segments = 24
+        points: List[Tuple[float, float]] = []
+        for step in range(segments + 1):
+            angle = first_angle + sweep * step / segments
+            world_point = (
+                vertex[0] + radius * math.cos(angle),
+                vertex[1] + radius * math.sin(angle),
+            )
+            points.append(
+                self._project_sketch_point(
+                    sketch, world_point, region
+                )
+            )
+        color = self.text_secondary
+        thickness = max(1, self._s(1))
+        if any(point != points[0] for point in points[1:]):
+            pygame.draw.lines(
+                surface, color, False, points, thickness
+            )
+            self._draw_dimension_arrow(
+                surface, points[0], points[1], color
+            )
+            self._draw_dimension_arrow(
+                surface, points[-1], points[-2], color
+            )
+        anchor = points[len(points) // 2]
+        return anchor, f"{value:.1f}°"
+
+    def _draw_extension_line(
+        self,
+        surface: pygame.Surface,
+        origin: Tuple[float, float],
+        target: Tuple[float, float],
+    ) -> None:
+        delta_x = target[0] - origin[0]
+        delta_y = target[1] - origin[1]
+        length = math.hypot(delta_x, delta_y)
+        gap = self._s(3)
+        overshoot = self._s(5)
+        if length <= gap + overshoot:
+            return
+        direction_x = delta_x / length
+        direction_y = delta_y / length
+        start = (
+            origin[0] + direction_x * gap,
+            origin[1] + direction_y * gap,
+        )
+        end = (
+            target[0] + direction_x * overshoot,
+            target[1] + direction_y * overshoot,
+        )
+        pygame.draw.line(
+            surface, self.text_muted, start, end,
+            max(1, self._s(1)),
+        )
+
+    def _draw_dimension_arrow(
+        self,
+        surface: pygame.Surface,
+        tip: Tuple[float, float],
+        toward: Tuple[float, float],
+        color: pygame.Color,
+    ) -> None:
+        delta_x = tip[0] - toward[0]
+        delta_y = tip[1] - toward[1]
         length = math.hypot(delta_x, delta_y)
         if length <= 1e-6:
             return
-        tick = self._s(4)
-        normal_x = -delta_y / length * tick
-        normal_y = delta_x / length * tick
-        for point in (first, second):
-            pygame.draw.line(
-                surface,
-                self.accent,
+        direction_x = delta_x / length
+        direction_y = delta_y / length
+        arrow_length = min(float(self._s(7)), length * 0.45)
+        if arrow_length <= 1.0:
+            return
+        half_width = max(1.0, arrow_length * 0.34)
+        base_x = tip[0] - direction_x * arrow_length
+        base_y = tip[1] - direction_y * arrow_length
+        perpendicular_x = -direction_y
+        perpendicular_y = direction_x
+        pygame.draw.polygon(
+            surface,
+            color,
+            [
+                (round(tip[0]), round(tip[1])),
                 (
-                    round(point[0] - normal_x),
-                    round(point[1] - normal_y),
+                    round(base_x + perpendicular_x * half_width),
+                    round(base_y + perpendicular_y * half_width),
                 ),
                 (
-                    round(point[0] + normal_x),
-                    round(point[1] + normal_y),
+                    round(base_x - perpendicular_x * half_width),
+                    round(base_y - perpendicular_y * half_width),
                 ),
-                thickness,
-            )
-
-    def _draw_measurement_arc(
-        self,
-        surface: pygame.Surface,
-        vertex: Tuple[int, int],
-        first: Tuple[int, int],
-        second: Tuple[int, int],
-    ) -> Optional[Tuple[float, float]]:
-        first_x = first[0] - vertex[0]
-        first_y = first[1] - vertex[1]
-        second_x = second[0] - vertex[0]
-        second_y = second[1] - vertex[1]
-        first_length = math.hypot(first_x, first_y)
-        second_length = math.hypot(second_x, second_y)
-        if first_length <= 1e-6 or second_length <= 1e-6:
-            return None
-        first_angle = math.atan2(first_y, first_x)
-        second_angle = math.atan2(second_y, second_x)
-        sweep = (second_angle - first_angle + math.pi) % (
-            math.tau
-        ) - math.pi
-        radius = self._s(20)
-        segments = 20
-        points = []
-        for step in range(segments + 1):
-            angle = first_angle + sweep * step / segments
-            points.append((
-                round(vertex[0] + radius * math.cos(angle)),
-                round(vertex[1] + radius * math.sin(angle)),
-            ))
-        pygame.draw.lines(
-            surface, self.accent, False, points,
-            max(1, self._s(1)),
-        )
-        midpoint_angle = first_angle + sweep / 2
-        label_radius = radius + self._s(14)
-        return (
-            vertex[0] + label_radius * math.cos(midpoint_angle),
-            vertex[1] + label_radius * math.sin(midpoint_angle),
+            ],
         )
 
     def _draw_measurement_label(
@@ -2005,20 +2334,85 @@ class Workspace:
         surface: pygame.Surface,
         anchor: Tuple[float, float],
         text: str,
-    ) -> None:
+        index: int,
+    ) -> pygame.Rect:
         label = self._font_small.render(text, True, self.text_primary)
         box = label.get_rect(center=(
             round(anchor[0]), round(anchor[1])
         ))
-        box.inflate_ip(self._s(8), self._s(4))
+        box.inflate_ip(self._s(10), self._s(4))
         pygame.draw.rect(
-            surface, self.header_bg, box, border_radius=self._s(3)
+            surface, self.panel_bg, box, border_radius=self._s(3)
+        )
+        active = (
+            self._hover_measurement_index == index
+            or self._drag_measurement_index == index
         )
         pygame.draw.rect(
-            surface, self.accent, box, width=1,
+            surface,
+            self.accent if active else self.border_color,
+            box,
+            width=1,
             border_radius=self._s(3),
         )
         surface.blit(label, label.get_rect(center=box.center))
+        return box
+
+    def _measurement_label_at(
+        self, pos: Tuple[int, int]
+    ) -> Optional[int]:
+        for index, rect in reversed(self._measurement_label_rects):
+            if rect.collidepoint(pos):
+                return index
+        return None
+
+    def _start_measurement_drag(
+        self,
+        index: int,
+        sketch: Sketch,
+        pos: Tuple[int, int],
+        region: Rect,
+    ) -> None:
+        if not 0 <= index < len(sketch.measurements):
+            return
+        measurement = sketch.measurements[index]
+        current = self._measurement_current_placement(
+            sketch, index, measurement
+        )
+        if current is None:
+            return
+        grab_delta = 0.0
+        world = self.viewport.unproject_on_plane(
+            pos, region, sketch.frame()
+        )
+        if world is not None:
+            cursor_placement = self._measurement_placement_from_cursor(
+                sketch, index, world
+            )
+            if cursor_placement is not None:
+                grab_delta = current - cursor_placement
+        self._clear_sketch_selection()
+        self._drag_measurement_index = index
+        self._drag_measurement_original = current
+        self._drag_measurement_current = current
+        self._drag_measurement_grab_delta = grab_delta
+        self._hover_measurement_index = index
+        self._reset_line_state()
+
+    def _finish_measurement_drag(self) -> None:
+        index = self._drag_measurement_index
+        current = self._drag_measurement_current
+        original = self._drag_measurement_original
+        self._drag_measurement_index = None
+        self._drag_measurement_original = None
+        self._drag_measurement_current = None
+        self._drag_measurement_grab_delta = 0.0
+        if index is None or current is None:
+            return
+        if original is not None and abs(current - original) <= 1e-6:
+            return
+        if self.on_set_measurement_placement is not None:
+            self.on_set_measurement_placement(index, current)
 
     def _draw_point_drag_preview(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -3367,6 +3761,13 @@ class Workspace:
         if (
             event.type == pygame.MOUSEBUTTONUP
             and event.button == 1
+            and self._drag_measurement_index is not None
+        ):
+            self._finish_measurement_drag()
+            return True
+        if (
+            event.type == pygame.MOUSEBUTTONUP
+            and event.button == 1
             and self._drag_point_index is not None
         ):
             self._finish_point_drag(document)
@@ -3524,6 +3925,13 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
+                label_index = self._measurement_label_at(event.pos)
+                if label_index is not None:
+                    self._start_measurement_drag(
+                        label_index, sketch, event.pos,
+                        layout.viewport,
+                    )
+                    return True
                 if self._measure_tool is not None:
                     hit = self._pick_sketch_entity(
                         event.pos, layout.viewport, sketch
@@ -3878,6 +4286,7 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self._hover_sketch_entity = None
+        self._hover_measurement_index = None
         if self._line_menu_open:
             self._line_menu_hover = self._line_menu_index_at(
                 pos, layout.toolbar, document
@@ -3897,6 +4306,29 @@ class Workspace:
         else:
             self._measure_menu_hover = -1
         sketch = document.sketch(document.active_sketch_id)
+        if self._drag_measurement_index is not None and sketch is not None:
+            index = self._drag_measurement_index
+            if layout.viewport.collidepoint(pos) and 0 <= index < len(
+                sketch.measurements
+            ):
+                world = self.viewport.unproject_on_plane(
+                    pos, layout.viewport, sketch.frame()
+                )
+                if world is not None:
+                    placement = self._measurement_placement_from_cursor(
+                        sketch, index, world
+                    )
+                    if placement is not None:
+                        placement += self._drag_measurement_grab_delta
+                        if sketch.measurements[index].kind == "angle":
+                            placement = max(1.0, placement)
+                        self._drag_measurement_current = placement
+            self._hover_measurement_index = index
+            self._hover_sketch_entity = None
+            self._line_preview = None
+            return
+        if layout.viewport.collidepoint(pos):
+            self._hover_measurement_index = self._measurement_label_at(pos)
         if self._drag_point_index is not None and sketch is not None:
             if layout.viewport.collidepoint(pos):
                 world = self.viewport.unproject_on_plane(
@@ -4014,6 +4446,7 @@ class Workspace:
             sketch is not None
             and self._sketch_toolbar_visible(document)
             and layout.viewport.collidepoint(pos)
+            and self._hover_measurement_index is None
         ):
             self._hover_sketch_entity = self._pick_sketch_entity(
                 pos, layout.viewport, sketch

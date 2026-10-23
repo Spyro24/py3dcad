@@ -39,6 +39,24 @@ def normalize_measurement_ref(value: Any) -> Optional[Tuple[str, int]]:
     return kind, index
 
 
+def normalize_measurement_placement(value: Any) -> Optional[float]:
+    """Return a finite measurement placement value or None.
+
+    Distance placements are a signed perpendicular offset from the
+    measured points; angle placements are the radius of the arc.
+    ``None`` means the annotation uses a computed default position.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
 def normalize_edge_constraint(value: Any) -> Optional[str]:
     """Return a supported edge constraint key or None."""
     if isinstance(value, str):
@@ -171,12 +189,18 @@ class Measurement:
     kind: str
     first: Tuple[str, int]
     second: Tuple[str, int]
+    # User-controlled annotation placement.  Distance measurements store a
+    # signed perpendicular offset from the measured points; angle
+    # measurements store the arc radius.  None selects a computed default
+    # for older documents.
+    placement: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "kind": self.kind,
             "first": [self.first[0], self.first[1]],
             "second": [self.second[0], self.second[1]],
+            "placement": self.placement,
         }
 
     @classmethod
@@ -188,7 +212,12 @@ class Measurement:
         second = normalize_measurement_ref(data.get("second"))
         if kind is None or first is None or second is None:
             return None
-        return cls(kind, first, second)
+        return cls(
+            kind,
+            first,
+            second,
+            normalize_measurement_placement(data.get("placement")),
+        )
 
 
 @dataclass
@@ -257,7 +286,16 @@ class Sketch:
                     refs_valid = False
                     break
             if refs_valid:
-                measurements.append(Measurement(kind, first, second))
+                measurements.append(
+                    Measurement(
+                        kind,
+                        first,
+                        second,
+                        normalize_measurement_placement(
+                            measurement.placement
+                        ),
+                    )
+                )
         self.measurements = measurements
 
     def edge_constraint(self, index: int) -> Optional[str]:
@@ -475,7 +513,12 @@ class Sketch:
             )
             if first is not None and second is not None:
                 measurements.append(
-                    Measurement(measurement.kind, first, second)
+                    Measurement(
+                        measurement.kind,
+                        first,
+                        second,
+                        measurement.placement,
+                    )
                 )
         self.measurements = measurements
 
