@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple
 
 import pygame
 
@@ -87,6 +87,7 @@ class SceneRenderer:
         self._font_small: Optional[pygame.font.Font] = None
         self._plane_surface: Optional[pygame.Surface] = None
         self._face_surface: Optional[pygame.Surface] = None
+        self._hole_surface: Optional[pygame.Surface] = None
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.ui_scale) < 1e-6:
@@ -308,13 +309,22 @@ class SceneRenderer:
             ]
             if len(polygon) < 3:
                 continue
-            if self._point_in_polygon(pos, polygon):
-                hits.append((
-                    camera.depth(face.vertices),
-                    feature_id,
-                    face_index,
-                    face,
-                ))
+            if not self._point_in_polygon(pos, polygon):
+                continue
+            if any(
+                self._point_in_polygon(
+                    pos,
+                    [camera.project(vertex, center) for vertex in hole],
+                )
+                for hole in face.holes
+            ):
+                continue
+            hits.append((
+                camera.depth(face.vertices),
+                feature_id,
+                face_index,
+                face,
+            ))
         if not hits:
             return None
         hits.sort(key=lambda item: item[0])
@@ -448,7 +458,7 @@ class SceneRenderer:
         view_dir = camera.view_direction()
         faces: List[
             Tuple[
-                float, int, int, List[Point2], Color,
+                float, int, int, List[Point2], List[List[Point2]], Color,
                 Optional[Tuple[bool, ...]],
             ]
         ] = []
@@ -462,11 +472,16 @@ class SceneRenderer:
                 camera.project(vertex, center)
                 for vertex in face.vertices
             ]
+            holes = [
+                [camera.project(vertex, center) for vertex in hole]
+                for hole in face.holes
+            ]
             faces.append((
                 camera.depth(face.vertices),
                 feature_id,
                 face_index,
                 polygon,
+                holes,
                 face.color,
                 face.sharp_edges,
             ))
@@ -477,24 +492,54 @@ class SceneRenderer:
         show_highlight = not (
             active is not None and active.is_custom_plane
         )
-        selected: List[List[Point2]] = []
+        selected: List[Tuple[List[Point2], List[List[Point2]]]] = []
         for (
-            _, feature_id, face_index, polygon, color, sharp_edges
+            _, feature_id, face_index, polygon, holes, color, sharp_edges
         ) in faces:
             if len(polygon) < 3:
                 continue
-            pygame.draw.polygon(surface, color, polygon)
+            if holes:
+                self._draw_face_with_holes(
+                    surface, rect, polygon, holes, color
+                )
+            else:
+                pygame.draw.polygon(surface, color, polygon)
             self._draw_face_outline(
-                surface, polygon, sharp_edges, width
+                surface, polygon, sharp_edges, width, holes
             )
             if (
                 show_highlight
                 and (feature_id, face_index) == document.selected_face
             ):
-                selected.append(polygon)
+                selected.append((polygon, holes))
 
         if selected:
             self._draw_face_selection(surface, rect, selected)
+
+    def _draw_face_with_holes(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        polygon: List[Point2],
+        holes: List[List[Point2]],
+        color: Color,
+    ) -> None:
+        """Fill a cap face with transparent holes cut out of it."""
+        overlay = self._hole_surface
+        if overlay is None or overlay.get_size() != rect.size:
+            overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+            self._hole_surface = overlay
+        overlay.fill((0, 0, 0, 0))
+        local = [
+            (point[0] - rect.x, point[1] - rect.y) for point in polygon
+        ]
+        pygame.draw.polygon(overlay, color, local)
+        for hole in holes:
+            local_hole = [
+                (point[0] - rect.x, point[1] - rect.y) for point in hole
+            ]
+            pygame.draw.polygon(overlay, (0, 0, 0, 0), local_hole)
+        surface.blit(overlay, rect.topleft)
 
     def _draw_face_outline(
         self,
@@ -502,10 +547,16 @@ class SceneRenderer:
         polygon: List[Point2],
         sharp_edges: Optional[Tuple[bool, ...]],
         width: int,
+        holes: Sequence[List[Point2]] = (),
     ) -> None:
         """Draw real face edges, skipping smooth tessellation seams."""
         if sharp_edges is None:
             pygame.draw.polygon(surface, self.palette.edge, polygon, width)
+            for hole in holes:
+                if len(hole) >= 3:
+                    pygame.draw.polygon(
+                        surface, self.palette.edge, hole, width
+                    )
             return
         count = min(len(polygon), len(sharp_edges))
         for index in range(count):
@@ -523,29 +574,51 @@ class SceneRenderer:
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
-        polygons: List[List[Point2]],
+        faces: List[Tuple[List[Point2], List[List[Point2]]]],
     ) -> None:
         overlay = self._face_surface
         if overlay is None or overlay.get_size() != rect.size:
             overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
             self._face_surface = overlay
         overlay.fill((0, 0, 0, 0))
-        local_polygons = [
-            [
-                (point[0] - rect.x, point[1] - rect.y)
-                for point in polygon
-            ]
-            for polygon in polygons
+        local_faces = [
+            (
+                [
+                    (point[0] - rect.x, point[1] - rect.y)
+                    for point in polygon
+                ],
+                [
+                    [
+                        (point[0] - rect.x, point[1] - rect.y)
+                        for point in hole
+                    ]
+                    for hole in holes
+                ],
+            )
+            for polygon, holes in faces
         ]
-        for local_polygon in local_polygons:
+        for local_polygon, _ in local_faces:
             pygame.draw.polygon(
                 overlay, (*self.palette.active, 62), local_polygon
             )
-        for loop in union_profiles(local_polygons):
+        for _, local_holes in local_faces:
+            for local_hole in local_holes:
+                pygame.draw.polygon(
+                    overlay, (0, 0, 0, 0), local_hole
+                )
+        for loop in union_profiles(
+            [polygon for polygon, _ in local_faces]
+        ):
             pygame.draw.polygon(
                 overlay, (*self.palette.active, 245), loop,
                 max(1, self._s(2)),
             )
+        for _, local_holes in local_faces:
+            for local_hole in local_holes:
+                pygame.draw.polygon(
+                    overlay, (*self.palette.active, 245), local_hole,
+                    max(1, self._s(2)),
+                )
         surface.blit(overlay, rect.topleft)
 
     def _draw_sketch_lines(

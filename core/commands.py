@@ -668,7 +668,14 @@ class AddCircleCommand(Command):
         self.created_points = []
         if self.diameter <= 0:
             return
-        center_index = self.sketch.find_point(self.center)
+        center_index = self.sketch.point_index(self.center)
+        if center_index is not None and any(
+            circle.midPoint is self.sketch.points[center_index]
+            for circle in self.sketch.circles
+        ):
+            # Concentric circles need distinct midpoint points so each closed
+            # loop can be identified by its point index.
+            center_index = None
         if center_index is None:
             center_index = self.sketch.add_point(self.center)
             self.created_points.append(center_index)

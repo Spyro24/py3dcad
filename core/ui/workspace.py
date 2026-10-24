@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..profiles import point_in_polygon
+from ..profiles import build_regions, loop_inside, point_in_polygon
 from ..sketch import (
     Measurement,
     Point,
@@ -1909,13 +1909,54 @@ class Workspace:
         return best
 
     def selected_profiles(self, sketch: Sketch) -> List[List[int]]:
-        """Return the point loops selected as extrusion faces."""
+        """Return the point loops selected as extrusion faces.
+
+        Profiles nested inside a selected loop are included so they become
+        holes instead of being swallowed by the outer contour.
+        """
         loops = sketch.closed_loops()
+        indices = self._expanded_loop_indices(
+            sketch, self._valid_selected_loops(sketch)
+        )
         return [
             list(loops[index])
-            for index in sorted(set(self._selected_loops))
+            for index in sorted(indices)
             if 0 <= index < len(loops)
         ]
+
+    def _expanded_loop_indices(
+        self, sketch: Sketch, indices: List[int]
+    ) -> List[int]:
+        """Add loops nested inside the given loops, recursively."""
+        loops = sketch.closed_loops()
+        polygons = [sketch.loop_points(loop) for loop in loops]
+        selected = {
+            index for index in indices if 0 <= index < len(loops)
+        }
+        queue = list(selected)
+        while queue:
+            parent = queue.pop()
+            if not 0 <= parent < len(polygons):
+                continue
+            for index, polygon in enumerate(polygons):
+                if index in selected or not polygon:
+                    continue
+                if loop_inside(polygon, polygons[parent]):
+                    selected.add(index)
+                    queue.append(index)
+        return sorted(selected)
+
+    def _selected_regions(
+        self, sketch: Sketch, indices: List[int]
+    ) -> List[Tuple[List[Point], List[List[Point]]]]:
+        """Return ``(outer, holes)`` polygons for the given loop indices."""
+        loops = sketch.closed_loops()
+        polygons = [
+            sketch.loop_points(loops[index])
+            for index in indices
+            if 0 <= index < len(loops)
+        ]
+        return build_regions(polygons)
 
     def _valid_selected_loops(self, sketch: Optional[Sketch]) -> List[int]:
         if sketch is None:
@@ -1929,12 +1970,15 @@ class Workspace:
     def _draw_sketch_loops(
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
-        """Fill selected and hovered sketch faces."""
+        """Fill selected and hovered sketch faces, cutting out nested holes."""
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
             return
         loops = sketch.closed_loops()
-        selected = set(self._valid_selected_loops(sketch))
+        selected_indices = self._expanded_loop_indices(
+            sketch, self._valid_selected_loops(sketch)
+        )
+        selected = set(selected_indices)
         hovered = self._hover_loop
         if not selected and hovered is None:
             return
@@ -1945,40 +1989,48 @@ class Workspace:
             overlay = pygame.Surface(region.rect.size, pygame.SRCALPHA)
             self._loop_surface = overlay
         overlay.fill((0, 0, 0, 0))
-        for index in selected:
-            if 0 <= index < len(loops):
-                self._draw_loop_fill(
-                    overlay, sketch, loops[index], region,
-                    self.geometry_selection, 70,
-                )
+        selected_regions = self._selected_regions(
+            sketch, selected_indices
+        )
+        for outer, holes in selected_regions:
+            self._draw_region_fill(
+                overlay, sketch, outer, holes, region,
+                self.geometry_selection, 70,
+            )
         if (
             hovered is not None
             and hovered not in selected
             and 0 <= hovered < len(loops)
         ):
-            self._draw_loop_fill(
-                overlay, sketch, loops[hovered], region,
-                self.geometry_hover, 45,
+            hover_indices = self._expanded_loop_indices(
+                sketch, [hovered]
             )
-        surface.blit(overlay, region.rect.topleft)
-        for index in selected:
-            if 0 <= index < len(loops):
-                self._draw_loop_outline(
-                    surface, sketch, loops[index], region,
-                    self.geometry_selection, 2,
+            for outer, holes in self._selected_regions(
+                sketch, hover_indices
+            ):
+                self._draw_region_fill(
+                    overlay, sketch, outer, holes, region,
+                    self.geometry_hover, 45,
                 )
+        surface.blit(overlay, region.rect.topleft)
+        for outer, holes in selected_regions:
+            self._draw_region_outline(
+                surface, sketch, outer, holes, region,
+                self.geometry_selection, 2,
+            )
         surface.set_clip(previous_clip)
 
-    def _draw_loop_fill(
+    def _draw_region_fill(
         self,
         overlay: pygame.Surface,
         sketch: Sketch,
-        loop: List[int],
+        outer: List[Point],
+        holes: List[List[Point]],
         region: Rect,
         color: pygame.Color,
         alpha: int,
     ) -> None:
-        polygon = self._loop_screen_points(sketch, loop, region)
+        polygon = self._project_polygon(sketch, outer, region)
         if len(polygon) < 3:
             return
         local = [
@@ -1988,28 +2040,46 @@ class Workspace:
         pygame.draw.polygon(
             overlay, (color.r, color.g, color.b, alpha), local
         )
+        for hole in holes:
+            local_hole = self._local_polygon(sketch, hole, region)
+            if len(local_hole) >= 3:
+                pygame.draw.polygon(overlay, (0, 0, 0, 0), local_hole)
 
-    def _draw_loop_outline(
+    def _draw_region_outline(
         self,
         surface: pygame.Surface,
         sketch: Sketch,
-        loop: List[int],
+        outer: List[Point],
+        holes: List[List[Point]],
         region: Rect,
         color: pygame.Color,
         width: int,
     ) -> None:
-        polygon = self._loop_screen_points(sketch, loop, region)
+        width = max(1, self._s(width))
+        polygon = self._project_polygon(sketch, outer, region)
         if len(polygon) >= 3:
-            pygame.draw.lines(
-                surface, color, True, polygon, max(1, self._s(width))
-            )
+            pygame.draw.lines(surface, color, True, polygon, width)
+        for hole in holes:
+            hole_polygon = self._project_polygon(sketch, hole, region)
+            if len(hole_polygon) >= 3:
+                pygame.draw.lines(
+                    surface, color, True, hole_polygon, width
+                )
 
-    def _loop_screen_points(
-        self, sketch: Sketch, loop: List[int], region: Rect
+    def _local_polygon(
+        self, sketch: Sketch, points: List[Point], region: Rect
+    ) -> List[Tuple[float, float]]:
+        return [
+            (point[0] - region.rect.x, point[1] - region.rect.y)
+            for point in self._project_polygon(sketch, points, region)
+        ]
+
+    def _project_polygon(
+        self, sketch: Sketch, points: List[Point], region: Rect
     ) -> List[Tuple[float, float]]:
         return [
             self._project_sketch_point(sketch, point, region)
-            for point in sketch.loop_points(loop)
+            for point in points
         ]
 
     def _draw_sketch_selection(

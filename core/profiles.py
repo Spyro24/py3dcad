@@ -47,6 +47,165 @@ def point_in_polygon(
     return inside
 
 
+def build_regions(
+    loops: Sequence[Sequence[Sequence[float]]],
+) -> List[Tuple[Loop, List[Loop]]]:
+    """Return ``(outer, holes)`` regions for a set of closed profiles.
+
+    Loops that touch or overlap are merged into one outer contour.  A loop
+    nested inside another becomes a hole instead of being swallowed by the
+    union; a loop nested inside that hole becomes a separate island.  The
+    even/odd nesting depth decides whether a loop bounds material or void.
+    """
+    cleaned = [_clean_loop(loop) for loop in loops]
+    cleaned = [
+        loop for loop in cleaned
+        if len(loop) >= 3 and abs(polygon_area(loop)) > _EPS
+    ]
+    if not cleaned:
+        return []
+    cleaned = _unique_loops(cleaned)
+
+    # Nesting depth follows the smallest enclosing loop, not a raw count:
+    # overlapping outer loops must not make a nested profile look like an
+    # island just because several loops contain it.
+    order = sorted(
+        range(len(cleaned)),
+        key=lambda index: abs(polygon_area(cleaned[index])),
+        reverse=True,
+    )
+    depths = [0] * len(cleaned)
+    for position, index in enumerate(order):
+        parents = [
+            other_index
+            for other_index in order[:position]
+            if loop_inside(cleaned[index], cleaned[other_index])
+        ]
+        if not parents:
+            continue
+        parent = min(
+            parents,
+            key=lambda other_index: abs(polygon_area(cleaned[other_index])),
+        )
+        depths[index] = depths[parent] + 1
+
+    outers = _union_components([
+        loop for loop, depth in zip(cleaned, depths) if depth % 2 == 0
+    ])
+    holes = _union_components([
+        loop for loop, depth in zip(cleaned, depths) if depth % 2 == 1
+    ])
+
+    regions: List[Tuple[Loop, List[Loop]]] = [
+        (outer, []) for outer in outers
+    ]
+    for hole in holes:
+        candidates = [
+            region for region in regions if loop_inside(hole, region[0])
+        ]
+        if not candidates:
+            # A hole without a containing outer contour is material of its own.
+            regions.append((hole, []))
+            continue
+        target = min(
+            candidates, key=lambda region: abs(polygon_area(region[0]))
+        )
+        target[1].append(hole)
+    return regions
+
+
+def loop_inside(
+    inner: Sequence[Sequence[float]],
+    outer: Sequence[Sequence[float]],
+) -> bool:
+    """Return whether ``inner`` lies entirely inside ``outer``.
+
+    Vertices and edge midpoints are sampled so a concave loop that crosses
+    ``outer`` is not mistaken for a contained one.
+    """
+    if len(inner) < 3 or len(outer) < 3:
+        return False
+    for index, point in enumerate(inner):
+        following = inner[(index + 1) % len(inner)]
+        samples = (
+            (float(point[0]), float(point[1])),
+            (
+                (float(point[0]) + float(following[0])) / 2.0,
+                (float(point[1]) + float(following[1])) / 2.0,
+            ),
+        )
+        for sample in samples:
+            if not point_in_polygon(sample, outer):
+                return False
+    return True
+
+
+def _union_components(loops: Sequence[Loop]) -> List[Loop]:
+    """Union only loops that overlap or touch, keeping nesting levels apart."""
+    if not loops:
+        return []
+    if len(loops) == 1:
+        return union_profiles(loops)
+    parent = list(range(len(loops)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        first_root = find(first)
+        second_root = find(second)
+        if first_root != second_root:
+            parent[second_root] = first_root
+
+    for first in range(len(loops)):
+        for second in range(first + 1, len(loops)):
+            if _loops_connected(loops[first], loops[second]):
+                union(first, second)
+
+    groups: Dict[int, List[Loop]] = {}
+    for index, loop in enumerate(loops):
+        groups.setdefault(find(index), []).append(loop)
+    result: List[Loop] = []
+    for group in groups.values():
+        result.extend(union_profiles(group))
+    return result
+
+
+def _loops_connected(first: Loop, second: Loop) -> bool:
+    """Return whether two loops share material rather than just nesting."""
+    if loop_inside(first, second) or loop_inside(second, first):
+        return False
+    if any(point_in_polygon(point, second) for point in first):
+        return True
+    if any(point_in_polygon(point, first) for point in second):
+        return True
+    for index, start in enumerate(first):
+        end = first[(index + 1) % len(first)]
+        for other_index, other_start in enumerate(second):
+            other_end = second[(other_index + 1) % len(second)]
+            if _segment_intersection(
+                start, end, other_start, other_end
+            ) is not None:
+                return True
+    return False
+
+
+def _unique_loops(loops: Sequence[Loop]) -> List[Loop]:
+    """Drop loops that describe the same boundary as an earlier one."""
+    seen: Set[Tuple[Point2, ...]] = set()
+    result: List[Loop] = []
+    for loop in loops:
+        key = tuple(sorted(_point_key(point) for point in loop))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(loop)
+    return result
+
+
 def union_profiles(
     loops: Sequence[Sequence[Sequence[float]]],
 ) -> List[Loop]:

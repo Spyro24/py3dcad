@@ -401,13 +401,28 @@ class Sketch:
         self.enforce_measurements(self.points)
 
     def _bind_circles(self, circles: Iterable[Circle]) -> List[Circle]:
-        """Make each circle midpoint a regular point of the sketch."""
+        """Make each circle midpoint a regular point of the sketch.
+
+        Each circle gets its own point, even when several circles share a
+        centre, so every circle loop can be identified by its point index.
+        """
         bound: List[Circle] = []
+        used: set = set()
         for circle in circles:
-            index = self.find_point(circle.midPoint)
+            index: Optional[int] = None
+            for candidate, existing in enumerate(self.points):
+                if candidate not in used and existing is circle.midPoint:
+                    index = candidate
+                    break
+            if index is None:
+                for candidate, existing in enumerate(self.points):
+                    if candidate not in used and existing == circle.midPoint:
+                        index = candidate
+                        break
             if index is None:
                 index = self.add_point(circle.midPoint)
             circle.midPoint = self.points[index]
+            used.add(index)
             bound.append(circle)
         return bound
 

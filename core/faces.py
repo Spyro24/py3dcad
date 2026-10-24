@@ -6,9 +6,11 @@ application model can resolve a selected face without pulling in the UI.
 
 import math
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import (
+    Dict, Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING,
+)
 
-from .profiles import union_profiles
+from .profiles import build_regions
 from .sketch import PlaneFrame, PlaneLike, Point3, plane_frame
 
 Color = Tuple[int, int, int]
@@ -32,6 +34,8 @@ class Face:
     # ``None`` outlines every edge.  Side faces of curved surfaces list which
     # edges are real creases so tessellation seams are not drawn as mesh edges.
     sharp_edges: Optional[Tuple[bool, ...]] = None
+    # Inner boundaries of a cap face (holes through the solid).
+    holes: Tuple[Tuple[Point3, ...], ...] = ()
 
     def to_plane_frame(self) -> PlaneFrame:
         """Return an orthonormal sketch frame lying on this face."""
@@ -68,14 +72,24 @@ def prism_faces(
     points: Sequence[Sequence[float]],
     height: float,
     plane: PlaneLike = "XY",
+    holes: Sequence[Sequence[Sequence[float]]] = (),
 ) -> List[Face]:
-    """Build top, bottom and side faces for a sketch extruded along its normal."""
+    """Build top, bottom and side faces for a sketch extruded along its normal.
+
+    ``holes`` are inner boundaries of the profile.  They are cut out of both
+    caps and become inward-facing side walls.
+    """
     if len(points) < 3:
         return []
 
     frame = plane_frame(plane)
     base = _map_points(points, frame)
     top = _offset_points(base, frame.normal, height)
+    inner = [hole for hole in holes if len(hole) >= 3]
+    base_holes = [_map_points(hole, frame) for hole in inner]
+    top_holes = [
+        _offset_points(hole, frame.normal, height) for hole in base_holes
+    ]
 
     # The extrusion direction determines which cap points out of the solid.
     cap_normal = frame.normal if height >= 0 else _scale(frame.normal, -1.0)
@@ -86,15 +100,25 @@ def prism_faces(
         top_label, bottom_label = "Bottom face", "Top face"
 
     faces = [
-        Face(top, (190, 190, 198), cap_normal, top_label),
+        Face(
+            top, (190, 190, 198), cap_normal, top_label,
+            holes=tuple(top_holes),
+        ),
         Face(
             tuple(reversed(base)),
             (105, 105, 114),
             other_cap_normal,
             bottom_label,
+            holes=tuple(
+                tuple(reversed(hole)) for hole in base_holes
+            ),
         ),
     ]
     faces.extend(_side_faces(points, base, top, frame))
+    for hole, base_hole, top_hole in zip(inner, base_holes, top_holes):
+        faces.extend(
+            _side_faces(hole, base_hole, top_hole, frame, inward=True)
+        )
     return faces
 
 
@@ -130,6 +154,7 @@ def _side_faces(
     base: Sequence[Point3],
     top: Sequence[Point3],
     frame: PlaneFrame,
+    inward: bool = False,
 ) -> List[Face]:
     """Build side faces with outward normals regardless of profile winding."""
     area = 0.0
@@ -137,6 +162,7 @@ def _side_faces(
         nxt = points[(index + 1) % len(points)]
         area += float(point[0]) * float(nxt[1]) - float(nxt[0]) * float(point[1])
     orientation = 1.0 if area >= 0.0 else -1.0
+    direction = -1.0 if inward else 1.0
 
     count = len(base)
     normals: List[Point3] = []
@@ -146,9 +172,9 @@ def _side_faces(
         dy = float(points[nxt][1]) - float(points[index][1])
         local_x, local_y = (dy, -dx) if orientation > 0 else (-dy, dx)
         normals.append(_unit((
-            frame.u[0] * local_x + frame.v[0] * local_y,
-            frame.u[1] * local_x + frame.v[1] * local_y,
-            frame.u[2] * local_x + frame.v[2] * local_y,
+            (frame.u[0] * local_x + frame.v[0] * local_y) * direction,
+            (frame.u[1] * local_x + frame.v[1] * local_y) * direction,
+            (frame.u[2] * local_x + frame.v[2] * local_y) * direction,
         )))
 
     # A vertical edge is a smooth tessellation seam when the adjacent side
@@ -179,7 +205,8 @@ def iter_solid_faces(
     """Yield ``(feature_id, face_index, face)`` for every solid face.
 
     Smooth side-face runs share one ``face_index`` so a tessellated cylinder
-    selects and highlights as a single CAD face.
+    selects and highlights as a single CAD face.  Nested profiles become holes
+    through the solid instead of being merged into its outer contour.
     """
     for feature in document.features:
         sketch = document.sketch(feature.sketch_id)
@@ -189,47 +216,61 @@ def iter_solid_faces(
         if not profiles:
             continue
         face_index = 0
-        for profile in union_profiles(profiles):
-            faces = prism_faces(profile, feature.height, sketch.frame())
-            groups = _face_groups(faces)
+        for outer, holes in build_regions(profiles):
+            inner = [hole for hole in holes if len(hole) >= 3]
+            faces = prism_faces(
+                outer, feature.height, sketch.frame(), inner
+            )
+            runs = [1, 1, len(outer)] + [len(hole) for hole in inner]
+            groups = _face_groups(faces, runs)
             for face, group in zip(faces, groups):
                 yield feature.id, face_index + group, face
             face_index += max(groups, default=-1) + 1
 
 
-def _face_groups(faces: Sequence[Face]) -> List[int]:
-    """Give each face an index, merging smooth side-face runs."""
+def _face_groups(
+    faces: Sequence[Face], runs: Sequence[int]
+) -> List[int]:
+    """Give each face an index, merging smooth side runs within each loop."""
     groups: List[int] = []
     next_index = 0
-    previous_group: Optional[int] = None
-    previous_smooth = False
-    first_group: Optional[int] = None
-    side_indices: List[int] = []
-    for face in faces:
-        if face.sharp_edges is None:
-            groups.append(next_index)
-            next_index += 1
+    position = 0
+    for length in runs:
+        run = faces[position:position + length]
+        position += length
+        if not run:
             continue
-        side_indices.append(len(groups))
-        if previous_group is None:
-            group = next_index
-            next_index += 1
-            first_group = group
-        elif previous_smooth:
-            group = previous_group
-        else:
-            group = next_index
-            next_index += 1
-        groups.append(group)
-        previous_group = group
-        previous_smooth = not face.sharp_edges[1]
-    # A smooth run can wrap around from the last side face to the first.
-    if len(side_indices) > 1 and first_group is not None:
-        last_face = faces[side_indices[-1]]
-        if not last_face.sharp_edges[1]:
+        if run[0].sharp_edges is None:
+            for _ in run:
+                groups.append(next_index)
+                next_index += 1
+            continue
+        run_groups = _side_run_groups(run)
+        groups.extend(next_index + group for group in run_groups)
+        next_index += max(run_groups, default=-1) + 1
+    return groups
+
+
+def _side_run_groups(faces: Sequence[Face]) -> List[int]:
+    """Merge adjacent side panels whose shared edge is smooth."""
+    if not faces:
+        return []
+    groups = [0]
+    current = 0
+    for index in range(1, len(faces)):
+        sharp = faces[index - 1].sharp_edges
+        if sharp is None or sharp[1]:
+            current += 1
+        groups.append(current)
+    # A smooth run can wrap around from the last panel to the first.
+    sharp = faces[-1].sharp_edges
+    if len(faces) > 1 and sharp is not None and not sharp[1]:
+        last = groups[-1]
+        if last != 0:
+            groups = [0 if group == last else group for group in groups]
+            remap: Dict[int, int] = {}
             groups = [
-                first_group if group == previous_group else group
-                for group in groups
+                remap.setdefault(group, len(remap)) for group in groups
             ]
     return groups
 
