@@ -692,12 +692,16 @@ def _rim_strip(
         normal = _blend_normal(
             outward[segment], cap_outward, theta, vertices
         )
+        # Only the four boundaries of the whole quarter round are real edges:
+        # the two tangent lines along the cap and the wall, and the two end
+        # curves where the fillet meets whatever closes it.  Everything
+        # between them is tessellation and stays invisible.
         faces.append(Face(
             vertices,
             _normal_color(normal),
             normal,
             "Fillet face",
-            (False, False, False, False),
+            (False, step == steps - 1, False, step == 0),
         ))
     return faces
 
@@ -795,12 +799,14 @@ def _runout_patch(
     for step in range(steps):
         vertices = (point, ring[step], ring[step + 1])
         normal = _oriented_normal(vertices, reference)
+        # The fan is bounded by the arc it shares with the fillet strip; its
+        # radial edges are tessellation seams and stay invisible.
         faces.append(Face(
             vertices,
             _normal_color(normal),
             normal,
             "Fillet runout",
-            (False, False, False),
+            (False, True, False),
         ))
     return faces
 
@@ -1597,19 +1603,21 @@ def _face_groups(
 
 
 def _side_run_groups(faces: Sequence[Face]) -> List[int]:
-    """Merge adjacent side panels whose shared edge is smooth."""
+    """Merge adjacent panels whose shared edge is smooth."""
     if not faces:
         return []
     groups = [0]
     current = 0
     for index in range(1, len(faces)):
-        sharp = faces[index - 1].sharp_edges
-        if sharp is None or sharp[1]:
+        if _angle_between(
+            faces[index - 1].normal, faces[index].normal
+        ) >= SMOOTH_ANGLE:
             current += 1
         groups.append(current)
     # A smooth run can wrap around from the last panel to the first.
-    sharp = faces[-1].sharp_edges
-    if len(faces) > 1 and sharp is not None and not sharp[1]:
+    if len(faces) > 1 and _angle_between(
+        faces[-1].normal, faces[0].normal
+    ) < SMOOTH_ANGLE:
         last = groups[-1]
         if last != 0:
             groups = [0 if group == last else group for group in groups]

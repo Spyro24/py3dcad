@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import pygame
 
@@ -516,11 +516,21 @@ class SceneRenderer:
                 Optional[Tuple[bool, ...]],
             ]
         ] = []
+        # Every mesh edge remembers which side of the solid it is on.  A
+        # smooth seam whose two faces disagree is the silhouette of a curved
+        # run, so the rounded corner reads as a corner instead of a smear.
+        sides: Dict[
+            Tuple[Tuple[float, ...], Tuple[float, ...]], List[bool]
+        ] = {}
+        smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]] = set()
         for feature_id, face_index, face in iter_solid_faces(document):
+            front = (face.normal[0] * view_dir[0] +
+                     face.normal[1] * view_dir[1] +
+                     face.normal[2] * view_dir[2]) > 0
+            if face.label.startswith("Side face"):
+                self._collect_edge_sides(face, front, sides, smooth)
             # Backface culling: skip faces facing away from camera
-            if (face.normal[0] * view_dir[0] +
-                face.normal[1] * view_dir[1] +
-                face.normal[2] * view_dir[2]) <= 0:
+            if not front:
                 continue
             polygon = [
                 camera.project(vertex, center)
@@ -567,12 +577,78 @@ class SceneRenderer:
             ):
                 selected.append((polygon, holes))
 
+        self._draw_silhouettes(
+            surface, center, camera, sides, smooth, width
+        )
+
         if selected:
             self._draw_face_selection(surface, rect, selected)
         if show_highlight:
             edge = edge_for_ref(document, document.selected_edge)
             if edge is not None:
                 self._draw_edge_selection(surface, rect, camera, edge)
+
+    @staticmethod
+    def _edge_key(
+        start: Sequence[float], end: Sequence[float]
+    ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+        """Return a direction-independent key for one mesh edge."""
+        first = tuple(round(value, 6) for value in start)
+        second = tuple(round(value, 6) for value in end)
+        return (first, second) if first <= second else (second, first)
+
+    def _collect_edge_sides(
+        self,
+        face: Face,
+        front: bool,
+        sides: Dict[
+            Tuple[Tuple[float, ...], Tuple[float, ...]], List[bool]
+        ],
+        smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]],
+    ) -> None:
+        """Record the facing of both panels along every side-face edge."""
+        count = len(face.vertices)
+        sharp = face.sharp_edges
+        for index in range(count):
+            start = face.vertices[index]
+            end = face.vertices[(index + 1) % count]
+            if start == end:
+                continue
+            key = self._edge_key(start, end)
+            sides.setdefault(key, []).append(front)
+            if sharp is not None and index < len(sharp) and not sharp[index]:
+                smooth.add(key)
+
+    def _draw_silhouettes(
+        self,
+        surface: pygame.Surface,
+        center: Point2,
+        camera: OrbitCamera,
+        sides: Dict[
+            Tuple[Tuple[float, ...], Tuple[float, ...]], List[bool]
+        ],
+        smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]],
+        width: int,
+    ) -> None:
+        """Outline curved runs where the solid turns away from the camera.
+
+        Tessellation seams stay invisible, but the seam that separates a
+        visible panel from a hidden one is the silhouette of a rounded
+        corner and has to be drawn.
+        """
+        for key in smooth:
+            owners = sides.get(key)
+            if not owners:
+                continue
+            if not any(owners) or all(owners):
+                continue
+            pygame.draw.line(
+                surface,
+                self.palette.edge,
+                camera.project(key[0], center),
+                camera.project(key[1], center),
+                width,
+            )
 
     def _draw_edge_selection(
         self,
