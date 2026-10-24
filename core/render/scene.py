@@ -520,7 +520,8 @@ class SceneRenderer:
         # smooth seam whose two faces disagree is the silhouette of a curved
         # run, so the rounded corner reads as a corner instead of a smear.
         sides: Dict[
-            Tuple[Tuple[float, ...], Tuple[float, ...]], List[bool]
+            Tuple[Tuple[float, ...], Tuple[float, ...]],
+            List[Tuple[bool, float]],
         ] = {}
         smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]] = set()
         for feature_id, face_index, face in iter_solid_faces(document):
@@ -528,7 +529,9 @@ class SceneRenderer:
                      face.normal[1] * view_dir[1] +
                      face.normal[2] * view_dir[2]) > 0
             if face.label.startswith("Side face"):
-                self._collect_edge_sides(face, front, sides, smooth)
+                self._collect_edge_sides(
+                    face, front, camera.depth(face.vertices), sides, smooth
+                )
             # Backface culling: skip faces facing away from camera
             if not front:
                 continue
@@ -557,9 +560,30 @@ class SceneRenderer:
             active is not None and active.is_custom_plane
         )
         selected: List[Tuple[List[Point2], List[List[Point2]]]] = []
-        for (
-            _, feature_id, face_index, polygon, holes, color, sharp_edges
-        ) in faces:
+        # Silhouette edges travel with the front panel they belong to.  A face
+        # nearer to the camera is painted afterwards, so it hides a silhouette
+        # that lies behind it, such as the wall of a concave notch covered by
+        # the cap it was cut into.
+        items: List[Tuple[float, int, object]] = [
+            (item[0], 0, item) for item in faces
+        ]
+        items.extend(
+            (depth, 1, edge)
+            for depth, edge in self._silhouette_edges(
+                center, camera, sides, smooth
+            )
+        )
+        items.sort(key=lambda item: (item[0], item[1]))
+        for _, kind, payload in items:
+            if kind:
+                start, end = payload  # type: ignore[misc]
+                pygame.draw.line(
+                    surface, self.palette.edge, start, end, width
+                )
+                continue
+            (
+                _, feature_id, face_index, polygon, holes, color, sharp_edges
+            ) = payload  # type: ignore[misc]
             if len(polygon) < 3:
                 continue
             if holes:
@@ -576,10 +600,6 @@ class SceneRenderer:
                 and (feature_id, face_index) == document.selected_face
             ):
                 selected.append((polygon, holes))
-
-        self._draw_silhouettes(
-            surface, center, camera, sides, smooth, width
-        )
 
         if selected:
             self._draw_face_selection(surface, rect, selected)
@@ -601,12 +621,14 @@ class SceneRenderer:
         self,
         face: Face,
         front: bool,
+        depth: float,
         sides: Dict[
-            Tuple[Tuple[float, ...], Tuple[float, ...]], List[bool]
+            Tuple[Tuple[float, ...], Tuple[float, ...]],
+            List[Tuple[bool, float]],
         ],
         smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]],
     ) -> None:
-        """Record the facing of both panels along every side-face edge."""
+        """Record the facing and depth of both panels along every edge."""
         count = len(face.vertices)
         sharp = face.sharp_edges
         for index in range(count):
@@ -615,40 +637,43 @@ class SceneRenderer:
             if start == end:
                 continue
             key = self._edge_key(start, end)
-            sides.setdefault(key, []).append(front)
+            sides.setdefault(key, []).append((front, depth))
             if sharp is not None and index < len(sharp) and not sharp[index]:
                 smooth.add(key)
 
-    def _draw_silhouettes(
+    def _silhouette_edges(
         self,
-        surface: pygame.Surface,
         center: Point2,
         camera: OrbitCamera,
         sides: Dict[
-            Tuple[Tuple[float, ...], Tuple[float, ...]], List[bool]
+            Tuple[Tuple[float, ...], Tuple[float, ...]],
+            List[Tuple[bool, float]],
         ],
         smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]],
-        width: int,
-    ) -> None:
-        """Outline curved runs where the solid turns away from the camera.
+    ) -> List[Tuple[float, Tuple[Point2, Point2]]]:
+        """Return the curved runs where the solid turns away from the camera.
 
         Tessellation seams stay invisible, but the seam that separates a
         visible panel from a hidden one is the silhouette of a rounded
-        corner and has to be drawn.
+        corner and has to be drawn.  Each edge carries the depth of the front
+        panel it bounds, so the caller can sort it with the face fills.
         """
+        silhouettes: List[Tuple[float, Tuple[Point2, Point2]]] = []
         for key in smooth:
             owners = sides.get(key)
             if not owners:
                 continue
-            if not any(owners) or all(owners):
+            visible = [depth for front, depth in owners if front]
+            if not visible or len(visible) == len(owners):
                 continue
-            pygame.draw.line(
-                surface,
-                self.palette.edge,
-                camera.project(key[0], center),
-                camera.project(key[1], center),
-                width,
-            )
+            silhouettes.append((
+                max(visible),
+                (
+                    camera.project(key[0], center),
+                    camera.project(key[1], center),
+                ),
+            ))
+        return silhouettes
 
     def _draw_edge_selection(
         self,
