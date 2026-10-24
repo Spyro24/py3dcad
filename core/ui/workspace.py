@@ -7,6 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
+from ..profiles import point_in_polygon, polygon_area
 from ..sketch import (
     Measurement,
     Point,
@@ -131,7 +132,7 @@ class Workspace:
     def __init__(
         self,
         on_new_sketch: Callable[[], None],
-        on_extrude: Callable[[], None],
+        on_extrude: Callable[[List[List[int]]], None],
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point, Optional[str]], None],
         on_add_circle: Callable[[Point, float], None],
@@ -217,6 +218,9 @@ class Workspace:
         self._measurement_edit_pristine = False
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
+        self._selected_loops: List[int] = []
+        self._hover_loop: Optional[int] = None
+        self._loop_surface: Optional[pygame.Surface] = None
         self._drag_point_index: Optional[int] = None
         self._drag_point_origin: Optional[Point] = None
         self._drag_point_current: Optional[Point] = None
@@ -344,6 +348,8 @@ class Workspace:
     def _clear_sketch_selection(self) -> None:
         self._selected_sketch_entity = None
         self._hover_sketch_entity = None
+        self._selected_loops.clear()
+        self._hover_loop = None
         self._drag_point_index = None
         self._drag_point_origin = None
         self._drag_point_current = None
@@ -440,7 +446,11 @@ class Workspace:
             layout.viewport,
             document,
             self._selected_tool,
+            len(self._valid_selected_loops(
+                document.sketch(document.active_sketch_id)
+            )),
         )
+        self._draw_sketch_loops(surface, layout.viewport, document)
         self._draw_line_preview(surface, layout.viewport, document)
         self._draw_circle_preview(surface, layout.viewport, document)
         self._draw_sketch_selection(surface, layout.viewport, document)
@@ -595,6 +605,16 @@ class Workspace:
             and not 0 <= self._drag_edge_index < len(sketch.edges)
         ):
             self._clear_sketch_selection()
+        loops = sketch.closed_loops()
+        self._selected_loops = [
+            index for index in self._selected_loops
+            if 0 <= index < len(loops)
+        ]
+        if (
+            self._hover_loop is not None
+            and not 0 <= self._hover_loop < len(loops)
+        ):
+            self._hover_loop = None
 
     @staticmethod
     def _sketch_entity_limit(
@@ -685,9 +705,7 @@ class Workspace:
         self, region: Rect, document: Document
     ) -> List[Tuple[str, pygame.Rect, bool]]:
         sketch = document.sketch(document.active_sketch_id)
-        extrude_ready = (
-            sketch is not None and len(sketch.profile_points()) >= 3
-        )
+        extrude_ready = bool(self._valid_selected_loops(sketch))
         states = (
             ("sketch", True),
             ("extrude", extrude_ready),
@@ -1859,6 +1877,131 @@ class Workspace:
         if nearest_line is not None:
             return "line", nearest_line
         return None
+
+    def _pick_sketch_loop(
+        self, pos: Tuple[int, int], region: Rect, sketch: Sketch
+    ) -> Optional[int]:
+        """Return the smallest closed face under the cursor."""
+        world = self.viewport.unproject_on_plane(
+            pos, region, sketch.frame()
+        )
+        if world is None:
+            return None
+        best: Optional[int] = None
+        best_area = float("inf")
+        for index, loop in enumerate(sketch.closed_loops()):
+            polygon = [sketch.points[point] for point in loop]
+            if not point_in_polygon(world, polygon):
+                continue
+            area = abs(polygon_area(polygon))
+            if area < best_area:
+                best = index
+                best_area = area
+        return best
+
+    def selected_profiles(self, sketch: Sketch) -> List[List[int]]:
+        """Return the point loops selected as extrusion faces."""
+        loops = sketch.closed_loops()
+        return [
+            list(loops[index])
+            for index in sorted(set(self._selected_loops))
+            if 0 <= index < len(loops)
+        ]
+
+    def _valid_selected_loops(self, sketch: Optional[Sketch]) -> List[int]:
+        if sketch is None:
+            return []
+        count = len(sketch.closed_loops())
+        return [
+            index for index in self._selected_loops
+            if 0 <= index < count
+        ]
+
+    def _draw_sketch_loops(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        """Fill selected and hovered sketch faces."""
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        loops = sketch.closed_loops()
+        selected = set(self._valid_selected_loops(sketch))
+        hovered = self._hover_loop
+        if not selected and hovered is None:
+            return
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        overlay = self._loop_surface
+        if overlay is None or overlay.get_size() != region.rect.size:
+            overlay = pygame.Surface(region.rect.size, pygame.SRCALPHA)
+            self._loop_surface = overlay
+        overlay.fill((0, 0, 0, 0))
+        for index in selected:
+            if 0 <= index < len(loops):
+                self._draw_loop_fill(
+                    overlay, sketch, loops[index], region,
+                    self.geometry_selection, 70,
+                )
+        if (
+            hovered is not None
+            and hovered not in selected
+            and 0 <= hovered < len(loops)
+        ):
+            self._draw_loop_fill(
+                overlay, sketch, loops[hovered], region,
+                self.geometry_hover, 45,
+            )
+        surface.blit(overlay, region.rect.topleft)
+        for index in selected:
+            if 0 <= index < len(loops):
+                self._draw_loop_outline(
+                    surface, sketch, loops[index], region,
+                    self.geometry_selection, 2,
+                )
+        surface.set_clip(previous_clip)
+
+    def _draw_loop_fill(
+        self,
+        overlay: pygame.Surface,
+        sketch: Sketch,
+        loop: List[int],
+        region: Rect,
+        color: pygame.Color,
+        alpha: int,
+    ) -> None:
+        polygon = self._loop_screen_points(sketch, loop, region)
+        if len(polygon) < 3:
+            return
+        local = [
+            (point[0] - region.rect.x, point[1] - region.rect.y)
+            for point in polygon
+        ]
+        pygame.draw.polygon(
+            overlay, (color.r, color.g, color.b, alpha), local
+        )
+
+    def _draw_loop_outline(
+        self,
+        surface: pygame.Surface,
+        sketch: Sketch,
+        loop: List[int],
+        region: Rect,
+        color: pygame.Color,
+        width: int,
+    ) -> None:
+        polygon = self._loop_screen_points(sketch, loop, region)
+        if len(polygon) >= 3:
+            pygame.draw.lines(
+                surface, color, True, polygon, max(1, self._s(width))
+            )
+
+    def _loop_screen_points(
+        self, sketch: Sketch, loop: List[int], region: Rect
+    ) -> List[Tuple[float, float]]:
+        return [
+            self._project_sketch_point(sketch, sketch.points[index], region)
+            for index in loop
+        ]
 
     def _draw_sketch_selection(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -3974,11 +4117,13 @@ class Workspace:
                 ):
                     # Keep the sketch open, but do not leave a hidden sketch
                     # tool armed while another mode is visible.
+                    selected_loops = list(self._selected_loops)
                     self._selected_tool = None
                     self._constraint_tool = None
                     self._clear_measure_state()
                     self._reset_line_state()
                     self._clear_sketch_selection()
+                    self._selected_loops = selected_loops
                 return True
             if self._settings_rect(layout.toolbar).collidepoint(event.pos):
                 if self.on_settings is not None:
@@ -4122,6 +4267,31 @@ class Workspace:
                             self._start_edge_drag(
                                 index, sketch, event.pos, layout.viewport
                             )
+                        return True
+                    loop_hit = None
+                    if (
+                        self._selected_tool is None
+                        and self._constraint_tool is None
+                    ):
+                        loop_hit = self._pick_sketch_loop(
+                            event.pos, layout.viewport, sketch
+                        )
+                    if loop_hit is not None:
+                        mods = getattr(event, "mod", 0)
+                        if not mods:
+                            mods = pygame.key.get_mods()
+                        if mods & pygame.KMOD_CTRL:
+                            if loop_hit in self._selected_loops:
+                                self._selected_loops.remove(loop_hit)
+                            else:
+                                self._selected_loops.append(loop_hit)
+                            self._selected_sketch_entity = None
+                            self._hover_sketch_entity = None
+                        else:
+                            self._clear_sketch_selection()
+                            self._selected_loops = [loop_hit]
+                            self._hover_loop = loop_hit
+                        self._reset_line_state()
                         return True
                     self._clear_sketch_selection()
 
@@ -4409,7 +4579,13 @@ class Workspace:
         if action == "sketch":
             self.on_new_sketch()
         elif action == "extrude":
-            self.on_extrude()
+            sketch = document.sketch(document.active_sketch_id)
+            profiles = (
+                self.selected_profiles(sketch)
+                if sketch is not None else []
+            )
+            if profiles:
+                self.on_extrude(profiles)
         elif action == "measure":
             self._activate_measure_tool("auto", document)
         elif action == "finish_sketch":
@@ -4436,6 +4612,7 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self._hover_sketch_entity = None
+        self._hover_loop = None
         self._hover_measurement_index = None
         if self._line_menu_open:
             self._line_menu_hover = self._line_menu_index_at(
@@ -4641,6 +4818,14 @@ class Workspace:
             self._hover_sketch_entity = self._pick_sketch_entity(
                 pos, layout.viewport, sketch
             )
+            if (
+                self._hover_sketch_entity is None
+                and self._selected_tool is None
+                and self._constraint_tool is None
+            ):
+                self._hover_loop = self._pick_sketch_loop(
+                    pos, layout.viewport, sketch
+                )
 
         if layout.timeline.collidepoint(pos):
             controls, _, _, boxes, _, _, _, _ = self._timeline_geometry(

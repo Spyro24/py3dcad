@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
+from .profiles import union_profiles
 from .sketch import PlaneFrame, PlaneLike, Point3, plane_frame
 
 Color = Tuple[int, int, int]
@@ -162,13 +163,16 @@ def iter_solid_faces(
         sketch = document.sketch(feature.sketch_id)
         if sketch is None:
             continue
-        profile = sketch.profile_points()
-        if len(profile) < 3:
+        profiles = feature.resolve_profiles(sketch)
+        if not profiles:
             continue
-        for index, face in enumerate(
-            prism_faces(profile, feature.height, sketch.frame())
-        ):
-            yield feature.id, index, face
+        face_index = 0
+        for profile in union_profiles(profiles):
+            for face in prism_faces(
+                profile, feature.height, sketch.frame()
+            ):
+                yield feature.id, face_index, face
+                face_index += 1
 
 
 def face_for_ref(

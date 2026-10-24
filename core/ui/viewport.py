@@ -123,6 +123,7 @@ class Viewport:
         region: Rect,
         document: Document,
         active_tool: Optional[str] = None,
+        selected_profiles: int = 0,
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -137,13 +138,15 @@ class Viewport:
             self.renderer.draw_orientation_cube(
                 surface, region.rect, self.camera
             )
-        self._draw_hud(surface, region, document, active_tool)
+        self._draw_hud(
+            surface, region, document, active_tool, selected_profiles
+        )
 
         surface.set_clip(previous_clip)
 
     def _draw_hud(
         self, surface: pygame.Surface, region: Rect, document: Document,
-        active_tool: Optional[str] = None,
+        active_tool: Optional[str] = None, selected_profiles: int = 0,
     ) -> None:
         active = document.sketch(document.active_sketch_id)
         if active is not None:
@@ -159,7 +162,7 @@ class Viewport:
                     "circle" if len(active.circles) == 1 else "circles"
                 )
                 status += f"  ·  {len(active.circles)} {circle_word}"
-            profile_count = len(active.profile_points())
+            profile_count = len(active.closed_loops())
             if active_tool == "line":
                 hint = "Click to draw a line  ·  Esc to deselect"
             elif active_tool == "circle":
@@ -168,23 +171,36 @@ class Viewport:
                     "  ·  Esc to deselect"
                 )
             elif active_tool != "point":
-                if profile_count < 3:
+                if profile_count == 0:
                     hint = (
                         "No tool selected  ·  click Point or Line to draw"
                         "  ·  draw a closed loop to extrude"
                     )
+                elif selected_profiles == 0:
+                    hint = (
+                        "No tool selected  ·  click inside a closed loop"
+                        " to select it for extrude"
+                    )
                 else:
                     hint = (
-                        "No tool selected  ·  click Point or Line to draw"
+                        "Closed loop selected  ·  Ctrl+click to add more"
                         "  ·  E to extrude"
                     )
-            elif profile_count < 3:
+            elif profile_count == 0:
                 hint = (
                     "Click to place points  ·  draw a closed loop"
                     " to extrude"
                 )
+            elif selected_profiles == 0:
+                hint = (
+                    "Click to place points  ·  select a closed loop"
+                    " for extrude"
+                )
             else:
-                hint = "Click to place points  ·  E to extrude  ·  Esc to deselect"
+                hint = (
+                    "Click to place points  ·  E to extrude selected loops"
+                    "  ·  Esc to deselect"
+                )
         else:
             status = document.name
             if document.selected_face is not None:

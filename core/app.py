@@ -494,16 +494,35 @@ class Application:
             )
         )
 
-    def extrude_active(self) -> None:
+    def extrude_active(
+        self, profiles: Optional[List[List[int]]] = None
+    ) -> None:
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
         if document is None or stack is None:
             return
         sketch = document.sketch(document.active_sketch_id)
-        if sketch is None or len(sketch.profile_points()) < 3:
+        if sketch is None:
             return
-        stack.execute(AddExtrudeCommand(document, sketch))
+        if profiles is None:
+            profiles = self.workspace.selected_profiles(sketch)
+        valid = [
+            list(profile)
+            for profile in profiles
+            if (
+                len(profile) >= 3
+                and all(
+                    0 <= index < len(sketch.points)
+                    for index in profile
+                )
+            )
+        ]
+        if not valid:
+            return
+        stack.execute(
+            AddExtrudeCommand(document, sketch, profiles=valid)
+        )
         # The sketch is now consumed by the feature; hide it until selected again.
         document.active_sketch_id = None
         self.workspace.sketch_palette_window.close()

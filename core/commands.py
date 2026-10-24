@@ -714,14 +714,26 @@ class AddCircleCommand(Command):
 
 
 class AddExtrudeCommand(Command):
-    """Extrude a sketch into a solid feature."""
+    """Extrude one or more selected sketch faces into a solid feature."""
 
     kind = "extrude"
 
-    def __init__(self, document: Document, sketch: Sketch, height: float = 20.0) -> None:
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        height: float = 20.0,
+        profiles: Optional[List[List[int]]] = None,
+    ) -> None:
         self.document = document
         self.sketch = sketch
         self.height = height
+        if profiles is None:
+            profile = sketch.profile_indices()
+            profiles = [profile] if len(profile) >= 3 else []
+        self.profiles = [
+            list(profile) for profile in profiles if len(profile) >= 3
+        ]
         self.feature: Optional[Extrude] = None
 
     @property
@@ -733,9 +745,15 @@ class AddExtrudeCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
+        if not self.profiles:
+            return
         if self.feature is None:
             self.feature = Extrude(
-                self.document.new_id(), self._next_name(), self.sketch.id, self.height
+                self.document.new_id(),
+                self._next_name(),
+                self.sketch.id,
+                self.height,
+                [list(profile) for profile in self.profiles],
             )
         if self.feature not in self.document.features:
             self.document.features.append(self.feature)

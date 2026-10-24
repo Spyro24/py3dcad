@@ -6,6 +6,7 @@ from typing import (
     Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union,
 )
 
+from .profiles import polygon_area
 from .solver.objects import circle2d, line2d, point2d
 
 Point = point2d
@@ -16,6 +17,24 @@ Point3 = Tuple[float, float, float]
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
 MEASUREMENT_KINDS = ("distance", "angle")
 MEASUREMENT_REF_KINDS = ("point", "line")
+
+
+def _strip_loop_spikes(loop: List[int]) -> List[int]:
+    """Remove zero-area detours from a face traversal."""
+    cleaned: List[int] = []
+    for index in loop:
+        if cleaned and cleaned[-1] == index:
+            continue
+        if len(cleaned) >= 2 and cleaned[-2] == index:
+            cleaned.pop()
+            continue
+        cleaned.append(index)
+    while len(cleaned) >= 3 and cleaned[0] == cleaned[-2]:
+        cleaned.pop()
+        cleaned.pop(0)
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1]:
+        cleaned.pop()
+    return cleaned
 
 
 def normalize_measurement_kind(value: Any) -> Optional[str]:
@@ -1131,68 +1150,102 @@ class Sketch:
             for start, end in self.edges
         ]
 
-    def profile_indices(self) -> List[int]:
-        """Return a simple closed edge loop, or an empty list."""
+    def closed_loops(self) -> List[List[int]]:
+        """Return the bounded faces of the sketch edge graph.
+
+        Each loop is an ordered list of point indices.  Adjacent faces that
+        share an edge stay separate here; :func:`core.profiles.union_profiles`
+        merges them when the user selects several for an extrude.
+        """
         if len(self.edges) < 3:
             return []
         adjacency: Dict[int, List[int]] = {}
         for start, end in self.edges:
+            if start == end:
+                continue
             adjacency.setdefault(start, []).append(end)
             adjacency.setdefault(end, []).append(start)
+        self._prune_leaves(adjacency)
+        if len(adjacency) < 3:
+            return []
+        for node, neighbors in adjacency.items():
+            origin = self.points[node]
+            neighbors.sort(key=lambda other: math.atan2(
+                self.points[other][1] - origin[1],
+                self.points[other][0] - origin[0],
+            ))
 
-        seen: set[int] = set()
-        for start in adjacency:
-            if start in seen:
-                continue
-            component = self._graph_component(start, adjacency, seen)
-            if len(component) < 3:
-                continue
-            if any(len(adjacency[node]) != 2 for node in component):
-                continue
-            loop = self._trace_cycle(start, adjacency)
-            if len(loop) == len(component) and len(loop) >= 3:
-                return loop
-        return []
+        visited: set[Tuple[int, int]] = set()
+        loops: List[List[int]] = []
+        for start, neighbors in adjacency.items():
+            for neighbor in neighbors:
+                if (start, neighbor) in visited:
+                    continue
+                loop = self._trace_face(
+                    start, neighbor, adjacency, visited
+                )
+                if loop is None:
+                    continue
+                cleaned = _strip_loop_spikes(loop)
+                if (
+                    len(cleaned) < 3
+                    or len(set(cleaned)) != len(cleaned)
+                ):
+                    continue
+                points = [self.points[index] for index in cleaned]
+                if polygon_area(points) > 1e-9:
+                    loops.append(cleaned)
+        return loops
 
     @staticmethod
-    def _graph_component(
+    def _prune_leaves(adjacency: Dict[int, List[int]]) -> None:
+        """Drop tree branches that cannot belong to a closed face."""
+        pending = [
+            node for node, neighbors in adjacency.items()
+            if len(neighbors) < 2
+        ]
+        while pending:
+            node = pending.pop()
+            neighbors = adjacency.pop(node, None)
+            if neighbors is None:
+                continue
+            for neighbor in neighbors:
+                if neighbor not in adjacency:
+                    continue
+                if node in adjacency[neighbor]:
+                    adjacency[neighbor].remove(node)
+                if len(adjacency[neighbor]) < 2:
+                    pending.append(neighbor)
+
+    @staticmethod
+    def _trace_face(
         start: int,
+        first: int,
         adjacency: Dict[int, List[int]],
-        seen: set[int],
-    ) -> List[int]:
-        component: List[int] = []
-        stack = [start]
-        seen.add(start)
-        while stack:
-            node = stack.pop()
-            component.append(node)
-            for neighbor in adjacency[node]:
-                if neighbor not in seen:
-                    seen.add(neighbor)
-                    stack.append(neighbor)
-        return component
-
-    @staticmethod
-    def _trace_cycle(
-        start: int, adjacency: Dict[int, List[int]]
-    ) -> List[int]:
-        loop = [start]
-        previous: Optional[int] = None
+        visited: set[Tuple[int, int]],
+    ) -> Optional[List[int]]:
+        """Walk the half-edge face that keeps the interior on the left."""
+        loop: List[int] = []
         current = start
+        following = first
         while True:
-            neighbors = adjacency[current]
-            nxt = (
-                neighbors[0]
-                if neighbors[0] != previous
-                else neighbors[1]
-            )
-            if nxt == start:
-                break
-            if nxt in loop:
-                return []
-            loop.append(nxt)
-            previous, current = current, nxt
-        return loop
+            if (current, following) in visited:
+                return None
+            visited.add((current, following))
+            loop.append(current)
+            neighbors = adjacency.get(following, [])
+            if current not in neighbors:
+                return None
+            index = neighbors.index(current)
+            next_vertex = neighbors[(index - 1) % len(neighbors)]
+            current, following = following, next_vertex
+            if current == start:
+                return loop if following == first else None
+
+    def profile_indices(self) -> List[int]:
+        """Return the first simple closed edge loop, or an empty list."""
+        loops = self.closed_loops()
+        return loops[0] if loops else []
 
     def profile_points(self) -> List[Point]:
         """Return the ordered points of the extrudable edge loop."""
@@ -1533,12 +1586,13 @@ class Sketch:
 
 @dataclass
 class Extrude:
-    """A prism created by extruding a closed sketch along its normal."""
+    """A prism created by extruding closed sketch faces along its normal."""
 
     id: int
     name: str
     sketch_id: int
     height: float = 20.0
+    profiles: List[List[int]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1547,13 +1601,44 @@ class Extrude:
             "name": self.name,
             "sketch": self.sketch_id,
             "height": self.height,
+            "profiles": [list(loop) for loop in self.profiles],
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Extrude":
+        profiles: List[List[int]] = []
+        raw_profiles = data.get("profiles", [])
+        if isinstance(raw_profiles, (list, tuple)):
+            for raw_loop in raw_profiles:
+                if not isinstance(raw_loop, (list, tuple)):
+                    continue
+                loop: List[int] = []
+                for value in raw_loop:
+                    try:
+                        loop.append(int(value))
+                    except (TypeError, ValueError):
+                        loop = []
+                        break
+                if len(loop) >= 3:
+                    profiles.append(loop)
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Extrude")),
             sketch_id=int(data.get("sketch", 0)),
             height=float(data.get("height", 20.0)),
+            profiles=profiles,
         )
+
+    def resolve_profiles(self, sketch: Sketch) -> List[List[Point]]:
+        """Return the selected sketch loops as live point sequences."""
+        loops: List[List[Point]] = []
+        for profile in self.profiles:
+            if (
+                len(profile) >= 3
+                and all(0 <= index < len(sketch.points) for index in profile)
+            ):
+                loops.append([sketch.points[index] for index in profile])
+        if loops or self.profiles:
+            return loops
+        fallback = sketch.profile_points()
+        return [fallback] if len(fallback) >= 3 else []
