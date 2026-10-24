@@ -1688,6 +1688,8 @@ class Extrude:
     # represents arrangement regions such as the lens where a circle crosses
     # a rectangle, which cannot be stored as a single sketch loop.
     regions: List[List[List[int]]] = field(default_factory=list)
+    # Vertical-edge fillets stored as (u, v, radius) profile corners.
+    fillets: List[List[float]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1701,6 +1703,10 @@ class Extrude:
             "regions": [
                 [list(loop) for loop in region] for region in self.regions
             ],
+            "fillets": [
+                [float(value) for value in fillet]
+                for fillet in self.fillets
+            ],
         }
 
     @classmethod
@@ -1713,7 +1719,26 @@ class Extrude:
             profiles=cls._parse_loops(data.get("profiles", [])),
             cuts=cls._parse_loops(data.get("cuts", [])),
             regions=cls._parse_regions(data.get("regions", [])),
+            fillets=cls._parse_fillets(data.get("fillets", [])),
         )
+
+    @staticmethod
+    def _parse_fillets(raw_fillets: Any) -> List[List[float]]:
+        fillets: List[List[float]] = []
+        if not isinstance(raw_fillets, (list, tuple)):
+            return fillets
+        for raw_fillet in raw_fillets:
+            if not isinstance(raw_fillet, (list, tuple)):
+                continue
+            if len(raw_fillet) < 3:
+                continue
+            try:
+                fillet = [float(value) for value in raw_fillet[:3]]
+            except (TypeError, ValueError):
+                continue
+            if fillet[2] > 0.0:
+                fillets.append(fillet)
+        return fillets
 
     @classmethod
     def _parse_regions(cls, raw_regions: Any) -> List[List[List[int]]]:

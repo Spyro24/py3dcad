@@ -14,6 +14,7 @@ from .profiles import build_regions
 from .sketch import PlaneFrame, PlaneLike, Point3, plane_frame
 
 Color = Tuple[int, int, int]
+Point2 = Tuple[float, float]
 FaceRef = Tuple[int, int]
 EdgeRef = Tuple[int, int]
 
@@ -22,6 +23,7 @@ SMOOTH_ANGLE = math.radians(20.0)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .document import Document
+    from .sketch import Extrude
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,198 @@ def _side_faces(
     return faces
 
 
+def vertical_edge_corner(
+    edge: Edge, frame: PlaneFrame
+) -> Optional[Point2]:
+    """Return the local profile corner of a vertical edge, if it has one."""
+    direction = _subtract(edge.end, edge.start)
+    length = _length(direction)
+    if length < 1e-9:
+        return None
+    if abs(_dot(_scale(direction, 1.0 / length), frame.normal)) < 0.999:
+        return None
+    midpoint = edge.midpoint
+    offset = (
+        midpoint[0] - frame.origin[0],
+        midpoint[1] - frame.origin[1],
+        midpoint[2] - frame.origin[2],
+    )
+    return (_dot(offset, frame.u), _dot(offset, frame.v))
+
+
+def profile_has_corner(
+    document: "Document",
+    feature: "Extrude",
+    corner: Point2,
+    tolerance: float = 1e-4,
+) -> bool:
+    """Return whether a local corner exists on the feature's profile."""
+    sketch = document.sketch(feature.sketch_id)
+    if sketch is None:
+        return False
+    profiles = feature.resolve_profiles(sketch)
+    if not profiles:
+        return False
+    for outer, holes in build_regions(
+        profiles, feature.resolve_cuts(sketch)
+    ):
+        for loop in (outer, *holes):
+            for x, y in loop:
+                if (
+                    abs(x - corner[0]) <= tolerance
+                    and abs(y - corner[1]) <= tolerance
+                ):
+                    return True
+    return False
+
+
+def _apply_fillets(
+    outer: Sequence[Point2],
+    holes: Sequence[Sequence[Point2]],
+    fillets: Sequence[Sequence[float]],
+) -> Tuple[List[Point2], List[List[Point2]]]:
+    """Round the profile corners selected for a vertical-edge fillet."""
+    rounded_outer = _round_loop(outer, fillets)
+    rounded_holes = [
+        _round_loop(hole, fillets) for hole in holes
+    ]
+    return rounded_outer, rounded_holes
+
+
+def _round_loop(
+    points: Sequence[Point2], fillets: Sequence[Sequence[float]]
+) -> List[Point2]:
+    """Replace selected convex corners of a loop with tangent arcs."""
+    radii = _corner_radii(points, fillets)
+    if not radii:
+        return list(points)
+    orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
+    result: List[Point2] = []
+    count = len(points)
+    for index in range(count):
+        radius = radii.get(index)
+        if radius is None:
+            result.append(points[index])
+            continue
+        arc = _corner_arc(
+            points[index - 1],
+            points[index],
+            points[(index + 1) % count],
+            radius,
+            orientation,
+        )
+        result.extend(arc if arc is not None else [points[index]])
+    return result
+
+
+def _corner_radii(
+    points: Sequence[Point2], fillets: Sequence[Sequence[float]]
+) -> Dict[int, float]:
+    """Map loop vertex indices to the radius stored for their corner."""
+    radii: Dict[int, float] = {}
+    for fillet in fillets:
+        if len(fillet) < 3:
+            continue
+        u, v, radius = (
+            float(fillet[0]), float(fillet[1]), float(fillet[2])
+        )
+        if radius <= 0.0:
+            continue
+        for index, (x, y) in enumerate(points):
+            if abs(x - u) <= 1e-4 and abs(y - v) <= 1e-4:
+                radii[index] = radius
+                break
+    return radii
+
+
+def _corner_arc(
+    previous: Point2,
+    corner: Point2,
+    following: Point2,
+    radius: float,
+    orientation: float,
+) -> Optional[List[Point2]]:
+    """Build a tangent arc replacing one convex loop corner."""
+    incoming = (corner[0] - previous[0], corner[1] - previous[1])
+    outgoing = (following[0] - corner[0], following[1] - corner[1])
+    incoming_length = math.hypot(*incoming)
+    outgoing_length = math.hypot(*outgoing)
+    if incoming_length < 1e-9 or outgoing_length < 1e-9:
+        return None
+
+    u = (incoming[0] / incoming_length, incoming[1] / incoming_length)
+    v = (outgoing[0] / outgoing_length, outgoing[1] / outgoing_length)
+    cross = u[0] * v[1] - u[1] * v[0]
+    if cross * orientation <= 1e-9:
+        return None
+    dot = max(-1.0, min(1.0, -(u[0] * v[0] + u[1] * v[1])))
+    angle = math.acos(dot)
+    if angle <= 1e-6 or angle >= math.pi - 1e-6:
+        return None
+
+    tangent = radius / math.tan(angle * 0.5)
+    tangent = min(
+        tangent, 0.5 * min(incoming_length, outgoing_length)
+    )
+    if tangent <= 1e-9:
+        return None
+    actual_radius = tangent * math.tan(angle * 0.5)
+
+    start = (
+        corner[0] - u[0] * tangent,
+        corner[1] - u[1] * tangent,
+    )
+    end = (
+        corner[0] + v[0] * tangent,
+        corner[1] + v[1] * tangent,
+    )
+    inward = (
+        orientation * -u[1],
+        orientation * u[0],
+    )
+    center = (
+        start[0] + inward[0] * actual_radius,
+        start[1] + inward[1] * actual_radius,
+    )
+
+    start_angle = math.atan2(
+        start[1] - center[1], start[0] - center[0]
+    )
+    end_angle = math.atan2(
+        end[1] - center[1], end[0] - center[0]
+    )
+    if orientation > 0.0:
+        while end_angle <= start_angle:
+            end_angle += math.tau
+    else:
+        while end_angle >= start_angle:
+            end_angle -= math.tau
+
+    sweep = abs(end_angle - start_angle)
+    steps = max(2, int(math.ceil(sweep / (math.pi / 12.0))))
+    arc = [start]
+    for step in range(1, steps):
+        amount = step / steps
+        angle_now = start_angle + (end_angle - start_angle) * amount
+        arc.append((
+            center[0] + actual_radius * math.cos(angle_now),
+            center[1] + actual_radius * math.sin(angle_now),
+        ))
+    arc.append(end)
+    return arc
+
+
+def _loop_area(points: Sequence[Point2]) -> float:
+    """Return the signed area of a closed polygon."""
+    area = 0.0
+    count = len(points)
+    for index in range(count):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % count]
+        area += x1 * y2 - x2 * y1
+    return area * 0.5
+
+
 def iter_solid_faces(
     document: "Document",
 ) -> Iterator[Tuple[int, int, Face]]:
@@ -241,6 +435,10 @@ def iter_solid_faces(
         face_index = 0
         for outer, holes in build_regions(profiles, cuts):
             inner = [hole for hole in holes if len(hole) >= 3]
+            if feature.fillets:
+                outer, inner = _apply_fillets(
+                    outer, inner, feature.fillets
+                )
             faces = prism_faces(
                 outer, feature.height, sketch.frame(), inner
             )

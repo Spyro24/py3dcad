@@ -9,6 +9,7 @@ import pygame
 from .commands import (
     AddCircleCommand,
     AddExtrudeCommand,
+    AddFilletCommand,
     AddLineCommand,
     AddMeasurementCommand,
     AddPointCommand,
@@ -22,7 +23,10 @@ from .commands import (
 )
 from .config import Config, format_opened
 from .document import Document
-from .faces import edge_for_ref, face_for_ref
+from .faces import (
+    edge_for_ref, face_for_ref, profile_has_corner,
+    vertical_edge_corner,
+)
 from .sketch import (
     Point,
     normalize_measurement_placement,
@@ -78,6 +82,7 @@ class Application:
             on_add_measurement=self.add_measurement,
             on_set_measurement_placement=self.set_measurement_placement,
             on_set_measurement_value=self.set_measurement_value,
+            on_fillet=self.add_fillet,
         )
         self.save_dialog = SaveDialog(self._save_to)
         self.settings_dialog = SettingsDialog(self._set_orientation_cube)
@@ -548,6 +553,47 @@ class Application:
         # The sketch is now consumed by the feature; hide it until selected again.
         document.active_sketch_id = None
         self.workspace.sketch_palette_window.close()
+
+    def add_fillet(self, radius: float) -> Optional[str]:
+        """Round the selected vertical solid edge, returning an error text."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return "No active document"
+        reference = document.selected_edge
+        if reference is None:
+            return "Select a solid edge first"
+        feature = next(
+            (
+                candidate
+                for candidate in document.features
+                if candidate.id == reference[0]
+            ),
+            None,
+        )
+        edge = edge_for_ref(document, reference)
+        sketch = (
+            document.sketch(feature.sketch_id)
+            if feature is not None else None
+        )
+        if feature is None or edge is None or sketch is None:
+            return "Select a solid edge first"
+        corner = vertical_edge_corner(edge, sketch.frame())
+        if corner is None:
+            return "Fillet needs a vertical edge"
+        if not profile_has_corner(document, feature, corner):
+            return "Edge is already filleted"
+        if radius <= 0.0:
+            return "Enter a radius greater than zero"
+        stack.execute(
+            AddFilletCommand(
+                document, feature, corner[0], corner[1], radius
+            )
+        )
+        document.selected_edge = None
+        document.selected_face = None
+        return None
 
     def select_sketch(self, sketch_id: int) -> None:
         document = self.active_document()

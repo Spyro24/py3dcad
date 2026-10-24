@@ -19,7 +19,14 @@ from ..sketch import (
     point_on_plane,
 )
 from .layout import Rect, UILayout
-from .tool_properties import ToolPropertiesWindow, ToolWindowAction, SketchPaletteWindow, SketchPaletteAction
+from .tool_properties import (
+    FilletWindow,
+    FilletWindowAction,
+    SketchPaletteAction,
+    SketchPaletteWindow,
+    ToolPropertiesWindow,
+    ToolWindowAction,
+)
 from .viewport import Viewport
 
 
@@ -41,6 +48,7 @@ class ToolbarItem:
     label: Optional[str] = None
     placeholder: bool = False
     dropdown: bool = False
+    enabled: bool = True
 
 
 @dataclass
@@ -63,10 +71,16 @@ class Workspace:
         "point": "Point",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
+        "fillet": "Fillet",
         "constraint_auto": "Auto Constraint",
         "measure": "Auto Measurement",
     }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
+    SOLID_GROUPS = (
+        ("CREATE", ("sketch", "extrude")),
+        ("MODIFY", ("fillet",)),
+    )
+    FILLET_RADIUS = 2.0
     SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
     SKETCH_INTERACTIVE_ACTIONS = (
         "line", "circle", "point", *SKETCH_CONSTRAINT_ACTIONS
@@ -165,6 +179,9 @@ class Workspace:
         on_set_measurement_value: Optional[
             Callable[[int, float], None]
         ] = None,
+        on_fillet: Optional[
+            Callable[[float], Optional[str]]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -184,6 +201,7 @@ class Workspace:
             on_set_measurement_placement
         )
         self.on_set_measurement_value = on_set_measurement_value
+        self.on_fillet = on_fillet
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -251,6 +269,7 @@ class Workspace:
             property_label="Plane",
         )
         self.sketch_palette_window = SketchPaletteWindow()
+        self.fillet_window = FilletWindow()
         self._history_document: Optional[int] = None
         self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
@@ -303,6 +322,7 @@ class Workspace:
         self._measurement_edit_pristine = False
         self.create_sketch_window.set_scale(scale)
         self.sketch_palette_window.set_scale(scale)
+        self.fillet_window.set_scale(scale)
         self._font_label = None
         self._font_small = None
         self._font_tab = None
@@ -319,6 +339,7 @@ class Workspace:
     def begin_sketch_edit(self) -> None:
         """Start sketch editing with the point tool selected."""
         self._active_mode_name = self.SKETCH_MODE
+        self.fillet_window.close()
         self._selected_tool = "point"
         self._constraint_tool = None
         self._clear_measure_state()
@@ -413,6 +434,7 @@ class Workspace:
 
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
+        self.fillet_window.close()
         self.create_sketch_window.open()
 
     def close_create_sketch_dialog(self) -> None:
@@ -493,6 +515,12 @@ class Workspace:
             self.sketch_palette_window.draw(surface, layout.viewport)
         else:
             self.create_sketch_window.draw(surface, layout.viewport)
+            self.fillet_window.set_edge_label(
+                "Edge selected"
+                if document.selected_edge is not None
+                else "No edge selected"
+            )
+            self.fillet_window.draw(surface, layout.viewport)
         self._draw_line_menu(surface, layout.toolbar, document)
         self._draw_constraint_menu(surface, layout.toolbar, document)
         self._draw_measure_menu(surface, layout.toolbar, document)
@@ -731,26 +759,41 @@ class Workspace:
             x += width + gap
         return tabs
 
-    def _toolbar_buttons(
+    def _solid_toolbar_groups(
         self, region: Rect, document: Document
-    ) -> List[Tuple[str, pygame.Rect, bool]]:
+    ) -> List[ToolbarGroupLayout]:
+        """Lay out the grouped command bar for solid modelling."""
         sketch = document.sketch(document.active_sketch_id)
-        extrude_ready = bool(self._valid_selected_regions(sketch))
-        states = (
-            ("sketch", True),
-            ("extrude", extrude_ready),
-        )
-        buttons: List[Tuple[str, pygame.Rect, bool]] = []
+        enabled = {
+            "sketch": True,
+            "extrude": bool(self._valid_selected_regions(sketch)),
+            "fillet": True,
+        }
         x = self._content_x(region)
         y = region.y + self._s(42)
         width = self._s(40)
         height = self._s(38)
-        for action, enabled in states:
-            buttons.append((
-                action, pygame.Rect(x, y, width, height), enabled,
+        gap = self._s(6)
+        groups: List[ToolbarGroupLayout] = []
+        for caption, actions in self.SOLID_GROUPS:
+            first_x = x
+            items: List[ToolbarItem] = []
+            for action in actions:
+                active = enabled.get(action, True)
+                items.append(ToolbarItem(
+                    action,
+                    pygame.Rect(x, y, width, height),
+                    placeholder=not active,
+                    enabled=active,
+                ))
+                x += width + gap
+            groups.append(ToolbarGroupLayout(
+                caption,
+                pygame.Rect(first_x, y, x - gap - first_x, height),
+                items,
             ))
-            x += width + self._s(6)
-        return buttons
+            x += self._s(18)
+        return groups
 
     def _build_sketch_toolbar(
         self, region: Rect, compact: bool, padding: int, gap: int,
@@ -3010,44 +3053,44 @@ class Workspace:
     def _draw_action_group(
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
-        buttons = self._toolbar_buttons(region, document)
-        for action, rect, enabled in buttons:
-            hovered = enabled and action == self._hover_tool
-            if hovered:
-                pygame.draw.rect(
-                    surface, self.header_bg, rect,
-                    border_radius=self._s(5),
-                )
-                pygame.draw.rect(
-                    surface, self.border_color, rect,
-                    width=self._s(1),
-                    border_radius=self._s(5),
-                )
-            color = (
-                self._kind_color(action) if enabled
-                else pygame.Color(82, 82, 92)
-            )
-            self._draw_action_icon(surface, rect, action, color)
-
-        if not buttons:
-            return
-        left = buttons[0][1].left
-        right = buttons[-1][1].right
-        center_x = (left + right) // 2
-        caption = "CREATE"
-        label = self._font_caption.render(
-            caption, True, self.text_primary
-        )
+        groups = self._solid_toolbar_groups(region, document)
         label_y = region.bottom - self._s(15)
-        surface.blit(
-            label,
-            label.get_rect(center=(center_x, label_y)),
-        )
-        pygame.draw.line(
-            surface, self.border_color,
-            (right + self._s(14), buttons[0][1].top),
-            (right + self._s(14), region.bottom - self._s(8)),
-        )
+        for index, group in enumerate(groups):
+            for item in group.items:
+                hovered = item.enabled and item.action == self._hover_tool
+                if hovered:
+                    pygame.draw.rect(
+                        surface, self.header_bg, item.rect,
+                        border_radius=self._s(5),
+                    )
+                    pygame.draw.rect(
+                        surface, self.border_color, item.rect,
+                        width=self._s(1),
+                        border_radius=self._s(5),
+                    )
+                color = (
+                    self._kind_color(item.action) if item.enabled
+                    else pygame.Color(82, 82, 92)
+                )
+                self._draw_action_icon(
+                    surface, item.rect, item.action, color
+                )
+            caption = self._font_caption.render(
+                group.caption, True, self.text_primary
+            )
+            surface.blit(
+                caption,
+                caption.get_rect(
+                    center=(group.rect.centerx, label_y)
+                ),
+            )
+            if index < len(groups) - 1:
+                separator_x = group.rect.right + self._s(9)
+                pygame.draw.line(
+                    surface, self.border_color,
+                    (separator_x, group.rect.top),
+                    (separator_x, region.bottom - self._s(8)),
+                )
 
     def _draw_settings_button(
         self, surface: pygame.Surface, region: Rect
@@ -3756,6 +3799,8 @@ class Workspace:
             return pygame.Color(82, 205, 132)
         if kind == "extrude":
             return pygame.Color(78, 148, 235)
+        if kind == "fillet":
+            return pygame.Color(251, 146, 60)
         if kind in ("line", "circle", "point"):
             return pygame.Color(105, 178, 242)
         return pygame.Color(150, 150, 160)
@@ -4229,6 +4274,28 @@ class Workspace:
             )
             if action is not ToolWindowAction.NONE:
                 return True
+            fillet_action = self.fillet_window.handle_event(
+                event, layout.viewport
+            )
+            if fillet_action is FilletWindowAction.APPLY:
+                radius = self.fillet_window.radius()
+                if radius is None:
+                    self.fillet_window.set_error(
+                        "Enter a radius greater than zero"
+                    )
+                elif self.on_fillet is not None:
+                    error = self.on_fillet(radius)
+                    if error:
+                        self.fillet_window.set_error(error)
+                    else:
+                        self.fillet_window.set_error("")
+                else:
+                    self.fillet_window.set_error(
+                        "Fillet is unavailable"
+                    )
+                return True
+            if fillet_action is not FilletWindowAction.NONE:
+                return True
 
         if event.type == pygame.MOUSEMOTION:
             self._update_hover(
@@ -4264,6 +4331,8 @@ class Workspace:
                     continue
                 previous_mode = self._active_mode_name
                 self._active_mode_name = mode
+                if mode != self.ACTIVE_MODE:
+                    self.fillet_window.close()
                 self._hover_mode = None
                 if (
                     previous_mode == self.SKETCH_MODE
@@ -4289,12 +4358,16 @@ class Workspace:
                 ):
                     return True
             else:
-                for action, rect, enabled in self._toolbar_buttons(
+                for group in self._solid_toolbar_groups(
                     layout.toolbar, document
                 ):
-                    if enabled and rect.collidepoint(event.pos):
-                        self._run_tool(action, document)
-                        return True
+                    for item in group.items:
+                        if (
+                            item.enabled
+                            and item.rect.collidepoint(event.pos)
+                        ):
+                            self._run_tool(item.action, document)
+                            return True
             if layout.document_tree.collidepoint(event.pos):
                 hit_row = False
                 for kind, item_id, rect in self._tree_rows(
@@ -4754,6 +4827,14 @@ class Workspace:
             )
             if regions:
                 self.on_extrude(regions=regions)
+        elif action == "fillet":
+            self.create_sketch_window.close()
+            self.fillet_window.open(
+                self.FILLET_RADIUS,
+                "Edge selected"
+                if document.selected_edge is not None
+                else "No edge selected",
+            )
         elif action == "measure":
             self._activate_measure_tool("auto", document)
         elif action == "finish_sketch":
@@ -4933,6 +5014,8 @@ class Workspace:
             self._circle_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
             return
+        if self.fillet_window.update_hover(pos, layout.viewport):
+            return
         self._hover_settings = self._settings_rect(
             layout.toolbar
         ).collidepoint(pos)
@@ -4956,11 +5039,14 @@ class Workspace:
                 if self._hover_tool is not None:
                     break
         else:
-            for action, rect, enabled in self._toolbar_buttons(
+            for group in self._solid_toolbar_groups(
                 layout.toolbar, document
             ):
-                if enabled and rect.collidepoint(pos):
-                    self._hover_tool = action
+                for item in group.items:
+                    if item.enabled and item.rect.collidepoint(pos):
+                        self._hover_tool = item.action
+                        break
+                if self._hover_tool is not None:
                     break
         for kind, item_id, rect in self._tree_rows(layout.document_tree, document):
             if not rect.collidepoint(pos):

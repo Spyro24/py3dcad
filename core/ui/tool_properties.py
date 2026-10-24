@@ -1138,3 +1138,364 @@ class SketchPaletteWindow:
             else:
                 high = mid - 1
         return text[:low] + ellipsis
+
+
+class FilletWindowAction(Enum):
+    """Result of passing an event to the fillet window."""
+
+    NONE = "none"
+    CONSUMED = "consumed"
+    APPLY = "apply"
+    CANCEL = "cancel"
+
+
+class FilletWindow:
+    """Small panel for entering the radius of a solid-edge fillet."""
+
+    CUBE_SIZE = 92
+    CUBE_MARGIN = 12
+    CUBE_GAP = 12
+    PANEL_WIDTH = 322
+    PANEL_HEIGHT = 196
+
+    def __init__(self) -> None:
+        self.visible = False
+        self.scale = 1.0
+        self.value = "2"
+        self.error = ""
+        self.edge_label = "No edge selected"
+        self.focused = False
+        self._hover_apply = False
+        self._hover_cancel = False
+        self._font_title: Optional[pygame.font.Font] = None
+        self._font_text: Optional[pygame.font.Font] = None
+
+        self.panel_bg = pygame.Color(38, 40, 48)
+        self.title_bg = pygame.Color(48, 50, 60)
+        self.border_color = pygame.Color(50, 50, 58)
+        self.text_primary = pygame.Color(225, 225, 230)
+        self.text_secondary = pygame.Color(202, 205, 212)
+        self.text_muted = pygame.Color(125, 125, 136)
+        self.accent = pygame.Color(59, 130, 246)
+        self.error_color = pygame.Color(235, 100, 100)
+        self.field_bg = pygame.Color(35, 37, 46)
+        self.field_hover_bg = pygame.Color(52, 58, 72)
+        self.button_bg = pygame.Color(44, 47, 57)
+        self.button_hover_bg = pygame.Color(58, 61, 72)
+
+    def set_scale(self, scale: float) -> None:
+        if abs(scale - self.scale) < 1e-6:
+            return
+        self.scale = scale
+        self._font_title = None
+        self._font_text = None
+        self._hover_apply = False
+        self._hover_cancel = False
+
+    def open(self, radius: float, edge_label: str) -> None:
+        self.visible = True
+        self.value = f"{radius:g}"
+        self.error = ""
+        self.edge_label = edge_label
+        self.focused = True
+        self._hover_apply = False
+        self._hover_cancel = False
+
+    def close(self) -> None:
+        self.visible = False
+        self.focused = False
+        self._hover_apply = False
+        self._hover_cancel = False
+
+    def set_edge_label(self, label: str) -> None:
+        self.edge_label = label
+
+    def set_error(self, message: str) -> None:
+        self.error = message
+
+    def radius(self) -> Optional[float]:
+        """Return the entered radius, or None when it is not valid."""
+        try:
+            value = float(self.value)
+        except ValueError:
+            return None
+        return value if value > 0.0 else None
+
+    def _s(self, value: float) -> int:
+        return max(1, int(round(value * self.scale)))
+
+    def _init_fonts(self) -> None:
+        if self._font_title is not None:
+            return
+        self._font_title = pygame.font.SysFont(
+            "Segoe UI", self._s(12), bold=True
+        )
+        self._font_text = pygame.font.SysFont("Segoe UI", self._s(12))
+
+    # ------------------------------------------------------------------
+    # Geometry
+    # ------------------------------------------------------------------
+
+    def panel_rect(self, region: Rect) -> pygame.Rect:
+        margin = self._s(self.CUBE_MARGIN)
+        width = min(
+            self._s(self.PANEL_WIDTH),
+            max(1, region.w - margin * 2),
+        )
+        height = self._s(self.PANEL_HEIGHT)
+        return pygame.Rect(
+            region.right - margin - width,
+            region.y + margin + self._s(self.CUBE_SIZE) + self._s(
+                self.CUBE_GAP
+            ),
+            width,
+            height,
+        )
+
+    def field_rect(self, region: Rect) -> pygame.Rect:
+        panel = self.panel_rect(region)
+        width = self._s(112)
+        height = self._s(28)
+        return pygame.Rect(
+            panel.right - self._s(16) - width,
+            panel.y + self._s(76),
+            width,
+            height,
+        )
+
+    def apply_rect(self, region: Rect) -> pygame.Rect:
+        panel = self.panel_rect(region)
+        width = self._s(96)
+        height = self._s(28)
+        return pygame.Rect(
+            panel.right - self._s(16) - width,
+            panel.bottom - self._s(14) - height,
+            width,
+            height,
+        )
+
+    def cancel_rect(self, region: Rect) -> pygame.Rect:
+        apply_rect = self.apply_rect(region)
+        width = self._s(80)
+        return pygame.Rect(
+            apply_rect.x - self._s(8) - width,
+            apply_rect.y,
+            width,
+            apply_rect.h,
+        )
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def update_hover(self, pos: Tuple[int, int], region: Rect) -> bool:
+        """Update button hover state and report whether the panel is hovered."""
+        if not self.visible:
+            self._hover_apply = False
+            self._hover_cancel = False
+            return False
+        panel = self.panel_rect(region)
+        if not panel.collidepoint(pos):
+            self._hover_apply = False
+            self._hover_cancel = False
+            return False
+        self._hover_apply = self.apply_rect(region).collidepoint(pos)
+        self._hover_cancel = self.cancel_rect(region).collidepoint(pos)
+        return True
+
+    def handle_event(
+        self, event: pygame.event.Event, region: Rect
+    ) -> FilletWindowAction:
+        if not self.visible:
+            return FilletWindowAction.NONE
+
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self.close()
+                return FilletWindowAction.CANCEL
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                return self._submit()
+            if event.key == pygame.K_BACKSPACE:
+                self.value = self.value[:-1]
+                self.error = ""
+                return FilletWindowAction.CONSUMED
+            character = event.unicode
+            if character and (
+                character in "0123456789"
+                or (character == "." and "." not in self.value)
+            ):
+                self.value += character
+                self.error = ""
+                return FilletWindowAction.CONSUMED
+            return FilletWindowAction.CONSUMED
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            panel = self.panel_rect(region)
+            if not panel.collidepoint(event.pos):
+                self.focused = False
+                return FilletWindowAction.NONE
+            if self.field_rect(region).collidepoint(event.pos):
+                self.focused = True
+                return FilletWindowAction.CONSUMED
+            if self.apply_rect(region).collidepoint(event.pos):
+                return self._submit()
+            if self.cancel_rect(region).collidepoint(event.pos):
+                self.close()
+                return FilletWindowAction.CANCEL
+            self.focused = False
+            return FilletWindowAction.CONSUMED
+
+        return FilletWindowAction.NONE
+
+    def _submit(self) -> FilletWindowAction:
+        if self.radius() is None:
+            self.error = "Enter a radius greater than zero"
+            return FilletWindowAction.CONSUMED
+        self.error = ""
+        return FilletWindowAction.APPLY
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
+
+    def draw(self, surface: pygame.Surface, region: Rect) -> None:
+        if not self.visible:
+            return
+        self._init_fonts()
+        panel = self.panel_rect(region)
+        title_height = self._s(34)
+        pygame.draw.rect(
+            surface, self.panel_bg, panel, border_radius=self._s(6)
+        )
+        pygame.draw.rect(
+            surface, self.title_bg,
+            (panel.x, panel.y, panel.w, title_height),
+            border_top_left_radius=self._s(6),
+            border_top_right_radius=self._s(6),
+        )
+        pygame.draw.rect(
+            surface, self.border_color, panel,
+            width=1, border_radius=self._s(6),
+        )
+        pygame.draw.line(
+            surface, self.border_color,
+            (panel.x, panel.y + title_height),
+            (panel.right, panel.y + title_height),
+        )
+        minus_y = panel.y + title_height // 2
+        pygame.draw.line(
+            surface, self.text_primary,
+            (panel.x + self._s(14), minus_y),
+            (panel.x + self._s(22), minus_y),
+            self._s(2),
+        )
+        title = self._font_title.render(
+            "FILLET", True, self.text_primary
+        )
+        surface.blit(
+            title,
+            title.get_rect(
+                midleft=(panel.x + self._s(30), minus_y)
+            ),
+        )
+
+        edge = self._font_text.render(
+            self.edge_label, True, self.text_secondary
+        )
+        surface.blit(
+            edge,
+            edge.get_rect(
+                midleft=(panel.x + self._s(16), panel.y + self._s(56))
+            ),
+        )
+        label = self._font_text.render(
+            "Radius", True, self.text_secondary
+        )
+        field = self.field_rect(region)
+        surface.blit(
+            label,
+            label.get_rect(midleft=(panel.x + self._s(16), field.centery)),
+        )
+
+        pygame.draw.rect(
+            surface,
+            self.field_hover_bg if self.focused else self.field_bg,
+            field, border_radius=self._s(4),
+        )
+        pygame.draw.rect(
+            surface, self.accent, field,
+            width=self._s(2), border_radius=self._s(4),
+        )
+        value = self._font_text.render(
+            self.value, True, self.text_primary
+        )
+        surface.blit(
+            value,
+            value.get_rect(
+                midleft=(field.x + self._s(10), field.centery)
+            ),
+        )
+        if self.focused and (pygame.time.get_ticks() // 500) % 2 == 0:
+            cursor_x = field.x + self._s(10) + value.get_width() + self._s(2)
+            pygame.draw.line(
+                surface, self.text_primary,
+                (cursor_x, field.y + self._s(6)),
+                (cursor_x, field.bottom - self._s(6)),
+                max(1, self._s(1)),
+            )
+        unit = self._font_text.render("mm", True, self.text_muted)
+        surface.blit(
+            unit,
+            unit.get_rect(
+                midright=(field.right - self._s(10), field.centery)
+            ),
+        )
+
+        if self.error:
+            message = self._font_text.render(
+                self.error, True, self.error_color
+            )
+        else:
+            message = self._font_text.render(
+                "Enter to apply  ·  Esc to cancel",
+                True, self.text_muted,
+            )
+        surface.blit(
+            message,
+            message.get_rect(
+                midleft=(panel.x + self._s(16), panel.y + self._s(122))
+            ),
+        )
+
+        apply_rect = self.apply_rect(region)
+        pygame.draw.rect(
+            surface,
+            pygame.Color(88, 155, 255)
+            if self._hover_apply else self.accent,
+            apply_rect, border_radius=self._s(4),
+        )
+        apply_text = self._font_text.render(
+            "Apply", True, pygame.Color(255, 255, 255)
+        )
+        surface.blit(
+            apply_text,
+            apply_text.get_rect(center=apply_rect.center),
+        )
+
+        cancel_rect = self.cancel_rect(region)
+        pygame.draw.rect(
+            surface,
+            self.button_hover_bg if self._hover_cancel else self.button_bg,
+            cancel_rect, border_radius=self._s(4),
+        )
+        pygame.draw.rect(
+            surface, self.border_color, cancel_rect,
+            width=1, border_radius=self._s(4),
+        )
+        cancel_text = self._font_text.render(
+            "Cancel", True, self.text_primary
+        )
+        surface.blit(
+            cancel_text,
+            cancel_text.get_rect(center=cancel_rect.center),
+        )

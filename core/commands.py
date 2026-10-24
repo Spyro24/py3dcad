@@ -801,6 +801,43 @@ class AddExtrudeCommand(Command):
         return f"Extrude {index}"
 
 
+class AddFilletCommand(Command):
+    """Round a vertical edge of an extruded solid."""
+
+    kind = "fillet"
+
+    def __init__(
+        self,
+        document: Document,
+        feature: Extrude,
+        u: float,
+        v: float,
+        radius: float,
+    ) -> None:
+        self.document = document
+        self.feature = feature
+        self.fillet = [float(u), float(v), float(radius)]
+
+    @property
+    def label(self) -> str:
+        return f"Fillet {self.fillet[2]:g} mm"
+
+    def do(self) -> None:
+        if not any(
+            entry is self.fillet for entry in self.feature.fillets
+        ):
+            self.feature.fillets.append(self.fillet)
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        self.feature.fillets[:] = [
+            entry
+            for entry in self.feature.fillets
+            if entry is not self.fillet
+        ]
+        self.document.dirty = True
+
+
 class CommandStack:
     """Undo and redo stacks for one document."""
 
