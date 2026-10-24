@@ -275,8 +275,11 @@ def _prism_faces_with_runs(
                 if radius <= 1e-9:
                     continue
                 if (
-                    _turn_angle(loop, segment) < SMOOTH_ANGLE
-                    and radii[segment - 1] <= 1e-9
+                    radii[segment - 1] <= 1e-9
+                    and (
+                        _turn_angle(loop, segment) < SMOOTH_ANGLE
+                        or _concave_runout(loop, inward, segment, True)
+                    )
                 ):
                     patch = _runout_patch(
                         cap_points, inward, outward, frame, segment,
@@ -286,8 +289,11 @@ def _prism_faces_with_runs(
                     runs.append(len(patch))
                 following = (segment + 1) % count
                 if (
-                    _turn_angle(loop, following) < SMOOTH_ANGLE
-                    and radii[following] <= 1e-9
+                    radii[following] <= 1e-9
+                    and (
+                        _turn_angle(loop, following) < SMOOTH_ANGLE
+                        or _concave_runout(loop, inward, segment, False)
+                    )
                 ):
                     patch = _runout_patch(
                         cap_points, inward, outward, frame, segment,
@@ -321,6 +327,42 @@ def _turn_angle(points: Sequence[Point2], vertex: int) -> float:
         incoming[0] * outgoing[0] + incoming[1] * outgoing[1]
     ) / (incoming_length * outgoing_length)
     return abs(math.atan2(cross, dot))
+
+
+def _concave_runout(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    segment: int,
+    at_start: bool,
+) -> bool:
+    """Return whether a cap fillet runs out into a concave corner.
+
+    At a convex corner the fillet cuts into the neighbouring panel, which
+    ``_corner_cut`` handles.  At a concave corner (the inside of a hole) it
+    points away from that panel, so the end must be closed by a runout patch
+    instead.
+    """
+    count = len(points)
+    if at_start:
+        neighbour = (segment - 1) % count
+        away = (
+            points[neighbour][0] - points[segment][0],
+            points[neighbour][1] - points[segment][1],
+        )
+    else:
+        neighbour = (segment + 1) % count
+        following = (neighbour + 1) % count
+        away = (
+            points[following][0] - points[neighbour][0],
+            points[following][1] - points[neighbour][1],
+        )
+    length = math.hypot(away[0], away[1])
+    if length < 1e-9:
+        return False
+    dot = (
+        inward[segment][0] * away[0] + inward[segment][1] * away[1]
+    ) / length
+    return dot < -1e-9
 
 
 def _fillet_radii(
@@ -369,7 +411,10 @@ def _cap_loop(
                 points[index][0] + inward[index][0] * following_radius,
                 points[index][1] + inward[index][1] * following_radius,
             )
-            if _turn_angle(points, index) < SMOOTH_ANGLE:
+            if (
+                _turn_angle(points, index) < SMOOTH_ANGLE
+                or _concave_runout(points, inward, index, True)
+            ):
                 # A fillet running out onto a sharp edge keeps the sharp
                 # corner on the cap so the runout triangle is filled.
                 _append_point(result, points[index])
@@ -381,7 +426,10 @@ def _cap_loop(
                 points[index][0] + inward[previous][0] * previous_radius,
                 points[index][1] + inward[previous][1] * previous_radius,
             )
-            if _turn_angle(points, index) < SMOOTH_ANGLE:
+            if (
+                _turn_angle(points, index) < SMOOTH_ANGLE
+                or _concave_runout(points, inward, index - 1, False)
+            ):
                 _append_point(result, offset)
                 _append_point(result, points[index])
             else:
@@ -547,8 +595,9 @@ def _edge_trim(
     """
     if previous_radius <= 1e-9 or following_radius <= 1e-9:
         return 0.0
-    if _turn_angle(points, vertex) < SMOOTH_ANGLE:
-        return 0.0
+    # The cap loop miters at every vertex, including the tangent junctions of
+    # a rounded vertical corner.  Applying the same miter here keeps the strip
+    # ends on that corner instead of stopping short of it.
     miter = _miter_point(
         points, inward, vertex, previous_radius, following_radius
     )
@@ -586,7 +635,11 @@ def _rim_strip(
     length = _length(span)
     direction = _scale(span, 1.0 / length) if length > 1e-9 else (0.0, 0.0, 0.0)
     inward_3d = _map_direction(inward[segment], frame)
-    limit = 0.45 * length
+    # The miter trim along a tessellated arc is ``r * tan(turn / 2)``; with the
+    # cap radius capped at 0.9 of the vertical radius this stays well inside
+    # the chord, so the full length is the right limit.  Clamping below it
+    # would pull the strip short of the cap corner and open a seam.
+    limit = length
     rings: List[Tuple[Point3, Point3]] = []
     for step in range(steps + 1):
         theta = math.pi * 0.5 * step / steps
@@ -1007,6 +1060,32 @@ def _side_faces(
         # The edge that runs up from here is the shared vertical edge with
         # the next panel; the face grouping code identifies it as edge 1.
         shared_start = len(poly) - 1
+
+        # At a smooth junction the neighbouring panel keeps its own cap rim.
+        # Where that rim sits lower than this panel's rim, split the shared
+        # vertical edge there so the two panels and the runout patch that
+        # closes the step all share the same seam.
+        if bottom_offsets is not None and (
+            smooth[nxt] or _concave_runout(points, inward_2d, nxt, True)
+        ):
+            if float(bottom_offsets[nxt]) > bottom_offset + 1e-9:
+                offset = float(bottom_offsets[nxt])
+                append((
+                    base[nxt][0] + axis[0] * offset,
+                    base[nxt][1] + axis[1] * offset,
+                    base[nxt][2] + axis[2] * offset,
+                ), not smooth[nxt])
+        if top_offsets is not None and (
+            smooth[nxt] or _concave_runout(points, inward_2d, nxt, True)
+        ):
+            if float(top_offsets[nxt]) > top_offset + 1e-9:
+                offset = float(top_offsets[nxt])
+                append((
+                    top[nxt][0] - axis[0] * offset,
+                    top[nxt][1] - axis[1] * offset,
+                    top[nxt][2] - axis[2] * offset,
+                ), not smooth[nxt])
+
         if end_top:
             append(end_top[0], not smooth[nxt])
             for point in end_top[1:]:
@@ -1023,6 +1102,25 @@ def _side_faces(
                 flags[before] = top_sharp
         else:
             append(upper, top_sharp)
+
+        # Mirror the splitting on the closing vertical edge at ``index``.
+        if smooth[index] or _concave_runout(points, inward_2d, prev, False):
+            if top_offsets is not None:
+                if float(top_offsets[prev]) > top_offset + 1e-9:
+                    offset = float(top_offsets[prev])
+                    append((
+                        top[index][0] - axis[0] * offset,
+                        top[index][1] - axis[1] * offset,
+                        top[index][2] - axis[2] * offset,
+                    ), not smooth[index])
+            if bottom_offsets is not None:
+                if float(bottom_offsets[prev]) > bottom_offset + 1e-9:
+                    offset = float(bottom_offsets[prev])
+                    append((
+                        base[index][0] + axis[0] * offset,
+                        base[index][1] + axis[1] * offset,
+                        base[index][2] + axis[2] * offset,
+                    ), not smooth[index])
         flags.append(not smooth[index])
 
         if len(poly) < 3 or len(flags) != len(poly):
