@@ -6,10 +6,11 @@ from typing import (
     Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union,
 )
 
-from .solver.objects import line2d, point2d
+from .solver.objects import circle2d, line2d, point2d
 
 Point = point2d
 Line = line2d
+Circle = circle2d
 Point3 = Tuple[float, float, float]
 
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
@@ -268,10 +269,18 @@ class Sketch:
     line_type: str = "normal"
     edges: List[Tuple[int, int]] = field(default_factory=list)
     edge_constraints: List[Optional[str]] = field(default_factory=list)
+    circles: List[Circle] = field(default_factory=list)
     measurements: List[Measurement] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.points = [point2d(point) for point in self.points]
+        self.circles = [
+            circle
+            for circle in (
+                self._normalize_circle(item) for item in self.circles
+            )
+            if circle is not None
+        ]
         self.edges = [
             (start, end)
             for start, end in self.edges
@@ -1227,6 +1236,31 @@ class Sketch:
             return (kind, mapped) if mapped is not None else None
         return None
 
+    @staticmethod
+    def _normalize_circle(value: Any) -> Optional[Circle]:
+        """Return a valid circle from a stored or in-memory value."""
+        if isinstance(value, circle2d):
+            center = value.midPoint
+            diameter = value.diameter
+        elif isinstance(value, dict):
+            center = value.get("center", value.get("midPoint"))
+            diameter = value.get("diameter")
+        elif isinstance(value, (list, tuple)) and len(value) >= 2:
+            center = value[0]
+            diameter = value[1]
+        else:
+            return None
+        if not isinstance(center, (list, tuple, point2d)) or len(center) < 2:
+            return None
+        try:
+            center_point = point2d(center)
+            diameter_value = float(diameter)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(diameter_value) or diameter_value <= 0:
+            return None
+        return circle2d(center_point, diameter_value)
+
     @property
     def is_custom_plane(self) -> bool:
         return all(
@@ -1266,6 +1300,13 @@ class Sketch:
                 [start, end] for start, end in self.edges
             ],
             "edge_constraints": list(self.edge_constraints),
+            "circles": [
+                {
+                    "center": [circle.midPoint[0], circle.midPoint[1]],
+                    "diameter": circle.diameter,
+                }
+                for circle in self.circles
+            ],
             "measurements": [
                 measurement.to_dict()
                 for measurement in self.measurements
@@ -1371,6 +1412,13 @@ class Sketch:
                 cls._add_edge(edges, start_index, end_index)
 
         constraints.extend([None] * (len(edges) - len(constraints)))
+        circles: List[Circle] = []
+        raw_circles = data.get("circles", [])
+        if isinstance(raw_circles, (list, tuple)):
+            for raw in raw_circles:
+                circle = cls._normalize_circle(raw)
+                if circle is not None:
+                    circles.append(circle)
         measurements: List[Measurement] = []
         raw_measurements = data.get("measurements", [])
         if isinstance(raw_measurements, (list, tuple)):
@@ -1391,6 +1439,7 @@ class Sketch:
             line_type=line_type,
             edges=edges,
             edge_constraints=constraints[:len(edges)],
+            circles=circles,
             measurements=measurements,
         )
 

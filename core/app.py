@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 import pygame
 
 from .commands import (
+    AddCircleCommand,
     AddExtrudeCommand,
     AddLineCommand,
     AddMeasurementCommand,
@@ -65,6 +66,7 @@ class Application:
             on_extrude=self.extrude_active,
             on_add_point=self.add_point,
             on_add_line=self.add_line,
+            on_add_circle=self.add_circle,
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
@@ -323,6 +325,19 @@ class Application:
             return
         stack.execute(
             AddLineCommand(document, sketch, start, end, constraint)
+        )
+
+    def add_circle(self, center: Point, diameter: float) -> None:
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or diameter <= 0:
+            return
+        stack.execute(
+            AddCircleCommand(document, sketch, center, diameter)
         )
 
     def move_point(self, index: int, point: Point) -> None:

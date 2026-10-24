@@ -8,7 +8,7 @@ import pygame
 
 from ..document import Document
 from ..faces import Color, Face, iter_solid_faces
-from ..sketch import PlaneFrame, Sketch, plane_frame, point_on_plane
+from ..sketch import Circle, PlaneFrame, Sketch, plane_frame, point_on_plane
 from .camera import OrbitCamera, Point2, PROJECTION_SCALE
 from .orientation_cube import OrientationCube
 
@@ -537,6 +537,36 @@ class SceneRenderer:
                     surface, color, start_point, end_point,
                     sketch.line_type,
                 )
+            for circle in sketch.circles:
+                self._draw_sketch_circle(
+                    surface, color, frame, circle, camera, center
+                )
+
+    def _draw_sketch_circle(
+        self,
+        surface: pygame.Surface,
+        color: Color,
+        frame: PlaneFrame,
+        circle: Circle,
+        camera: OrbitCamera,
+        center: Tuple[int, int],
+    ) -> None:
+        radius = circle.diameter / 2.0
+        if radius <= 0:
+            return
+        points = []
+        for index in range(48):
+            angle = 2.0 * math.pi * index / 48.0
+            local = (
+                circle.midPoint[0] + radius * math.cos(angle),
+                circle.midPoint[1] + radius * math.sin(angle),
+            )
+            points.append(
+                camera.project(point_on_plane(frame, local), center)
+            )
+        pygame.draw.lines(
+            surface, color, True, points, max(1, self._s(2))
+        )
 
     def _draw_sketch_segment(
         self, surface: pygame.Surface, color: Color,

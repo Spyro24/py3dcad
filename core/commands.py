@@ -16,7 +16,7 @@ from .sketch import (
     normalize_measurement_value,
     normalize_plane,
 )
-from .solver.objects import point2d
+from .solver.objects import circle2d, point2d
 
 
 class Command(ABC):
@@ -627,6 +627,59 @@ class AddLineCommand(Command):
             ):
                 self.sketch.remove_point(index)
         self.created_points = []
+        self.document.dirty = True
+
+
+class AddCircleCommand(Command):
+    """Add a circle to a sketch."""
+
+    kind = "circle"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        center: Point,
+        diameter: float,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.center = point2d(center)
+        self.diameter = float(diameter)
+        self.index: Optional[int] = None
+        self.circle: Optional[circle2d] = None
+
+    @property
+    def label(self) -> str:
+        return "Circle"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self.diameter <= 0:
+            return
+        if self.circle is None:
+            self.circle = circle2d(self.center, self.diameter)
+        if self.index is None:
+            self.index = len(self.sketch.circles)
+        self.index = min(self.index, len(self.sketch.circles))
+        self.sketch.circles.insert(self.index, self.circle)
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.circle is None:
+            return
+        if (
+            self.index is not None
+            and 0 <= self.index < len(self.sketch.circles)
+            and self.sketch.circles[self.index] is self.circle
+        ):
+            self.sketch.circles.pop(self.index)
+        elif self.circle in self.sketch.circles:
+            self.sketch.circles.remove(self.circle)
         self.document.dirty = True
 
 

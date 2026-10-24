@@ -113,4 +113,32 @@ class line2d:
     def move(self, amount: tuple[float, float]) -> None:
         self.p1.move(amount)
         self.p2.move(amount)
+
+class circle2d:
+    """A mutable 2D circle defined by its midpoint and diameter."""
+
+    __slots__ = ("midPoint", "diameter")
+
+    def __init__(self, midPoint: point2d, diameter: float):
+        self.midPoint = (
+            midPoint if isinstance(midPoint, point2d)
+            else point2d(midPoint)
+        )
+        self.diameter = float(diameter)
+
+    @property
+    def radius(self) -> float:
+        return self.diameter / 2.0
+
+    def changeDiameter(self, newDiameter: float) -> None:
+        self.diameter = float(newDiameter)
+
+    def change_diameter(self, new_diameter: float) -> None:
+        self.changeDiameter(new_diameter)
+
+    def __repr__(self) -> str:
+        return f"circle2d({self.midPoint!r}, {self.diameter!r})"
+
+    def copy(self) -> "circle2d":
+        return circle2d(self.midPoint.copy(), self.diameter)
         

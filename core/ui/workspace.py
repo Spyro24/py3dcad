@@ -55,6 +55,7 @@ class Workspace:
     TOOL_LABELS = {
         "sketch": "Sketch",
         "line": "Line",
+        "circle": "Circle",
         "point": "Point",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
@@ -64,7 +65,7 @@ class Workspace:
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
     SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
     SKETCH_INTERACTIVE_ACTIONS = (
-        "line", "point", *SKETCH_CONSTRAINT_ACTIONS
+        "line", "circle", "point", *SKETCH_CONSTRAINT_ACTIONS
     )
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
     ACTIVE_MODE = "SOLID"
@@ -133,6 +134,7 @@ class Workspace:
         on_extrude: Callable[[], None],
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point, Optional[str]], None],
+        on_add_circle: Callable[[Point, float], None],
         on_move_point: Callable[[int, Point], None],
         on_move_edge: Callable[[int, Point, Point], None],
         on_set_edge_constraint: Callable[[int, str], None],
@@ -164,6 +166,7 @@ class Workspace:
         self.on_extrude = on_extrude
         self.on_add_point = on_add_point
         self.on_add_line = on_add_line
+        self.on_add_circle = on_add_circle
         self.on_move_point = on_move_point
         self.on_move_edge = on_move_edge
         self.on_set_edge_constraint = on_set_edge_constraint
@@ -186,6 +189,8 @@ class Workspace:
         self._selected_tool: Optional[str] = None
         self._line_start: Optional[Point] = None
         self._line_preview: Optional[Point] = None
+        self._circle_center: Optional[Point] = None
+        self._circle_preview: Optional[Tuple[Point, float]] = None
         self._line_menu_open = False
         self._line_menu_hover = -1
         self._constraint_menu_open = False
@@ -350,6 +355,8 @@ class Workspace:
     def _reset_line_state(self) -> None:
         self._line_start = None
         self._line_preview = None
+        self._circle_center = None
+        self._circle_preview = None
         self._line_menu_open = False
         self._line_menu_hover = -1
         self._constraint_menu_open = False
@@ -435,6 +442,7 @@ class Workspace:
             self._selected_tool,
         )
         self._draw_line_preview(surface, layout.viewport, document)
+        self._draw_circle_preview(surface, layout.viewport, document)
         self._draw_sketch_selection(surface, layout.viewport, document)
         if layout.command_bar.w > 0:
             self._draw_command_bar(
@@ -1141,7 +1149,7 @@ class Workspace:
                         self._activate_measure_tool("auto", document)
                         return True
                     continue
-                if item.action not in ("line", "point"):
+                if item.action not in ("line", "circle", "point"):
                     continue
                 if item.action == "line":
                     caret = self._toolbar_dropdown_rect(item)
@@ -1588,7 +1596,7 @@ class Workspace:
                 color = self.text_secondary
             for item in group.items:
                 active = (
-                    item.action in ("line", "point")
+                    item.action in ("line", "circle", "point")
                     and self._selected_tool == item.action
                 ) or (
                     selected_constraint is not None
@@ -1723,6 +1731,46 @@ class Workspace:
         pygame.draw.circle(
             surface, self.accent,
             (round(start[0]), round(start[1])), self._s(3),
+        )
+        surface.set_clip(previous_clip)
+
+    def _draw_circle_preview(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        preview = self._circle_preview
+        if (
+            self._selected_tool != "circle"
+            or preview is None
+            or not self._sketch_toolbar_visible(document)
+        ):
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        center, diameter = preview
+        radius = diameter / 2.0
+        if radius <= 0:
+            return
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        screen_points = []
+        for index in range(48):
+            angle = 2.0 * math.pi * index / 48.0
+            world = (
+                center[0] + radius * math.cos(angle),
+                center[1] + radius * math.sin(angle),
+            )
+            screen_points.append(
+                self._project_sketch_point(sketch, world, region)
+            )
+        pygame.draw.lines(
+            surface, self.accent, True, screen_points, self._s(2)
+        )
+        screen_center = self._project_sketch_point(sketch, center, region)
+        pygame.draw.circle(
+            surface, self.accent,
+            (round(screen_center[0]), round(screen_center[1])),
+            self._s(3),
         )
         surface.set_clip(previous_clip)
 
@@ -3395,7 +3443,7 @@ class Workspace:
             return pygame.Color(82, 205, 132)
         if kind == "extrude":
             return pygame.Color(78, 148, 235)
-        if kind in ("line", "point"):
+        if kind in ("line", "circle", "point"):
             return pygame.Color(105, 178, 242)
         return pygame.Color(150, 150, 160)
 
@@ -3981,6 +4029,36 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
+                if self._selected_tool == "circle":
+                    snap_index = self._pick_sketch_point(
+                        event.pos, layout.viewport, sketch
+                    )
+                    if snap_index is not None:
+                        point: Optional[Point] = sketch.points[snap_index]
+                    else:
+                        world = self.viewport.unproject_on_plane(
+                            event.pos, layout.viewport, sketch.frame()
+                        )
+                        point = (
+                            (round(world[0]), round(world[1]))
+                            if world is not None else None
+                        )
+                    if point is not None:
+                        self._clear_sketch_selection()
+                        center = self._circle_center
+                        if center is None:
+                            self._circle_center = point
+                            self._circle_preview = (point, 0.0)
+                        else:
+                            diameter = 2.0 * math.hypot(
+                                point[0] - center[0],
+                                point[1] - center[1],
+                            )
+                            if diameter > 0:
+                                self.on_add_circle(center, diameter)
+                                self._circle_center = None
+                                self._circle_preview = None
+                    return True
                 label_index = self._measurement_label_at(event.pos)
                 if label_index is not None:
                     self._start_measurement_drag(
@@ -4461,6 +4539,37 @@ class Workspace:
             self._line_preview = preview
         else:
             self._line_preview = None
+        if (
+            self._selected_tool == "circle"
+            and sketch is not None
+            and layout.viewport.collidepoint(pos)
+        ):
+            snap_index = self._pick_sketch_point(
+                pos, layout.viewport, sketch
+            )
+            if snap_index is not None:
+                preview = sketch.points[snap_index]
+            else:
+                world = self.viewport.unproject_on_plane(
+                    pos, layout.viewport, sketch.frame()
+                )
+                preview = (
+                    (round(world[0]), round(world[1]))
+                    if world is not None else None
+                )
+            center = self._circle_center
+            if preview is not None and center is not None:
+                diameter = 2.0 * math.hypot(
+                    preview[0] - center[0],
+                    preview[1] - center[1],
+                )
+                self._circle_preview = (center, diameter)
+            else:
+                self._circle_preview = (
+                    (preview, 0.0) if preview is not None else None
+                )
+        else:
+            self._circle_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
             return
         self._hover_settings = self._settings_rect(

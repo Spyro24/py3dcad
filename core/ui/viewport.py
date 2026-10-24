@@ -154,9 +154,19 @@ class Viewport:
             if active.lines:
                 line_word = "line" if len(active.lines) == 1 else "lines"
                 status += f"  ·  {len(active.lines)} {line_word}"
+            if active.circles:
+                circle_word = (
+                    "circle" if len(active.circles) == 1 else "circles"
+                )
+                status += f"  ·  {len(active.circles)} {circle_word}"
             profile_count = len(active.profile_points())
             if active_tool == "line":
                 hint = "Click to draw a line  ·  Esc to deselect"
+            elif active_tool == "circle":
+                hint = (
+                    "Click the centre, then a point on the circle"
+                    "  ·  Esc to deselect"
+                )
             elif active_tool != "point":
                 if profile_count < 3:
                     hint = (
