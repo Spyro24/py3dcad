@@ -1910,6 +1910,19 @@ class Workspace:
                 best_area = area
         return best
 
+    def _circle_loop_at_point(
+        self, sketch: Sketch, point_index: int
+    ) -> Optional[int]:
+        """Return the circle loop whose midpoint is the given point."""
+        if not 0 <= point_index < len(sketch.points):
+            return None
+        point = sketch.points[point_index]
+        for index, loop in enumerate(sketch.closed_loops()):
+            circle = sketch.circle_for_loop(loop)
+            if circle is not None and circle.midPoint is point:
+                return index
+        return None
+
     def selected_profiles(self, sketch: Sketch) -> List[List[int]]:
         """Return the point loops selected as extrusion faces."""
         loops = sketch.closed_loops()
@@ -4328,6 +4341,38 @@ class Workspace:
                     )
                     if hit is not None:
                         kind, index = hit
+                        loop_hit = None
+                        if (
+                            kind == "point"
+                            and self._selected_tool is None
+                            and self._constraint_tool is None
+                        ):
+                            # A circle centre is also a draggable point.  A
+                            # plain click selects the circle face; pressing and
+                            # dragging still moves the centre.
+                            loop_hit = self._circle_loop_at_point(
+                                sketch, index
+                            )
+                        if loop_hit is not None:
+                            mods = getattr(event, "mod", 0)
+                            if not mods:
+                                mods = pygame.key.get_mods()
+                            if mods & pygame.KMOD_CTRL:
+                                if loop_hit in self._selected_loops:
+                                    self._selected_loops.remove(loop_hit)
+                                else:
+                                    self._selected_loops.append(loop_hit)
+                                self._selected_sketch_entity = None
+                                self._hover_sketch_entity = None
+                            else:
+                                self._clear_sketch_selection()
+                                self._selected_loops = [loop_hit]
+                                self._hover_loop = loop_hit
+                            self._drag_point_index = index
+                            self._drag_point_origin = sketch.points[index]
+                            self._drag_point_current = sketch.points[index]
+                            self._reset_line_state()
+                            return True
                         self._clear_sketch_selection()
                         self._selected_sketch_entity = hit
                         self._hover_sketch_entity = hit
@@ -4898,7 +4943,20 @@ class Workspace:
                 pos, layout.viewport, sketch
             )
             if (
+                self._hover_sketch_entity is not None
+                and self._hover_sketch_entity[0] == "point"
+                and self._selected_tool is None
+                and self._constraint_tool is None
+            ):
+                loop_hit = self._circle_loop_at_point(
+                    sketch, self._hover_sketch_entity[1]
+                )
+                if loop_hit is not None:
+                    self._hover_sketch_entity = None
+                    self._hover_loop = loop_hit
+            if (
                 self._hover_sketch_entity is None
+                and self._hover_loop is None
                 and self._selected_tool is None
                 and self._constraint_tool is None
             ):
