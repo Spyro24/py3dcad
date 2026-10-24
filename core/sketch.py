@@ -274,13 +274,14 @@ class Sketch:
 
     def __post_init__(self) -> None:
         self.points = [point2d(point) for point in self.points]
-        self.circles = [
+        circles = [
             circle
             for circle in (
                 self._normalize_circle(item) for item in self.circles
             )
             if circle is not None
         ]
+        self.circles = []
         self.edges = [
             (start, end)
             for start, end in self.edges
@@ -357,9 +358,32 @@ class Sketch:
                 measurement.placement,
                 value,
             )
+        # Bind circles first so their midpoints exist as regular points
+        # before measurement enforcement runs on the point list.
+        self.circles = self._bind_circles(circles)
         # A loaded sketch may predate dimension enforcement.  Make its
         # stored values authoritative immediately, without a command.
         self.enforce_measurements(self.points)
+
+    def _bind_circles(self, circles: Iterable[Circle]) -> List[Circle]:
+        """Make each circle midpoint a regular point of the sketch."""
+        bound: List[Circle] = []
+        for circle in circles:
+            index = self.find_point(circle.midPoint)
+            if index is None:
+                index = self.add_point(circle.midPoint)
+            circle.midPoint = self.points[index]
+            bound.append(circle)
+        return bound
+
+    def apply_point_positions(self, positions: Iterable[Point]) -> None:
+        """Copy positions into existing points without replacing them.
+
+        Circles hold references to their midpoint objects, so commands must
+        move the existing point rather than swap in a new object.
+        """
+        for point, position in zip(self.points, positions):
+            point.set_pos(position)
 
     def measurement_entity_points(
         self,
@@ -675,42 +699,51 @@ class Sketch:
         """Project points until all fixed measurement values are satisfied."""
         if not self.measurements or len(points) != len(self.points):
             return True
-        for _ in range(max(1, iterations)):
-            projected = False
-            before_projection = list(points)
-            for measurement in self.measurements:
-                residual = self.measurement_residual(
-                    measurement, points
-                )
-                if residual is None or abs(residual) <= tolerance:
-                    continue
-                if measurement.kind == "distance":
-                    changed = self._project_distance(
-                        points, measurement, residual
+        # The projection helpers replace point objects.  Keep the caller's
+        # originals alive so circles and other references stay bound to the
+        # same point instances, then copy the final positions back into them.
+        originals = list(points)
+        try:
+            for _ in range(max(1, iterations)):
+                projected = False
+                before_projection = list(points)
+                for measurement in self.measurements:
+                    residual = self.measurement_residual(
+                        measurement, points
                     )
-                    projected = projected or changed
-                elif measurement.kind == "angle":
-                    changed = self._project_angle(
-                        points, measurement, residual
+                    if residual is None or abs(residual) <= tolerance:
+                        continue
+                    if measurement.kind == "distance":
+                        changed = self._project_distance(
+                            points, measurement, residual
+                        )
+                        projected = projected or changed
+                    elif measurement.kind == "angle":
+                        changed = self._project_angle(
+                            points, measurement, residual
+                        )
+                        projected = projected or changed
+                if not projected:
+                    return (
+                        self.measurement_max_error(points)
+                        <= tolerance
                     )
-                    projected = projected or changed
-            if not projected:
-                return (
-                    self.measurement_max_error(points)
-                    <= tolerance
+                # A projection may move only part of an axis-constrained
+                # edge.  Snap the other endpoints by translating the whole
+                # group by the correction instead of anchoring it to an
+                # arbitrary first point, which would undo the projection.
+                self.constrain_axis_changes(
+                    points,
+                    range(len(points)),
+                    previous=before_projection,
                 )
-            # A projection may move only part of an axis-constrained
-            # edge.  Snap the other endpoints by translating the whole
-            # group by the correction instead of anchoring it to an
-            # arbitrary first point, which would undo the projection.
-            self.constrain_axis_changes(
-                points,
-                range(len(points)),
-                previous=before_projection,
-            )
-            if self.measurement_max_error(points) <= tolerance:
-                return True
-        return self.measurement_max_error(points) <= tolerance
+                if self.measurement_max_error(points) <= tolerance:
+                    return True
+            return self.measurement_max_error(points) <= tolerance
+        finally:
+            for index, original in enumerate(originals):
+                original.set_pos(points[index])
+                points[index] = original
 
     def enforced_points(self, points: List[Point]) -> List[Point]:
         """Return a copy of points with measurement constraints applied."""
@@ -1184,7 +1217,11 @@ class Sketch:
         """Remove a point, its edges, and measurements that depend on them."""
         if not 0 <= index < len(self.points):
             return
-        self.points.pop(index)
+        removed_point = self.points.pop(index)
+        self.circles = [
+            circle for circle in self.circles
+            if circle.midPoint is not removed_point
+        ]
         shifted: List[Tuple[int, int]] = []
         constraints: List[Optional[str]] = []
         edge_map: Dict[int, int] = {}

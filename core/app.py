@@ -14,7 +14,6 @@ from .commands import (
     AddPointCommand,
     AddSketchCommand,
     CommandStack,
-    MoveCircleCommand,
     MoveEdgeCommand,
     MovePointCommand,
     SetEdgeConstraintCommand,
@@ -69,7 +68,6 @@ class Application:
             on_add_line=self.add_line,
             on_add_circle=self.add_circle,
             on_move_point=self.move_point,
-            on_move_circle=self.move_circle,
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
             on_select_sketch=self.select_sketch,
@@ -354,21 +352,6 @@ class Application:
         if sketch.points[index] == point:
             return
         stack.execute(MovePointCommand(document, sketch, index, point))
-
-    def move_circle(self, index: int, center: Point) -> None:
-        self._playing = False
-        document = self.active_document()
-        stack = self._active_stack()
-        if document is None or stack is None:
-            return
-        sketch = document.sketch(document.active_sketch_id)
-        if sketch is None or not 0 <= index < len(sketch.circles):
-            return
-        if sketch.circles[index].midPoint == center:
-            return
-        stack.execute(
-            MoveCircleCommand(document, sketch, index, center)
-        )
 
     def move_edge(
         self, index: int, start: Point, end: Point

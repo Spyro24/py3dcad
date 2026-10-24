@@ -19,6 +19,11 @@ from .sketch import (
 from .solver.objects import circle2d, point2d
 
 
+def _copy_points(points: List[Point]) -> List[Point]:
+    """Return independent point objects for a command snapshot."""
+    return [point2d(point) for point in points]
+
+
 class Command(ABC):
     """Base class for an undoable edit."""
 
@@ -152,8 +157,8 @@ class MovePointCommand(Command):
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
         if 0 <= index < len(sketch.points):
-            self.previous_points = list(sketch.points)
-            next_points = list(sketch.points)
+            self.previous_points = _copy_points(sketch.points)
+            next_points = _copy_points(sketch.points)
             next_points[index] = self.point
             sketch.constrain_axis_changes(next_points, [index])
             self.next_points = sketch.enforced_points(
@@ -171,13 +176,13 @@ class MovePointCommand(Command):
     def do(self) -> None:
         if self.next_points is None:
             return
-        self.sketch.points[:] = self.next_points
+        self.sketch.apply_point_positions(self.next_points)
         self.document.dirty = True
 
     def undo(self) -> None:
         if self.previous_points is None:
             return
-        self.sketch.points[:] = self.previous_points
+        self.sketch.apply_point_positions(self.previous_points)
         self.document.dirty = True
 
 
@@ -212,8 +217,8 @@ class MoveEdgeCommand(Command):
                 aligned_end = aligned_edge_endpoint(
                     self.start, self.end, constraint
                 )
-                self.previous_points = list(sketch.points)
-                next_points = list(sketch.points)
+                self.previous_points = _copy_points(sketch.points)
+                next_points = _copy_points(sketch.points)
                 next_points[first] = self.start
                 next_points[second] = aligned_end
                 sketch.constrain_axis_changes(
@@ -234,13 +239,13 @@ class MoveEdgeCommand(Command):
     def do(self) -> None:
         if self.next_points is None:
             return
-        self.sketch.points[:] = self.next_points
+        self.sketch.apply_point_positions(self.next_points)
         self.document.dirty = True
 
     def undo(self) -> None:
         if self.previous_points is None:
             return
-        self.sketch.points[:] = self.previous_points
+        self.sketch.apply_point_positions(self.previous_points)
         self.document.dirty = True
 
 
@@ -273,8 +278,8 @@ class SetEdgeConstraintCommand(Command):
                 0 <= first < len(sketch.points)
                 and 0 <= second < len(sketch.points)
             ):
-                self.previous_points = list(sketch.points)
-                next_points = list(sketch.points)
+                self.previous_points = _copy_points(sketch.points)
+                next_points = _copy_points(sketch.points)
                 next_points[second] = aligned_edge_endpoint(
                     next_points[first],
                     next_points[second],
@@ -310,7 +315,7 @@ class SetEdgeConstraintCommand(Command):
         ):
             return
         if self.next_points is not None:
-            self.sketch.points[:] = self.next_points
+            self.sketch.apply_point_positions(self.next_points)
         self.sketch.edge_constraints[self.index] = self.constraint
         self.document.dirty = True
 
@@ -318,7 +323,7 @@ class SetEdgeConstraintCommand(Command):
         if not 0 <= self.index < len(self.sketch.edges):
             return
         if self.previous_points is not None:
-            self.sketch.points[:] = self.previous_points
+            self.sketch.apply_point_positions(self.previous_points)
         self.sketch.edge_constraints[self.index] = (
             self.previous_constraint
         )
@@ -383,7 +388,7 @@ class AddMeasurementCommand(Command):
             if not 0 <= ref_index < limit:
                 return
         if not self.has_applied:
-            self.previous_points = list(self.sketch.points)
+            self.previous_points = _copy_points(self.sketch.points)
             self.has_applied = True
         if self.index is None:
             self.index = len(self.sketch.measurements)
@@ -393,7 +398,7 @@ class AddMeasurementCommand(Command):
             self.next_points = self.sketch.enforced_points(
                 self.sketch.points
             )
-        self.sketch.points[:] = self.next_points
+        self.sketch.apply_point_positions(self.next_points)
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -410,7 +415,7 @@ class AddMeasurementCommand(Command):
             except ValueError:
                 pass
         if self.previous_points is not None:
-            self.sketch.points[:] = self.previous_points
+            self.sketch.apply_point_positions(self.previous_points)
         self.document.dirty = True
 
 
@@ -526,17 +531,17 @@ class SetMeasurementValueCommand(Command):
             return
         if not self.has_applied:
             self.previous = measurement.value
-            self.previous_points = list(self.sketch.points)
+            self.previous_points = _copy_points(self.sketch.points)
             self.has_previous = True
             self.has_applied = True
             self._replace(self.value)
-            next_points = list(self.sketch.points)
+            next_points = _copy_points(self.sketch.points)
             self.sketch.enforce_measurements(next_points)
             self.next_points = next_points
         else:
             self._replace(self.value)
         if self.next_points is not None:
-            self.sketch.points[:] = self.next_points
+            self.sketch.apply_point_positions(self.next_points)
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -544,7 +549,7 @@ class SetMeasurementValueCommand(Command):
             return
         self._replace(self.previous)
         if self.previous_points is not None:
-            self.sketch.points[:] = self.previous_points
+            self.sketch.apply_point_positions(self.previous_points)
         self.document.dirty = True
 
 
@@ -649,6 +654,7 @@ class AddCircleCommand(Command):
         self.diameter = float(diameter)
         self.index: Optional[int] = None
         self.circle: Optional[circle2d] = None
+        self.created_points: List[int] = []
 
     @property
     def label(self) -> str:
@@ -659,10 +665,16 @@ class AddCircleCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
+        self.created_points = []
         if self.diameter <= 0:
             return
-        if self.circle is None:
-            self.circle = circle2d(self.center, self.diameter)
+        center_index = self.sketch.find_point(self.center)
+        if center_index is None:
+            center_index = self.sketch.add_point(self.center)
+            self.created_points.append(center_index)
+        self.circle = circle2d(
+            self.sketch.points[center_index], self.diameter
+        )
         if self.index is None:
             self.index = len(self.sketch.circles)
         self.index = min(self.index, len(self.sketch.circles))
@@ -680,54 +692,24 @@ class AddCircleCommand(Command):
             self.sketch.circles.pop(self.index)
         elif self.circle in self.sketch.circles:
             self.sketch.circles.remove(self.circle)
-        self.document.dirty = True
-
-
-class MoveCircleCommand(Command):
-    """Move a circle by translating its midpoint."""
-
-    kind = "move_circle"
-    timeline_visible = False
-
-    def __init__(
-        self,
-        document: Document,
-        sketch: Sketch,
-        index: int,
-        center: Point,
-    ) -> None:
-        self.document = document
-        self.sketch = sketch
-        self.index = index
-        self.center = point2d(center)
-        self.previous: Optional[Point] = None
-        self.next: Optional[Point] = None
-        if 0 <= index < len(sketch.circles):
-            circle = sketch.circles[index]
-            self.previous = point2d(circle.midPoint)
-            self.next = self.center
-
-    @property
-    def label(self) -> str:
-        return "Move Circle"
-
-    @property
-    def sketch_id(self) -> Optional[int]:
-        return self.sketch.id
-
-    def do(self) -> None:
-        if self.next is None or not 0 <= self.index < len(self.sketch.circles):
-            return
-        self.sketch.circles[self.index].midPoint.set_pos(self.next)
-        self.document.dirty = True
-
-    def undo(self) -> None:
-        if (
-            self.previous is None
-            or not 0 <= self.index < len(self.sketch.circles)
-        ):
-            return
-        self.sketch.circles[self.index].midPoint.set_pos(self.previous)
+        referenced = {
+            index
+            for edge in self.sketch.edges
+            for index in edge
+        }
+        for index in sorted(self.created_points, reverse=True):
+            if not 0 <= index < len(self.sketch.points):
+                continue
+            point = self.sketch.points[index]
+            if index in referenced:
+                continue
+            if any(
+                circle.midPoint is point
+                for circle in self.sketch.circles
+            ):
+                continue
+            self.sketch.remove_point(index)
+        self.created_points = []
         self.document.dirty = True
 
 

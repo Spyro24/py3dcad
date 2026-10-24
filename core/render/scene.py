@@ -606,11 +606,6 @@ class SceneRenderer:
                 self._draw_sketch_point(
                     surface, color, camera, frame, (x, y), center, radius
                 )
-            for circle in sketch.circles:
-                self._draw_sketch_point(
-                    surface, color, camera, frame,
-                    circle.midPoint, center, radius,
-                )
 
     def _draw_sketch_point(
         self,

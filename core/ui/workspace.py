@@ -136,7 +136,6 @@ class Workspace:
         on_add_line: Callable[[Point, Point, Optional[str]], None],
         on_add_circle: Callable[[Point, float], None],
         on_move_point: Callable[[int, Point], None],
-        on_move_circle: Callable[[int, Point], None],
         on_move_edge: Callable[[int, Point, Point], None],
         on_set_edge_constraint: Callable[[int, str], None],
         on_select_sketch: Callable[[int], None],
@@ -169,7 +168,6 @@ class Workspace:
         self.on_add_line = on_add_line
         self.on_add_circle = on_add_circle
         self.on_move_point = on_move_point
-        self.on_move_circle = on_move_circle
         self.on_move_edge = on_move_edge
         self.on_set_edge_constraint = on_set_edge_constraint
         self.on_select_sketch = on_select_sketch
@@ -222,9 +220,6 @@ class Workspace:
         self._drag_point_index: Optional[int] = None
         self._drag_point_origin: Optional[Point] = None
         self._drag_point_current: Optional[Point] = None
-        self._drag_circle_index: Optional[int] = None
-        self._drag_circle_origin: Optional[Point] = None
-        self._drag_circle_current: Optional[Point] = None
         self._drag_edge_index: Optional[int] = None
         self._drag_edge_origin: Optional[Tuple[Point, Point]] = None
         self._drag_edge_anchor: Optional[Point] = None
@@ -352,9 +347,6 @@ class Workspace:
         self._drag_point_index = None
         self._drag_point_origin = None
         self._drag_point_current = None
-        self._drag_circle_index = None
-        self._drag_circle_origin = None
-        self._drag_circle_current = None
         self._drag_edge_index = None
         self._drag_edge_origin = None
         self._drag_edge_anchor = None
@@ -599,11 +591,6 @@ class Workspace:
         ):
             self._clear_sketch_selection()
         if (
-            self._drag_circle_index is not None
-            and not 0 <= self._drag_circle_index < len(sketch.circles)
-        ):
-            self._clear_sketch_selection()
-        if (
             self._drag_edge_index is not None
             and not 0 <= self._drag_edge_index < len(sketch.edges)
         ):
@@ -617,8 +604,6 @@ class Workspace:
             return len(sketch.points)
         if kind == "line":
             return len(sketch.lines)
-        if kind == "circle":
-            return len(sketch.circles)
         return None
 
     # ------------------------------------------------------------------
@@ -1848,24 +1833,6 @@ class Workspace:
                 nearest_distance = distance
         return nearest_point
 
-    def _pick_circle_center(
-        self, pos: Tuple[int, int], region: Rect, sketch: Sketch
-    ) -> Optional[int]:
-        point_limit = self._s(8)
-        nearest_circle: Optional[int] = None
-        nearest_distance = float(point_limit)
-        for index, circle in enumerate(sketch.circles):
-            screen = self._project_sketch_point(
-                sketch, circle.midPoint, region
-            )
-            distance = math.hypot(
-                pos[0] - screen[0], pos[1] - screen[1]
-            )
-            if distance <= nearest_distance:
-                nearest_circle = index
-                nearest_distance = distance
-        return nearest_circle
-
     def _pick_sketch_entity(
         self, pos: Tuple[int, int], region: Rect, sketch: Sketch
     ) -> Optional[Tuple[str, int]]:
@@ -1924,7 +1891,6 @@ class Workspace:
                 surface, sketch, region, selected, self.geometry_selection, True
             )
         self._draw_point_drag_preview(surface, sketch, region)
-        self._draw_circle_drag_preview(surface, sketch, region)
         self._draw_edge_drag_preview(surface, sketch, region)
         surface.set_clip(previous_clip)
 
@@ -2644,36 +2610,6 @@ class Workspace:
                 self._s(5), width=max(1, self._s(2)),
             )
 
-    def _draw_circle_drag_preview(
-        self, surface: pygame.Surface, sketch: Sketch, region: Rect
-    ) -> None:
-        index = self._drag_circle_index
-        current = self._drag_circle_current
-        origin = self._drag_circle_origin
-        if (
-            index is None
-            or current is None
-            or origin is None
-            or not 0 <= index < len(sketch.circles)
-        ):
-            return
-        if current == origin:
-            return
-        circle = sketch.circles[index]
-        screen_points = self._circle_screen_points(
-            sketch, current, circle.diameter, region
-        )
-        pygame.draw.lines(
-            surface, self.geometry_selection, True, screen_points,
-            max(1, self._s(2)),
-        )
-        screen_center = self._project_sketch_point(sketch, current, region)
-        pygame.draw.circle(
-            surface, self.geometry_selection,
-            (round(screen_center[0]), round(screen_center[1])),
-            self._s(5), width=max(1, self._s(2)),
-        )
-
     def _draw_sketch_entity_highlight(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect,
         entity: Tuple[str, int], color: pygame.Color, selected: bool,
@@ -2684,27 +2620,6 @@ class Workspace:
                 return
             screen = self._project_sketch_point(
                 sketch, sketch.points[index], region
-            )
-            pygame.draw.circle(
-                surface, color,
-                (round(screen[0]), round(screen[1])),
-                self._s(8 if selected else 6),
-                width=max(1, self._s(2 if selected else 1)),
-            )
-            return
-        if kind == "circle":
-            if not 0 <= index < len(sketch.circles):
-                return
-            circle = sketch.circles[index]
-            screen_points = self._circle_screen_points(
-                sketch, circle.midPoint, circle.diameter, region
-            )
-            pygame.draw.lines(
-                surface, color, True, screen_points,
-                max(1, self._s(3 if selected else 2)),
-            )
-            screen = self._project_sketch_point(
-                sketch, circle.midPoint, region
             )
             pygame.draw.circle(
                 surface, color,
@@ -3980,13 +3895,6 @@ class Workspace:
         if (
             event.type == pygame.MOUSEBUTTONUP
             and event.button == 1
-            and self._drag_circle_index is not None
-        ):
-            self._finish_circle_drag(document)
-            return True
-        if (
-            event.type == pygame.MOUSEBUTTONUP
-            and event.button == 1
             and self._drag_edge_index is not None
         ):
             self._finish_edge_drag(document)
@@ -4191,22 +4099,6 @@ class Workspace:
                     self._selected_tool == "line"
                     and point_hit is not None
                 ):
-                    circle_hit = None
-                    if self._selected_tool not in ("line", "circle"):
-                        circle_hit = self._pick_circle_center(
-                            event.pos, layout.viewport, sketch
-                        )
-                    if circle_hit is not None:
-                        self._clear_sketch_selection()
-                        hit = ("circle", circle_hit)
-                        self._selected_sketch_entity = hit
-                        self._hover_sketch_entity = hit
-                        self._reset_line_state()
-                        circle = sketch.circles[circle_hit]
-                        self._drag_circle_index = circle_hit
-                        self._drag_circle_origin = circle.midPoint
-                        self._drag_circle_current = circle.midPoint
-                        return True
                     hit = self._pick_sketch_entity(
                         event.pos, layout.viewport, sketch
                     )
@@ -4513,22 +4405,6 @@ class Workspace:
             return
         self.on_move_point(index, current)
 
-    def _finish_circle_drag(self, document: Document) -> None:
-        index = self._drag_circle_index
-        current = self._drag_circle_current
-        origin = self._drag_circle_origin
-        self._drag_circle_index = None
-        self._drag_circle_origin = None
-        self._drag_circle_current = None
-        if index is None or current is None or origin is None:
-            return
-        sketch = document.sketch(document.active_sketch_id)
-        if sketch is None or not 0 <= index < len(sketch.circles):
-            return
-        if current == origin:
-            return
-        self.on_move_circle(index, current)
-
     def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":
             self.on_new_sketch()
@@ -4625,21 +4501,6 @@ class Workspace:
                 "point", self._drag_point_index
             )
             self._line_preview = None
-            return
-        if self._drag_circle_index is not None and sketch is not None:
-            if layout.viewport.collidepoint(pos):
-                world = self.viewport.unproject_on_plane(
-                    pos, layout.viewport, sketch.frame()
-                )
-                if world is not None:
-                    self._drag_circle_current = (
-                        round(world[0]), round(world[1])
-                    )
-            self._hover_sketch_entity = (
-                "circle", self._drag_circle_index
-            )
-            self._line_preview = None
-            self._circle_preview = None
             return
         if self._drag_edge_index is not None and sketch is not None:
             if layout.viewport.collidepoint(pos):
@@ -4780,12 +4641,6 @@ class Workspace:
             self._hover_sketch_entity = self._pick_sketch_entity(
                 pos, layout.viewport, sketch
             )
-            if self._hover_sketch_entity is None:
-                circle_index = self._pick_circle_center(
-                    pos, layout.viewport, sketch
-                )
-                if circle_index is not None:
-                    self._hover_sketch_entity = ("circle", circle_index)
 
         if layout.timeline.collidepoint(pos):
             controls, _, _, boxes, _, _, _, _ = self._timeline_geometry(
