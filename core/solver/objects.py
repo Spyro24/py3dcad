@@ -130,11 +130,8 @@ class circle2d:
     def radius(self) -> float:
         return self.diameter / 2.0
 
-    def changeDiameter(self, newDiameter: float) -> None:
-        self.diameter = float(newDiameter)
-
     def change_diameter(self, new_diameter: float) -> None:
-        self.changeDiameter(new_diameter)
+        self.diameter = float(new_diameter)
 
     def __repr__(self) -> str:
         return f"circle2d({self.midPoint!r}, {self.diameter!r})"
