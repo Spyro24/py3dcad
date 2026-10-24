@@ -495,7 +495,9 @@ class Application:
         )
 
     def extrude_active(
-        self, profiles: Optional[List[List[int]]] = None
+        self,
+        profiles: Optional[List[List[int]]] = None,
+        cuts: Optional[List[List[int]]] = None,
     ) -> None:
         self._playing = False
         document = self.active_document()
@@ -507,15 +509,24 @@ class Application:
             return
         if profiles is None:
             profiles = self.workspace.selected_profiles(sketch)
+        if cuts is None:
+            cuts = self.workspace.selected_cut_profiles(sketch)
         valid = [
             list(profile)
             for profile in profiles
             if len(sketch.loop_points(profile)) >= 3
         ]
+        valid_cuts = [
+            list(cut)
+            for cut in cuts
+            if len(sketch.loop_points(cut)) >= 3
+        ]
         if not valid:
             return
         stack.execute(
-            AddExtrudeCommand(document, sketch, profiles=valid)
+            AddExtrudeCommand(
+                document, sketch, profiles=valid, cuts=valid_cuts
+            )
         )
         # The sketch is now consumed by the feature; hide it until selected again.
         document.active_sketch_id = None

@@ -215,8 +215,9 @@ def iter_solid_faces(
         profiles = feature.resolve_profiles(sketch)
         if not profiles:
             continue
+        cuts = feature.resolve_cuts(sketch)
         face_index = 0
-        for outer, holes in build_regions(profiles):
+        for outer, holes in build_regions(profiles, cuts):
             inner = [hole for hole in holes if len(hole) >= 3]
             faces = prism_faces(
                 outer, feature.height, sketch.frame(), inner

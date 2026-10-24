@@ -1683,6 +1683,7 @@ class Extrude:
     sketch_id: int
     height: float = 20.0
     profiles: List[List[int]] = field(default_factory=list)
+    cuts: List[List[int]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1692,32 +1693,38 @@ class Extrude:
             "sketch": self.sketch_id,
             "height": self.height,
             "profiles": [list(loop) for loop in self.profiles],
+            "cuts": [list(loop) for loop in self.cuts],
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Extrude":
-        profiles: List[List[int]] = []
-        raw_profiles = data.get("profiles", [])
-        if isinstance(raw_profiles, (list, tuple)):
-            for raw_loop in raw_profiles:
-                if not isinstance(raw_loop, (list, tuple)):
-                    continue
-                loop: List[int] = []
-                for value in raw_loop:
-                    try:
-                        loop.append(int(value))
-                    except (TypeError, ValueError):
-                        loop = []
-                        break
-                if loop:
-                    profiles.append(loop)
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Extrude")),
             sketch_id=int(data.get("sketch", 0)),
             height=float(data.get("height", 20.0)),
-            profiles=profiles,
+            profiles=cls._parse_loops(data.get("profiles", [])),
+            cuts=cls._parse_loops(data.get("cuts", [])),
         )
+
+    @staticmethod
+    def _parse_loops(raw_profiles: Any) -> List[List[int]]:
+        profiles: List[List[int]] = []
+        if not isinstance(raw_profiles, (list, tuple)):
+            return profiles
+        for raw_loop in raw_profiles:
+            if not isinstance(raw_loop, (list, tuple)):
+                continue
+            loop: List[int] = []
+            for value in raw_loop:
+                try:
+                    loop.append(int(value))
+                except (TypeError, ValueError):
+                    loop = []
+                    break
+            if loop:
+                profiles.append(loop)
+        return profiles
 
     def resolve_profiles(self, sketch: Sketch) -> List[List[Point]]:
         """Return the selected profiles as polygons, including circles."""
@@ -1730,3 +1737,12 @@ class Extrude:
             return loops
         fallback = sketch.profile_points()
         return [fallback] if len(fallback) >= 3 else []
+
+    def resolve_cuts(self, sketch: Sketch) -> List[List[Point]]:
+        """Return the overlapping profiles that cut the selected material."""
+        loops: List[List[Point]] = []
+        for cut in self.cuts:
+            points = sketch.loop_points(cut)
+            if len(points) >= 3:
+                loops.append(points)
+        return loops

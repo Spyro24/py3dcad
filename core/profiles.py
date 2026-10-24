@@ -49,6 +49,7 @@ def point_in_polygon(
 
 def build_regions(
     loops: Sequence[Sequence[Sequence[float]]],
+    cutters: Sequence[Sequence[Sequence[float]]] = (),
 ) -> List[Tuple[Loop, List[Loop]]]:
     """Return ``(outer, holes)`` regions for a set of closed profiles.
 
@@ -56,15 +57,40 @@ def build_regions(
     nested inside another becomes a hole instead of being swallowed by the
     union; a loop nested inside that hole becomes a separate island.  The
     even/odd nesting depth decides whether a loop bounds material or void.
+
+    ``cutters`` are profiles that overlap the selected material.  They carve
+    their shape out of it, so selecting a rectangle that a circle partly
+    covers keeps only the rectangle area outside the circle.
     """
+    cleaned = _clean_loops(loops)
+    if not cleaned:
+        return []
+    if not cutters:
+        return _regions_from_loops(cleaned)
+    cutter_loops = _clean_loops(cutters)
+    if not cutter_loops:
+        return _regions_from_loops(cleaned)
+    regions = _regions_from_loops(cleaned)
+    boundary = _difference_loops(cleaned, cutter_loops, regions)
+    return _regions_from_loops(boundary) if boundary else []
+
+
+def _clean_loops(
+    loops: Sequence[Sequence[Sequence[float]]],
+) -> List[Loop]:
     cleaned = [_clean_loop(loop) for loop in loops]
     cleaned = [
         loop for loop in cleaned
         if len(loop) >= 3 and abs(polygon_area(loop)) > _EPS
     ]
+    return _unique_loops(cleaned)
+
+
+def _regions_from_loops(cleaned: Sequence[Loop]) -> List[Tuple[Loop, List[Loop]]]:
+    """Classify already-clean boundary loops into material and holes."""
+    cleaned = _unique_loops(list(cleaned))
     if not cleaned:
         return []
-    cleaned = _unique_loops(cleaned)
 
     # Nesting depth follows the smallest enclosing loop, not a raw count:
     # overlapping outer loops must not make a nested profile look like an
@@ -112,6 +138,95 @@ def build_regions(
         )
         target[1].append(hole)
     return regions
+
+
+def _difference_loops(
+    selected: Sequence[Loop],
+    cutters: Sequence[Loop],
+    regions: Sequence[Tuple[Loop, List[Loop]]],
+) -> List[Loop]:
+    """Return the boundary of ``selected`` material minus ``cutters``."""
+    segments = _split_segments(list(selected) + list(cutters))
+    if not segments:
+        return []
+    all_points = [point for segment in segments for point in segment]
+    diagonal = _diagonal(all_points)
+    sample = max(1e-7, diagonal * 1e-6)
+    boundary: List[Segment] = []
+    for start, end in segments:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length <= _EPS:
+            continue
+        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+        normal = (-dy / length, dx / length)
+        left = (middle[0] + normal[0] * sample, middle[1] + normal[1] * sample)
+        right = (
+            middle[0] - normal[0] * sample,
+            middle[1] - normal[1] * sample,
+        )
+        inside_left = _inside_regions(left, regions) and not _inside_union(
+            left, cutters
+        )
+        inside_right = _inside_regions(right, regions) and not _inside_union(
+            right, cutters
+        )
+        if inside_left == inside_right:
+            continue
+        boundary.append((start, end) if inside_left else (end, start))
+    return _trace_loops(boundary)
+
+
+def _inside_regions(
+    point: Point2, regions: Sequence[Tuple[Loop, List[Loop]]]
+) -> bool:
+    for outer, holes in regions:
+        if not point_in_polygon(point, outer):
+            continue
+        if any(point_in_polygon(point, hole) for hole in holes):
+            continue
+        return True
+    return False
+
+
+def loop_intersects(
+    first: Sequence[Sequence[float]],
+    second: Sequence[Sequence[float]],
+) -> bool:
+    """Return whether two loops overlap or touch along their boundaries."""
+    if any(point_in_polygon(point, second) for point in first):
+        return True
+    if any(point_in_polygon(point, first) for point in second):
+        return True
+    for index, start in enumerate(first):
+        end = first[(index + 1) % len(first)]
+        for other_index, other_start in enumerate(second):
+            other_end = second[(other_index + 1) % len(second)]
+            if _segment_intersection(
+                start, end, other_start, other_end
+            ) is not None:
+                return True
+    return False
+
+
+def loop_cuts_selection(
+    cutter: Sequence[Sequence[float]],
+    selected: Sequence[Sequence[Sequence[float]]],
+) -> bool:
+    """Return whether ``cutter`` should be subtracted from a selection.
+
+    A cutter counts when it lies inside the selected material or overlaps it
+    partly.  A loop that merely surrounds the whole selection is not a cutter;
+    selecting an inner circle must keep the disk instead of cutting it away.
+    """
+    if len(cutter) < 3 or not selected:
+        return False
+    if any(loop_inside(cutter, loop) for loop in selected):
+        return True
+    if any(loop_inside(loop, cutter) for loop in selected):
+        return False
+    return any(loop_intersects(cutter, loop) for loop in selected)
 
 
 def loop_inside(
@@ -178,19 +293,7 @@ def _loops_connected(first: Loop, second: Loop) -> bool:
     """Return whether two loops share material rather than just nesting."""
     if loop_inside(first, second) or loop_inside(second, first):
         return False
-    if any(point_in_polygon(point, second) for point in first):
-        return True
-    if any(point_in_polygon(point, first) for point in second):
-        return True
-    for index, start in enumerate(first):
-        end = first[(index + 1) % len(first)]
-        for other_index, other_start in enumerate(second):
-            other_end = second[(other_index + 1) % len(second)]
-            if _segment_intersection(
-                start, end, other_start, other_end
-            ) is not None:
-                return True
-    return False
+    return loop_intersects(first, second)
 
 
 def _unique_loops(loops: Sequence[Loop]) -> List[Loop]:

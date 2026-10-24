@@ -7,7 +7,9 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..profiles import build_regions, loop_inside, point_in_polygon
+from ..profiles import (
+    build_regions, loop_cuts_selection, point_in_polygon, union_profiles,
+)
 from ..sketch import (
     Measurement,
     Point,
@@ -1909,54 +1911,57 @@ class Workspace:
         return best
 
     def selected_profiles(self, sketch: Sketch) -> List[List[int]]:
-        """Return the point loops selected as extrusion faces.
-
-        Profiles nested inside a selected loop are included so they become
-        holes instead of being swallowed by the outer contour.
-        """
+        """Return the point loops selected as extrusion faces."""
         loops = sketch.closed_loops()
-        indices = self._expanded_loop_indices(
-            sketch, self._valid_selected_loops(sketch)
-        )
         return [
             list(loops[index])
-            for index in sorted(indices)
+            for index in sorted(set(self._valid_selected_loops(sketch)))
             if 0 <= index < len(loops)
         ]
 
-    def _expanded_loop_indices(
-        self, sketch: Sketch, indices: List[int]
-    ) -> List[int]:
-        """Add loops nested inside the given loops, recursively."""
+    def selected_cut_profiles(self, sketch: Sketch) -> List[List[int]]:
+        """Return unselected loops that carve material out of the selection."""
         loops = sketch.closed_loops()
-        polygons = [sketch.loop_points(loop) for loop in loops]
-        selected = {
-            index for index in indices if 0 <= index < len(loops)
-        }
-        queue = list(selected)
-        while queue:
-            parent = queue.pop()
-            if not 0 <= parent < len(polygons):
+        selected = set(self._valid_selected_loops(sketch))
+        if not selected:
+            return []
+        selected_polygons = [
+            sketch.loop_points(loops[index]) for index in sorted(selected)
+        ]
+        selected_union = union_profiles(selected_polygons)
+        cuts: List[List[int]] = []
+        for index, loop in enumerate(loops):
+            if index in selected:
                 continue
-            for index, polygon in enumerate(polygons):
-                if index in selected or not polygon:
-                    continue
-                if loop_inside(polygon, polygons[parent]):
-                    selected.add(index)
-                    queue.append(index)
-        return sorted(selected)
+            polygon = sketch.loop_points(loop)
+            if len(polygon) < 3:
+                continue
+            if loop_cuts_selection(polygon, selected_union):
+                cuts.append(list(loop))
+        return cuts
 
     def _selected_regions(
         self, sketch: Sketch, indices: List[int]
     ) -> List[Tuple[List[Point], List[List[Point]]]]:
         """Return ``(outer, holes)`` polygons for the given loop indices."""
         loops = sketch.closed_loops()
-        polygons = [
-            sketch.loop_points(loops[index])
-            for index in indices
-            if 0 <= index < len(loops)
+        selected = {
+            index for index in indices if 0 <= index < len(loops)
+        }
+        selected_polygons = [
+            sketch.loop_points(loops[index]) for index in sorted(selected)
         ]
-        return build_regions(polygons)
+        selected_union = union_profiles(selected_polygons)
+        cutters: List[List[Point]] = []
+        for index, loop in enumerate(loops):
+            if index in selected:
+                continue
+            polygon = sketch.loop_points(loop)
+            if len(polygon) < 3:
+                continue
+            if loop_cuts_selection(polygon, selected_union):
+                cutters.append(polygon)
+        return build_regions(selected_polygons, cutters)
 
     def _valid_selected_loops(self, sketch: Optional[Sketch]) -> List[int]:
         if sketch is None:
@@ -1975,9 +1980,7 @@ class Workspace:
         if sketch is None:
             return
         loops = sketch.closed_loops()
-        selected_indices = self._expanded_loop_indices(
-            sketch, self._valid_selected_loops(sketch)
-        )
+        selected_indices = self._valid_selected_loops(sketch)
         selected = set(selected_indices)
         hovered = self._hover_loop
         if not selected and hovered is None:
@@ -2002,11 +2005,8 @@ class Workspace:
             and hovered not in selected
             and 0 <= hovered < len(loops)
         ):
-            hover_indices = self._expanded_loop_indices(
-                sketch, [hovered]
-            )
             for outer, holes in self._selected_regions(
-                sketch, hover_indices
+                sketch, [hovered]
             ):
                 self._draw_region_fill(
                     overlay, sketch, outer, holes, region,

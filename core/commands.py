@@ -731,6 +731,7 @@ class AddExtrudeCommand(Command):
         sketch: Sketch,
         height: float = 20.0,
         profiles: Optional[List[List[int]]] = None,
+        cuts: Optional[List[List[int]]] = None,
     ) -> None:
         self.document = document
         self.sketch = sketch
@@ -741,6 +742,11 @@ class AddExtrudeCommand(Command):
             list(profile)
             for profile in profiles
             if len(sketch.loop_points(profile)) >= 3
+        ]
+        self.cuts = [
+            list(cut)
+            for cut in (cuts or [])
+            if len(sketch.loop_points(cut)) >= 3
         ]
         self.feature: Optional[Extrude] = None
 
@@ -762,6 +768,7 @@ class AddExtrudeCommand(Command):
                 self.sketch.id,
                 self.height,
                 [list(profile) for profile in self.profiles],
+                [list(cut) for cut in self.cuts],
             )
         if self.feature not in self.document.features:
             self.document.features.append(self.feature)
