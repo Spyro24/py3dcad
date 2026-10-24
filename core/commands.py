@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 from .document import Document
 from .sketch import (
     Extrude,
+    Fillet,
     Measurement,
     PlaneFrame,
     Point,
@@ -802,7 +803,7 @@ class AddExtrudeCommand(Command):
 
 
 class AddFilletCommand(Command):
-    """Round a vertical edge of an extruded solid."""
+    """Round one edge of an extruded solid."""
 
     kind = "fillet"
 
@@ -810,17 +811,18 @@ class AddFilletCommand(Command):
         self,
         document: Document,
         feature: Extrude,
+        kind: str,
         u: float,
         v: float,
         radius: float,
     ) -> None:
         self.document = document
         self.feature = feature
-        self.fillet = [float(u), float(v), float(radius)]
+        self.fillet = Fillet(kind, float(u), float(v), float(radius))
 
     @property
     def label(self) -> str:
-        return f"Fillet {self.fillet[2]:g} mm"
+        return f"Fillet {self.fillet.radius:g} mm"
 
     def do(self) -> None:
         if not any(

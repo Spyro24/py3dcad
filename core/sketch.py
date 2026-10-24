@@ -1675,6 +1675,57 @@ class Sketch:
 
 
 @dataclass
+class Fillet:
+    """A rounded solid edge stored in the sketch's local 2D coordinates.
+
+    ``kind`` is ``"vertical"`` for a corner of the extruded profile,
+    ``"top"`` or ``"bottom"`` for an edge of the matching cap.  ``(u, v)``
+    is the profile corner for a vertical fillet and the midpoint of the
+    profile segment for a cap fillet.
+    """
+
+    kind: str = "vertical"
+    u: float = 0.0
+    v: float = 0.0
+    radius: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "u": self.u,
+            "v": self.v,
+            "radius": self.radius,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["Fillet"]:
+        if isinstance(data, dict):
+            kind = str(data.get("kind", "vertical"))
+            try:
+                u = float(data.get("u", 0.0))
+                v = float(data.get("v", 0.0))
+                radius = float(data.get("radius", 0.0))
+            except (TypeError, ValueError):
+                return None
+        elif isinstance(data, (list, tuple)) and len(data) >= 3:
+            # Version 1 stored only vertical fillets as [u, v, radius].
+            kind = "vertical"
+            try:
+                u = float(data[0])
+                v = float(data[1])
+                radius = float(data[2])
+            except (TypeError, ValueError):
+                return None
+        else:
+            return None
+        if kind not in ("vertical", "top", "bottom"):
+            kind = "vertical"
+        if radius <= 0.0:
+            return None
+        return cls(kind, u, v, radius)
+
+
+@dataclass
 class Extrude:
     """A prism created by extruding closed sketch faces along its normal."""
 
@@ -1688,8 +1739,8 @@ class Extrude:
     # represents arrangement regions such as the lens where a circle crosses
     # a rectangle, which cannot be stored as a single sketch loop.
     regions: List[List[List[int]]] = field(default_factory=list)
-    # Vertical-edge fillets stored as (u, v, radius) profile corners.
-    fillets: List[List[float]] = field(default_factory=list)
+    # Rounded profile corners and cap edges.
+    fillets: List[Fillet] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1703,10 +1754,7 @@ class Extrude:
             "regions": [
                 [list(loop) for loop in region] for region in self.regions
             ],
-            "fillets": [
-                [float(value) for value in fillet]
-                for fillet in self.fillets
-            ],
+            "fillets": [fillet.to_dict() for fillet in self.fillets],
         }
 
     @classmethod
@@ -1723,20 +1771,13 @@ class Extrude:
         )
 
     @staticmethod
-    def _parse_fillets(raw_fillets: Any) -> List[List[float]]:
-        fillets: List[List[float]] = []
+    def _parse_fillets(raw_fillets: Any) -> List[Fillet]:
+        fillets: List[Fillet] = []
         if not isinstance(raw_fillets, (list, tuple)):
             return fillets
         for raw_fillet in raw_fillets:
-            if not isinstance(raw_fillet, (list, tuple)):
-                continue
-            if len(raw_fillet) < 3:
-                continue
-            try:
-                fillet = [float(value) for value in raw_fillet[:3]]
-            except (TypeError, ValueError):
-                continue
-            if fillet[2] > 0.0:
+            fillet = Fillet.from_dict(raw_fillet)
+            if fillet is not None:
                 fillets.append(fillet)
         return fillets
 

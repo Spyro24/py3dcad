@@ -1,6 +1,7 @@
 """Application shell for PY3DCAD."""
 
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -25,7 +26,7 @@ from .config import Config, format_opened
 from .document import Document
 from .faces import (
     edge_for_ref, face_for_ref, profile_has_corner,
-    vertical_edge_corner,
+    profile_segment_key, vertical_edge_corner,
 )
 from .sketch import (
     Point,
@@ -46,6 +47,15 @@ from .ui import (
 from .ui.layout import Rect
 
 SCALE_STEPS = (0.75, 0.875, 1.0, 1.125, 1.25, 1.5, 1.75, 2.0)
+
+
+def _plane_offset(point, frame) -> float:
+    """Return how far a point lies along a sketch plane's normal."""
+    return (
+        (point[0] - frame.origin[0]) * frame.normal[0]
+        + (point[1] - frame.origin[1]) * frame.normal[1]
+        + (point[2] - frame.origin[2]) * frame.normal[2]
+    )
 
 
 class Application:
@@ -555,7 +565,7 @@ class Application:
         self.workspace.sketch_palette_window.close()
 
     def add_fillet(self, radius: float) -> Optional[str]:
-        """Round the selected vertical solid edge, returning an error text."""
+        """Round the selected solid edge, returning an error text."""
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
@@ -579,16 +589,85 @@ class Application:
         )
         if feature is None or edge is None or sketch is None:
             return "Select a solid edge first"
-        corner = vertical_edge_corner(edge, sketch.frame())
-        if corner is None:
-            return "Fillet needs a vertical edge"
-        if not profile_has_corner(document, feature, corner):
-            return "Edge is already filleted"
+        frame = sketch.frame()
+        delta = (
+            edge.end[0] - edge.start[0],
+            edge.end[1] - edge.start[1],
+            edge.end[2] - edge.start[2],
+        )
+        length = math.hypot(*delta)
+        if length < 1e-9:
+            return "Select a solid edge first"
+        along_axis = abs(
+            (delta[0] * frame.normal[0]
+             + delta[1] * frame.normal[1]
+             + delta[2] * frame.normal[2]) / length
+        )
+        if along_axis > 0.999:
+            corner = vertical_edge_corner(edge, frame)
+            if (
+                corner is None
+                or not profile_has_corner(document, feature, corner)
+            ):
+                return "Edge is already filleted"
+            kind = "vertical"
+            segment_key = None
+            u, v = corner
+        else:
+            start_offset = _plane_offset(edge.start, frame)
+            end_offset = _plane_offset(edge.end, frame)
+            if abs(start_offset - end_offset) > 1e-4:
+                return "Fillet needs a solid edge"
+            midpoint = edge.midpoint
+            offset = (
+                midpoint[0] - frame.origin[0],
+                midpoint[1] - frame.origin[1],
+                midpoint[2] - frame.origin[2],
+            )
+            u = (
+                offset[0] * frame.u[0]
+                + offset[1] * frame.u[1]
+                + offset[2] * frame.u[2]
+            )
+            v = (
+                offset[0] * frame.v[0]
+                + offset[1] * frame.v[1]
+                + offset[2] * frame.v[2]
+            )
+            segment_key = profile_segment_key(
+                document, feature, (u, v)
+            )
+            if segment_key is None:
+                return "Edge is already filleted"
+            # The cap on the positive-normal side is the top face.
+            kind = (
+                "top"
+                if (start_offset + end_offset) * 0.5
+                > feature.height * 0.5
+                else "bottom"
+            )
         if radius <= 0.0:
             return "Enter a radius greater than zero"
+        if kind == "vertical":
+            duplicate = any(
+                fillet.kind == "vertical"
+                and abs(fillet.u - u) <= 1e-4
+                and abs(fillet.v - v) <= 1e-4
+                for fillet in feature.fillets
+            )
+        else:
+            duplicate = any(
+                fillet.kind == kind
+                and profile_segment_key(
+                    document, feature, (fillet.u, fillet.v)
+                ) == segment_key
+                for fillet in feature.fillets
+            )
+        if duplicate:
+            return "Edge is already filleted"
         stack.execute(
             AddFilletCommand(
-                document, feature, corner[0], corner[1], radius
+                document, feature, kind, u, v, radius
             )
         )
         document.selected_edge = None
