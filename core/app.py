@@ -14,6 +14,7 @@ from .commands import (
     AddLineCommand,
     AddMeasurementCommand,
     AddPointCommand,
+    AddRectangleCommand,
     AddSketchCommand,
     CommandStack,
     MoveEdgeCommand,
@@ -81,6 +82,7 @@ class Application:
             on_add_point=self.add_point,
             on_add_line=self.add_line,
             on_add_circle=self.add_circle,
+            on_add_rectangle=self.add_rectangle,
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
@@ -345,6 +347,23 @@ class Application:
             return
         stack.execute(
             AddLineCommand(document, sketch, start, end, constraint)
+        )
+
+    def add_rectangle(
+        self, first: Point, opposite: Point
+    ) -> None:
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        if first[0] == opposite[0] or first[1] == opposite[1]:
+            return
+        stack.execute(
+            AddRectangleCommand(document, sketch, first, opposite)
         )
 
     def add_circle(self, center: Point, diameter: float) -> None:

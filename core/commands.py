@@ -636,6 +636,105 @@ class AddLineCommand(Command):
         self.document.dirty = True
 
 
+class AddRectangleCommand(Command):
+    """Add a rectangle as four points and four axis-constrained edges."""
+
+    kind = "rectangle"
+    timeline_visible = False
+
+    # Edge order walks the corners, so the alternating constraints keep the
+    # two horizontal and two vertical sides locked to the sketch axes.
+    CONSTRAINTS = ("horizontal", "vertical", "horizontal", "vertical")
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        first: Point,
+        opposite: Point,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        start = point2d(first)
+        end = point2d(opposite)
+        self.corners = (
+            start,
+            point2d((end[0], start[1])),
+            end,
+            point2d((start[0], end[1])),
+        )
+        self.index: Optional[int] = None
+        self.created_points: List[int] = []
+
+    @property
+    def label(self) -> str:
+        return "Rectangle"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def _ensure_point(self, point: Point) -> int:
+        index = self.sketch.find_point(point)
+        if index is not None:
+            return index
+        index = self.sketch.add_point(point)
+        self.created_points.append(index)
+        return index
+
+    def do(self) -> None:
+        self.created_points = []
+        if (
+            self.corners[0] == self.corners[2]
+            or self.corners[0][0] == self.corners[2][0]
+            or self.corners[0][1] == self.corners[2][1]
+        ):
+            return
+        indices = [self._ensure_point(point) for point in self.corners]
+        if len(set(indices)) != 4:
+            return
+        if self.index is None:
+            self.index = len(self.sketch.edges)
+        self.index = min(self.index, len(self.sketch.edges))
+        for offset in range(4):
+            edge_index = self.index + offset
+            self.sketch.edges.insert(
+                edge_index,
+                (indices[offset], indices[(offset + 1) % 4]),
+            )
+            self.sketch.edge_constraints.insert(
+                edge_index, self.CONSTRAINTS[offset]
+            )
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.index is not None:
+            end = min(self.index + 4, len(self.sketch.edges))
+            removed = end - self.index
+            if removed > 0:
+                del self.sketch.edges[self.index:end]
+                constraint_end = min(
+                    self.index + removed,
+                    len(self.sketch.edge_constraints),
+                )
+                del self.sketch.edge_constraints[
+                    self.index:constraint_end
+                ]
+        referenced = {
+            index
+            for edge in self.sketch.edges
+            for index in edge
+        }
+        for index in sorted(self.created_points, reverse=True):
+            if (
+                index < len(self.sketch.points)
+                and index not in referenced
+            ):
+                self.sketch.remove_point(index)
+        self.created_points = []
+        self.document.dirty = True
+
+
 class AddCircleCommand(Command):
     """Add a circle to a sketch."""
 

@@ -67,6 +67,7 @@ class Workspace:
     TOOL_LABELS = {
         "sketch": "Sketch",
         "line": "Line",
+        "rectangle": "Rectangle",
         "circle": "Circle",
         "point": "Point",
         "finish_sketch": "Finish Sketch",
@@ -83,7 +84,7 @@ class Workspace:
     FILLET_RADIUS = 2.0
     SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
     SKETCH_INTERACTIVE_ACTIONS = (
-        "line", "circle", "point", *SKETCH_CONSTRAINT_ACTIONS
+        "line", "rectangle", "circle", "point", *SKETCH_CONSTRAINT_ACTIONS
     )
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
     ACTIVE_MODE = "SOLID"
@@ -95,7 +96,7 @@ class Workspace:
     SKETCH_GROUPS = (
         ("CREATE", (
             ("line", "Line", True),
-            ("rectangle", "Rectangle", True),
+            ("rectangle", "Rectangle", False),
             ("circle", "Circle", True),
             ("arc", "Arc", True),
             ("slot", "Slot", True),
@@ -130,7 +131,7 @@ class Workspace:
         )),
     )
     ACTIVE_SKETCH_TOOLS = (
-        "line", "point", "measure", "finish_sketch"
+        "line", "rectangle", "point", "measure", "finish_sketch"
     )
     LINE_MENU_ITEMS = (
         ("normal", "Line"),
@@ -153,6 +154,7 @@ class Workspace:
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point, Optional[str]], None],
         on_add_circle: Callable[[Point, float], None],
+        on_add_rectangle: Callable[[Point, Point], None],
         on_move_point: Callable[[int, Point], None],
         on_move_edge: Callable[[int, Point, Point], None],
         on_set_edge_constraint: Callable[[int, str], None],
@@ -188,6 +190,7 @@ class Workspace:
         self.on_add_point = on_add_point
         self.on_add_line = on_add_line
         self.on_add_circle = on_add_circle
+        self.on_add_rectangle = on_add_rectangle
         self.on_move_point = on_move_point
         self.on_move_edge = on_move_edge
         self.on_set_edge_constraint = on_set_edge_constraint
@@ -213,6 +216,8 @@ class Workspace:
         self._line_preview: Optional[Point] = None
         self._circle_center: Optional[Point] = None
         self._circle_preview: Optional[Tuple[Point, float]] = None
+        self._rectangle_start: Optional[Point] = None
+        self._rectangle_preview: Optional[Point] = None
         self._line_menu_open = False
         self._line_menu_hover = -1
         self._constraint_menu_open = False
@@ -407,6 +412,8 @@ class Workspace:
         self._line_preview = None
         self._circle_center = None
         self._circle_preview = None
+        self._rectangle_start = None
+        self._rectangle_preview = None
         self._line_menu_open = False
         self._line_menu_hover = -1
         self._constraint_menu_open = False
@@ -498,6 +505,7 @@ class Workspace:
         )
         self._draw_sketch_loops(surface, layout.viewport, document)
         self._draw_line_preview(surface, layout.viewport, document)
+        self._draw_rectangle_preview(surface, layout.viewport, document)
         self._draw_circle_preview(surface, layout.viewport, document)
         self._draw_sketch_selection(surface, layout.viewport, document)
         if layout.command_bar.w > 0:
@@ -1244,7 +1252,9 @@ class Workspace:
                         self._activate_measure_tool("auto", document)
                         return True
                     continue
-                if item.action not in ("line", "circle", "point"):
+                if item.action not in (
+                    "line", "rectangle", "circle", "point"
+                ):
                     continue
                 if item.action == "line":
                     caret = self._toolbar_dropdown_rect(item)
@@ -1691,7 +1701,7 @@ class Workspace:
                 color = self.text_secondary
             for item in group.items:
                 active = (
-                    item.action in ("line", "circle", "point")
+                    item.action in ("line", "rectangle", "circle", "point")
                     and self._selected_tool == item.action
                 ) or (
                     selected_constraint is not None
@@ -1826,6 +1836,43 @@ class Workspace:
         pygame.draw.circle(
             surface, self.accent,
             (round(start[0]), round(start[1])), self._s(3),
+        )
+        surface.set_clip(previous_clip)
+
+    def _draw_rectangle_preview(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        if (
+            self._selected_tool != "rectangle"
+            or self._rectangle_start is None
+            or self._rectangle_preview is None
+        ):
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not self._sketch_toolbar_visible(document):
+            return
+        start = self._rectangle_start
+        end = self._rectangle_preview
+        if start[0] == end[0] or start[1] == end[1]:
+            return
+        corners = (
+            start,
+            (end[0], start[1]),
+            end,
+            (start[0], end[1]),
+        )
+        screen = [
+            self._project_sketch_point(sketch, point, region)
+            for point in corners
+        ]
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        pygame.draw.lines(
+            surface, self.accent, True, screen, self._s(2)
+        )
+        pygame.draw.circle(
+            surface, self.accent,
+            (round(screen[0][0]), round(screen[0][1])), self._s(3),
         )
         surface.set_clip(previous_clip)
 
@@ -3801,7 +3848,7 @@ class Workspace:
             return pygame.Color(78, 148, 235)
         if kind == "fillet":
             return pygame.Color(251, 146, 60)
-        if kind in ("line", "circle", "point"):
+        if kind in ("line", "rectangle", "circle", "point"):
             return pygame.Color(105, 178, 242)
         return pygame.Color(150, 150, 160)
 
@@ -4419,6 +4466,24 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
+                if self._selected_tool == "rectangle":
+                    point = self._rectangle_corner(
+                        event.pos, layout.viewport, sketch
+                    )
+                    if point is not None:
+                        self._clear_sketch_selection()
+                        start = self._rectangle_start
+                        if start is None:
+                            self._rectangle_start = point
+                            self._rectangle_preview = point
+                        elif (
+                            point[0] != start[0]
+                            and point[1] != start[1]
+                        ):
+                            self.on_add_rectangle(start, point)
+                            self._rectangle_start = None
+                            self._rectangle_preview = None
+                    return True
                 if self._selected_tool == "circle":
                     snap_index = self._pick_sketch_point(
                         event.pos, layout.viewport, sketch
@@ -4747,6 +4812,21 @@ class Workspace:
             return
         self.on_move_edge(index, current[0], current[1])
 
+    def _rectangle_corner(
+        self, pos: Tuple[int, int], region: Rect, sketch: Sketch
+    ) -> Optional[Point]:
+        """Return the snapped or free sketch corner under the cursor."""
+        index = self._pick_sketch_point(pos, region, sketch)
+        if index is not None:
+            point = sketch.points[index]
+            return (point[0], point[1])
+        world = self.viewport.unproject_on_plane(
+            pos, region, sketch.frame()
+        )
+        if world is None:
+            return None
+        return (round(world[0]), round(world[1]))
+
     def _auto_axis_point(
         self,
         sketch: Sketch,
@@ -5012,6 +5092,19 @@ class Workspace:
                 )
         else:
             self._circle_preview = None
+        if (
+            self._selected_tool == "rectangle"
+            and sketch is not None
+            and layout.viewport.collidepoint(pos)
+        ):
+            preview = self._rectangle_corner(
+                pos, layout.viewport, sketch
+            )
+            self._rectangle_preview = (
+                preview if self._rectangle_start is not None else None
+            )
+        else:
+            self._rectangle_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
             return
         if self.fillet_window.update_hover(pos, layout.viewport):

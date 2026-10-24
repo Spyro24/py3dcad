@@ -165,6 +165,11 @@ class Viewport:
             profile_count = len(active.closed_loops())
             if active_tool == "line":
                 hint = "Click to draw a line  ·  Esc to deselect"
+            elif active_tool == "rectangle":
+                hint = (
+                    "Click one corner, then the opposite corner"
+                    "  ·  Esc to deselect"
+                )
             elif active_tool == "circle":
                 hint = (
                     "Click the centre, then a point on the circle"
