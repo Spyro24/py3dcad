@@ -22,6 +22,7 @@ class Document:
     active_sketch_id: Optional[int] = None
     selected_plane: Optional[str] = None
     selected_face: Optional[Tuple[int, int]] = None
+    selected_edge: Optional[Tuple[int, int]] = None
 
     @property
     def saved(self) -> bool:

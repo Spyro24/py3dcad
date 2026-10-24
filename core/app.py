@@ -22,7 +22,7 @@ from .commands import (
 )
 from .config import Config, format_opened
 from .document import Document
-from .faces import face_for_ref
+from .faces import edge_for_ref, face_for_ref
 from .sketch import (
     Point,
     normalize_measurement_placement,
@@ -246,6 +246,11 @@ class Application:
             and face_for_ref(document, document.selected_face) is None
         ):
             document.selected_face = None
+        if (
+            document.selected_edge is not None
+            and edge_for_ref(document, document.selected_edge) is None
+        ):
+            document.selected_edge = None
 
     def _activate_editable_sketch(self, document: Document) -> None:
         """After rolling back, resume the latest sketch that is not consumed."""
@@ -551,6 +556,7 @@ class Application:
             if sketch is not None:
                 document.active_sketch_id = sketch_id
                 document.selected_face = None
+                document.selected_edge = None
                 document.selected_plane = (
                     None if sketch.is_custom_plane else sketch.plane
                 )

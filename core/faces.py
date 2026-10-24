@@ -15,6 +15,7 @@ from .sketch import PlaneFrame, PlaneLike, Point3, plane_frame
 
 Color = Tuple[int, int, int]
 FaceRef = Tuple[int, int]
+EdgeRef = Tuple[int, int]
 
 # Side panels whose normals differ by less than this angle are one smooth face.
 SMOOTH_ANGLE = math.radians(20.0)
@@ -66,6 +67,27 @@ class Face:
         u_axis = _unit(_cross(v_axis, normal))
 
         return PlaneFrame(origin, u_axis, v_axis, normal, self.label)
+
+
+@dataclass(frozen=True)
+class Edge:
+    """A real edge between two vertices of a solid."""
+
+    start: Point3
+    end: Point3
+    # Outward normals of the adjacent faces.  An edge is visible from a
+    # direction when at least one adjacent face faces the viewer.
+    normals: Tuple[Point3, ...] = ()
+    label: str = "Edge"
+
+    @property
+    def midpoint(self) -> Point3:
+        """Return the centre of the edge."""
+        return (
+            (self.start[0] + self.end[0]) * 0.5,
+            (self.start[1] + self.end[1]) * 0.5,
+            (self.start[2] + self.end[2]) * 0.5,
+        )
 
 
 def prism_faces(
@@ -287,6 +309,124 @@ def face_for_ref(
         if current_id == feature_id and index == face_index:
             return face
     return None
+
+
+def edge_for_ref(
+    document: "Document", reference: Optional[EdgeRef]
+) -> Optional[Edge]:
+    """Resolve a ``(feature_id, edge_index)`` reference to live geometry."""
+    if reference is None:
+        return None
+    feature_id, edge_index = reference
+    for current_id, index, edge in iter_solid_edges(document):
+        if current_id == feature_id and index == edge_index:
+            return edge
+    return None
+
+
+def iter_solid_edges(
+    document: "Document",
+) -> Iterator[Tuple[int, int, Edge]]:
+    """Yield ``(feature_id, edge_index, edge)`` for every real solid edge.
+
+    Coincident edges shared by adjacent faces are merged.  Smooth
+    tessellation seams are skipped so curved surfaces offer no fake edges.
+    """
+    feature_id: Optional[int] = None
+    collected: Dict[
+        Tuple[Tuple[float, ...], Tuple[float, ...]],
+        Tuple[Point3, Point3, List[Point3]],
+    ] = {}
+    for current_id, _, face in iter_solid_faces(document):
+        if current_id != feature_id:
+            if feature_id is not None:
+                yield from _feature_edges(feature_id, collected)
+            feature_id = current_id
+            collected = {}
+        _collect_face_edges(face, collected)
+    if feature_id is not None:
+        yield from _feature_edges(feature_id, collected)
+
+
+def edge_visible(edge: Edge, view_direction: Point3) -> bool:
+    """Return whether an edge lies on a face visible from the camera."""
+    if not edge.normals:
+        return True
+    return any(_dot(normal, view_direction) > 1e-6 for normal in edge.normals)
+
+
+def _collect_face_edges(
+    face: Face,
+    collected: Dict[
+        Tuple[Tuple[float, ...], Tuple[float, ...]],
+        Tuple[Point3, Point3, List[Point3]],
+    ],
+) -> None:
+    """Add the drawn edges of one face to a shared, de-duplicated set."""
+    count = len(face.vertices)
+    for index in range(count):
+        sharp = face.sharp_edges
+        if sharp is not None and index < len(sharp) and not sharp[index]:
+            continue
+        _add_edge(
+            collected,
+            face.vertices[index],
+            face.vertices[(index + 1) % count],
+            face.normal,
+        )
+    for hole in face.holes:
+        hole_count = len(hole)
+        for index in range(hole_count):
+            _add_edge(
+                collected,
+                hole[index],
+                hole[(index + 1) % hole_count],
+                face.normal,
+            )
+
+
+def _add_edge(
+    collected: Dict[
+        Tuple[Tuple[float, ...], Tuple[float, ...]],
+        Tuple[Point3, Point3, List[Point3]],
+    ],
+    start: Point3,
+    end: Point3,
+    normal: Point3,
+) -> None:
+    """Merge an edge into the per-feature set, keeping adjacent normals."""
+    if _length(_subtract(start, end)) < 1e-9:
+        return
+    key = _edge_key(start, end)
+    entry = collected.get(key)
+    if entry is None:
+        collected[key] = (start, end, [normal])
+    elif not any(
+        _dot(_unit(current), _unit(normal)) > 0.999
+        for current in entry[2]
+    ):
+        entry[2].append(normal)
+
+
+def _feature_edges(
+    feature_id: int,
+    collected: Dict[
+        Tuple[Tuple[float, ...], Tuple[float, ...]],
+        Tuple[Point3, Point3, List[Point3]],
+    ],
+) -> Iterator[Tuple[int, int, Edge]]:
+    """Yield the merged edges of one feature with stable indices."""
+    for index, (start, end, normals) in enumerate(collected.values()):
+        yield feature_id, index, Edge(start, end, tuple(normals))
+
+
+def _edge_key(
+    start: Point3, end: Point3
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """Return an order-independent key for a pair of edge endpoints."""
+    first = tuple(round(value, 6) for value in start)
+    second = tuple(round(value, 6) for value in end)
+    return (first, second) if first <= second else (second, first)
 
 
 def _side_color(a: Sequence[float], b: Sequence[float]) -> Color:

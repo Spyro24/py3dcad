@@ -5,7 +5,7 @@ from typing import Callable, Optional, Sequence, Tuple
 import pygame
 
 from ..document import Document
-from ..faces import face_for_ref
+from ..faces import edge_for_ref, face_for_ref
 from ..render import OrbitCamera, SceneRenderer
 from ..sketch import PlaneLike, Point
 from .layout import Rect
@@ -203,7 +203,14 @@ class Viewport:
                 )
         else:
             status = document.name
-            if document.selected_face is not None:
+            if document.selected_edge is not None:
+                edge = edge_for_ref(document, document.selected_edge)
+                label = edge.label if edge is not None else "Edge"
+                hint = (
+                    f"{label} selected"
+                    "  ·  click empty space to deselect"
+                )
+            elif document.selected_face is not None:
                 face = face_for_ref(document, document.selected_face)
                 label = face.label if face is not None else "Face"
                 hint = (
@@ -275,12 +282,23 @@ class Viewport:
                             (round(world[0]), round(world[1]))
                         )
                     return True
+                edge_hit = self.renderer.pick_edge(
+                    event.pos, region.rect, document, self.camera
+                )
+                if edge_hit is not None:
+                    feature_id, edge_index, _ = edge_hit
+                    document.selected_edge = (feature_id, edge_index)
+                    document.selected_face = None
+                    document.selected_plane = None
+                    document.active_sketch_id = None
+                    return True
                 face_hit = self.renderer.pick_face(
                     event.pos, region.rect, document, self.camera
                 )
                 if face_hit is not None:
                     feature_id, face_index, _ = face_hit
                     document.selected_face = (feature_id, face_index)
+                    document.selected_edge = None
                     document.selected_plane = None
                     document.active_sketch_id = None
                     return True
@@ -291,9 +309,13 @@ class Viewport:
                     )
                 if plane is not None:
                     document.selected_face = None
+                    document.selected_edge = None
                     document.selected_plane = plane
                     document.active_sketch_id = None
                     return True
+                document.selected_face = None
+                document.selected_edge = None
+                document.selected_plane = None
                 return False
 
         if event.type == pygame.MOUSEBUTTONUP and event.button == 2:

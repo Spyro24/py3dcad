@@ -431,6 +431,7 @@ class Workspace:
         else:
             document.selected_plane = plane
             document.selected_face = None
+        document.selected_edge = None
         document.active_sketch_id = None
         self.close_create_sketch_dialog()
         self.on_new_sketch()
@@ -4320,6 +4321,7 @@ class Workspace:
                         else:
                             document.selected_plane = plane
                             document.selected_face = None
+                            document.selected_edge = None
                             document.active_sketch_id = None
                             self._selected_tool = None
                             self._constraint_tool = None
@@ -4333,6 +4335,7 @@ class Workspace:
                 if not hit_row:
                     document.selected_plane = None
                     document.selected_face = None
+                    document.selected_edge = None
                     return True
 
         if (

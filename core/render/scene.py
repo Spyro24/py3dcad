@@ -7,7 +7,10 @@ from typing import Iterator, List, Optional, Sequence, Tuple
 import pygame
 
 from ..document import Document
-from ..faces import Color, Face, iter_solid_faces
+from ..faces import (
+    Color, Edge, Face, edge_for_ref, edge_visible, iter_solid_edges,
+    iter_solid_faces,
+)
 from ..profiles import union_profiles
 from ..sketch import (
     Circle, PlaneFrame, Sketch, circle_polygon, plane_frame, point_on_plane,
@@ -68,6 +71,7 @@ class ScenePalette:
     active: Color = (59, 130, 246)
     text_muted: Color = (125, 125, 136)
     edge: Color = (55, 55, 65)
+    edge_selected: Color = (255, 193, 110)
     cube_top: Color = (145, 145, 155)
     cube_bottom: Color = (82, 82, 92)
     cube_side: Color = (122, 122, 132)
@@ -331,6 +335,56 @@ class SceneRenderer:
         _, feature_id, face_index, face = hits[-1]
         return feature_id, face_index, face
 
+    def pick_edge(
+        self,
+        pos: Point2,
+        rect: pygame.Rect,
+        document: Document,
+        camera: OrbitCamera,
+    ) -> Optional[Tuple[int, int, Edge]]:
+        """Return the solid edge nearest to a screen position."""
+        center = rect.center
+        view = camera.view_direction()
+        tolerance = float(self._s(6))
+        hits: List[Tuple[float, float, int, int, Edge]] = []
+        for feature_id, edge_index, edge in iter_solid_edges(document):
+            if not edge_visible(edge, view):
+                continue
+            start = camera.project(edge.start, center)
+            end = camera.project(edge.end, center)
+            distance = self._point_segment_distance(pos, start, end)
+            if distance > tolerance:
+                continue
+            hits.append((
+                distance,
+                -camera.depth((edge.start, edge.end)),
+                feature_id,
+                edge_index,
+                edge,
+            ))
+        if not hits:
+            return None
+        hits.sort(key=lambda item: (item[0], item[1]))
+        _, _, feature_id, edge_index, edge = hits[0]
+        return feature_id, edge_index, edge
+
+    @staticmethod
+    def _point_segment_distance(
+        pos: Point2, start: Point2, end: Point2
+    ) -> float:
+        """Return the pixel distance from a point to a line segment."""
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length_squared = dx * dx + dy * dy
+        if length_squared <= 1e-9:
+            return math.hypot(pos[0] - start[0], pos[1] - start[1])
+        t = (
+            (pos[0] - start[0]) * dx + (pos[1] - start[1]) * dy
+        ) / length_squared
+        t = max(0.0, min(1.0, t))
+        closest = (start[0] + dx * t, start[1] + dy * t)
+        return math.hypot(pos[0] - closest[0], pos[1] - closest[1])
+
     @staticmethod
     def _point_in_polygon(pos: Point2, polygon: List[Point2]) -> bool:
         x, y = pos
@@ -515,6 +569,26 @@ class SceneRenderer:
 
         if selected:
             self._draw_face_selection(surface, rect, selected)
+        if show_highlight:
+            edge = edge_for_ref(document, document.selected_edge)
+            if edge is not None:
+                self._draw_edge_selection(surface, rect, camera, edge)
+
+    def _draw_edge_selection(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        camera: OrbitCamera,
+        edge: Edge,
+    ) -> None:
+        """Highlight a selected solid edge in the geometry selection colour."""
+        center = rect.center
+        start = camera.project(edge.start, center)
+        end = camera.project(edge.end, center)
+        width = max(2, self._s(3))
+        pygame.draw.line(
+            surface, self.palette.edge_selected, start, end, width
+        )
 
     def _draw_face_with_holes(
         self,
