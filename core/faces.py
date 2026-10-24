@@ -817,6 +817,45 @@ def _offset_points(
     )
 
 
+def _corner_cut(
+    vertex: Point3,
+    into_dir: Point3,
+    inward_adjacent: Point3,
+    axis_out: Point3,
+    adjacent_radius: float,
+    own_radius: float,
+    steps: int = 6,
+) -> List[Point3]:
+    """Return the panel boundary where a neighbouring cap fillet ends.
+
+    A cap fillet that stops at a sharp corner cuts back into the side panel
+    that meets it there.  This returns the quarter-circle cross-section of
+    that fillet, projected onto the panel, from the vertical edge up to the
+    panel's own rim.  An empty list means the neighbouring fillet does not
+    reach past this panel's rim, so the corner stays sharp.
+    """
+    if adjacent_radius <= own_radius + 1e-9:
+        return []
+    along = _dot(inward_adjacent, into_dir)
+    if along <= 1e-9:
+        return []
+    ratio = max(0.0, min(1.0, own_radius / adjacent_radius))
+    theta_max = math.asin(max(0.0, min(1.0, 1.0 - ratio)))
+    if theta_max <= 1e-6:
+        return []
+    points: List[Point3] = []
+    for step in range(steps + 1):
+        theta = theta_max * step / steps
+        horizontal = adjacent_radius * along * (1.0 - math.cos(theta))
+        depth = adjacent_radius * (1.0 - math.sin(theta))
+        points.append((
+            vertex[0] + into_dir[0] * horizontal - axis_out[0] * depth,
+            vertex[1] + into_dir[1] * horizontal - axis_out[1] * depth,
+            vertex[2] + into_dir[2] * horizontal - axis_out[2] * depth,
+        ))
+    return points
+
+
 def _side_faces(
     points: Sequence[Sequence[float]],
     base: Sequence[Point3],
@@ -865,6 +904,7 @@ def _side_faces(
         for index in range(count)
     ]
 
+    inward_2d = _loop_inward_2d(points, inward)
     faces: List[Face] = []
     for index in range(count):
         nxt = (index + 1) % count
@@ -896,18 +936,108 @@ def _side_faces(
             top[nxt][1] - axis[1] * top_offset,
             top[nxt][2] - axis[2] * top_offset,
         )
+
+        prev = (index - 1) % count
+        forward = _unit(_subtract(top[nxt], top[index]))
+        backward = _scale(forward, -1.0)
+        bottom_axis_out = _scale(axis, -1.0)
+        top_axis_out = axis
+
+        start_bottom: List[Point3] = []
+        start_top: List[Point3] = []
+        end_bottom: List[Point3] = []
+        end_top: List[Point3] = []
+        if bottom_offsets is not None:
+            if _turn_angle(points, index) >= SMOOTH_ANGLE:
+                start_bottom = _corner_cut(
+                    base[index], forward,
+                    _map_direction(inward_2d[prev], frame),
+                    bottom_axis_out,
+                    float(bottom_offsets[prev]), bottom_offset,
+                )
+            if _turn_angle(points, nxt) >= SMOOTH_ANGLE:
+                end_bottom = _corner_cut(
+                    base[nxt], backward,
+                    _map_direction(inward_2d[nxt], frame),
+                    bottom_axis_out,
+                    float(bottom_offsets[nxt]), bottom_offset,
+                )
+        if top_offsets is not None:
+            if _turn_angle(points, index) >= SMOOTH_ANGLE:
+                start_top = _corner_cut(
+                    top[index], forward,
+                    _map_direction(inward_2d[prev], frame),
+                    top_axis_out,
+                    float(top_offsets[prev]), top_offset,
+                )
+            if _turn_angle(points, nxt) >= SMOOTH_ANGLE:
+                end_top = _corner_cut(
+                    top[nxt], backward,
+                    _map_direction(inward_2d[nxt], frame),
+                    top_axis_out,
+                    float(top_offsets[nxt]), top_offset,
+                )
+
+        poly: List[Point3] = []
+        flags: List[bool] = []
+
+        def append(point: Point3, flag: bool) -> None:
+            if poly and _length(_subtract(poly[-1], point)) <= 1e-9:
+                return
+            flags.append(flag)
+            poly.append(point)
+
+        if start_bottom:
+            poly.append(start_bottom[0])
+            for point in start_bottom[1:]:
+                append(point, False)
+        else:
+            poly.append(bottom)
+
+        bottom_sharp = bottom_offset <= 1e-9
+        if end_bottom:
+            before = len(flags)
+            for point in reversed(end_bottom):
+                append(point, False)
+            if len(flags) > before:
+                flags[before] = bottom_sharp
+        else:
+            append(bottom_next, bottom_sharp)
+
+        # The edge that runs up from here is the shared vertical edge with
+        # the next panel; the face grouping code identifies it as edge 1.
+        shared_start = len(poly) - 1
+        if end_top:
+            append(end_top[0], not smooth[nxt])
+            for point in end_top[1:]:
+                append(point, False)
+        else:
+            append(upper_next, not smooth[nxt])
+
+        top_sharp = top_offset <= 1e-9
+        if start_top:
+            before = len(flags)
+            for point in reversed(start_top):
+                append(point, False)
+            if len(flags) > before:
+                flags[before] = top_sharp
+        else:
+            append(upper, top_sharp)
+        flags.append(not smooth[index])
+
+        if len(poly) < 3 or len(flags) != len(poly):
+            continue
+        # Rotate the closed loop so the shared vertical edge is edge 1.
+        shift = (shared_start - 1) % len(poly)
+        poly = poly[shift:] + poly[:shift]
+        flags = flags[shift:] + flags[:shift]
         faces.append(
             Face(
-                (bottom, bottom_next, upper_next, upper),
+                tuple(poly),
                 _side_color(points[index], points[nxt]),
                 normals[index],
                 f"Side face {index + 1}",
-                (
-                    bottom_offset <= 1e-9,
-                    not smooth[nxt],
-                    top_offset <= 1e-9,
-                    not smooth[index],
-                ),
+                tuple(flags),
             )
         )
     return faces
