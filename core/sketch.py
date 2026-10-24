@@ -6,9 +6,10 @@ from typing import (
     Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union,
 )
 
-from .solver.objects import point2d
+from .solver.objects import line2d, point2d
 
 Point = point2d
+Line = line2d
 Point3 = Tuple[float, float, float]
 
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
@@ -1081,10 +1082,10 @@ class Sketch:
                     ))
 
     @property
-    def lines(self) -> List[Tuple[Point, Point]]:
-        """Return edge endpoints as coordinate pairs."""
+    def lines(self) -> List[Line]:
+        """Return edges as live line geometry objects."""
         return [
-            (self.points[start], self.points[end])
+            line2d((self.points[start], self.points[end]))
             for start, end in self.edges
         ]
 
