@@ -510,13 +510,7 @@ class Application:
         valid = [
             list(profile)
             for profile in profiles
-            if (
-                len(profile) >= 3
-                and all(
-                    0 <= index < len(sketch.points)
-                    for index in profile
-                )
-            )
+            if len(sketch.loop_points(profile)) >= 3
         ]
         if not valid:
             return

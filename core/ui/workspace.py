@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import pygame
 
 from ..document import Document
-from ..profiles import point_in_polygon, polygon_area
+from ..profiles import point_in_polygon
 from ..sketch import (
     Measurement,
     Point,
@@ -1881,7 +1881,7 @@ class Workspace:
     def _pick_sketch_loop(
         self, pos: Tuple[int, int], region: Rect, sketch: Sketch
     ) -> Optional[int]:
-        """Return the smallest closed face under the cursor."""
+        """Return the smallest closed profile under the cursor."""
         world = self.viewport.unproject_on_plane(
             pos, region, sketch.frame()
         )
@@ -1890,10 +1890,19 @@ class Workspace:
         best: Optional[int] = None
         best_area = float("inf")
         for index, loop in enumerate(sketch.closed_loops()):
-            polygon = [sketch.points[point] for point in loop]
-            if not point_in_polygon(world, polygon):
-                continue
-            area = abs(polygon_area(polygon))
+            circle = sketch.circle_for_loop(loop)
+            if circle is not None:
+                center = circle.midPoint
+                distance = math.hypot(
+                    world[0] - center[0], world[1] - center[1]
+                )
+                if distance > circle.radius:
+                    continue
+            else:
+                polygon = sketch.loop_points(loop)
+                if not point_in_polygon(world, polygon):
+                    continue
+            area = sketch.loop_area(loop)
             if area < best_area:
                 best = index
                 best_area = area
@@ -1999,8 +2008,8 @@ class Workspace:
         self, sketch: Sketch, loop: List[int], region: Rect
     ) -> List[Tuple[float, float]]:
         return [
-            self._project_sketch_point(sketch, sketch.points[index], region)
-            for index in loop
+            self._project_sketch_point(sketch, point, region)
+            for point in sketch.loop_points(loop)
         ]
 
     def _draw_sketch_selection(

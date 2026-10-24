@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, field
 from typing import (
-    Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union,
+    Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union,
 )
 
 from .profiles import polygon_area
@@ -17,6 +17,22 @@ Point3 = Tuple[float, float, float]
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
 MEASUREMENT_KINDS = ("distance", "angle")
 MEASUREMENT_REF_KINDS = ("point", "line")
+CIRCLE_SEGMENTS = 48
+
+
+def circle_polygon(circle: Circle, segments: int = CIRCLE_SEGMENTS) -> List[Point]:
+    """Return a closed polygon that approximates a circle."""
+    radius = circle.diameter / 2.0
+    if radius <= 0.0 or segments < 3:
+        return []
+    center = circle.midPoint
+    return [
+        (
+            center[0] + radius * math.cos(2.0 * math.pi * index / segments),
+            center[1] + radius * math.sin(2.0 * math.pi * index / segments),
+        )
+        for index in range(segments)
+    ]
 
 
 def _strip_loop_spikes(loop: List[int]) -> List[int]:
@@ -1151,12 +1167,29 @@ class Sketch:
         ]
 
     def closed_loops(self) -> List[List[int]]:
-        """Return the bounded faces of the sketch edge graph.
+        """Return every closed profile as a point-index loop.
 
-        Each loop is an ordered list of point indices.  Adjacent faces that
-        share an edge stay separate here; :func:`core.profiles.union_profiles`
-        merges them when the user selects several for an extrude.
+        Edge loops are ordered point indices (three or more).  A circle is a
+        one-element loop holding its midpoint index, so circles can be picked
+        and extruded like any other closed profile.  Adjacent edge faces stay
+        separate here; :func:`core.profiles.union_profiles` merges them when
+        the user selects several for an extrude.
         """
+        loops = self._edge_loops()
+        loops.extend(self._circle_loops())
+        return loops
+
+    def _circle_loops(self) -> List[List[int]]:
+        loops: List[List[int]] = []
+        for circle in self.circles:
+            if circle.diameter <= 0.0:
+                continue
+            index = self.point_index(circle.midPoint)
+            if index is not None:
+                loops.append([index])
+        return loops
+
+    def _edge_loops(self) -> List[List[int]]:
         if len(self.edges) < 3:
             return []
         adjacency: Dict[int, List[int]] = {}
@@ -1243,15 +1276,57 @@ class Sketch:
                 return loop if following == first else None
 
     def profile_indices(self) -> List[int]:
-        """Return the first simple closed edge loop, or an empty list."""
+        """Return the first closed profile, or an empty list."""
         loops = self.closed_loops()
         return loops[0] if loops else []
 
     def profile_points(self) -> List[Point]:
-        """Return the ordered points of the extrudable edge loop."""
-        return [
-            self.points[index] for index in self.profile_indices()
-        ]
+        """Return the ordered points of the first extrudable profile."""
+        return self.loop_points(self.profile_indices())
+
+    def point_index(self, point: Point) -> Optional[int]:
+        """Return the index of a point, preferring object identity."""
+        for index, existing in enumerate(self.points):
+            if existing is point:
+                return index
+        return self.find_point(point)
+
+    def circle_for_loop(self, loop: Sequence[int]) -> Optional[Circle]:
+        """Return the circle represented by a one-index loop."""
+        if len(loop) != 1:
+            return None
+        index = loop[0]
+        if not 0 <= index < len(self.points):
+            return None
+        point = self.points[index]
+        for circle in self.circles:
+            if circle.midPoint is point:
+                return circle
+        for circle in self.circles:
+            if circle.midPoint == point:
+                return circle
+        return None
+
+    def loop_points(self, loop: Sequence[int]) -> List[Point]:
+        """Return the polygon for an edge loop or a circle loop."""
+        circle = self.circle_for_loop(loop)
+        if circle is not None:
+            return circle_polygon(circle)
+        if len(loop) < 3:
+            return []
+        if any(not 0 <= index < len(self.points) for index in loop):
+            return []
+        return [self.points[index] for index in loop]
+
+    def loop_area(self, loop: Sequence[int]) -> float:
+        """Return the area of an edge loop or circle loop."""
+        circle = self.circle_for_loop(loop)
+        if circle is not None:
+            return math.pi * circle.radius * circle.radius
+        points = self.loop_points(loop)
+        if len(points) < 3:
+            return 0.0
+        return abs(polygon_area(points))
 
     def find_point(self, point: Point) -> Optional[int]:
         """Find an existing point by its coordinates."""
@@ -1619,7 +1694,7 @@ class Extrude:
                     except (TypeError, ValueError):
                         loop = []
                         break
-                if len(loop) >= 3:
+                if loop:
                     profiles.append(loop)
         return cls(
             id=int(data.get("id", 0)),
@@ -1630,14 +1705,12 @@ class Extrude:
         )
 
     def resolve_profiles(self, sketch: Sketch) -> List[List[Point]]:
-        """Return the selected sketch loops as live point sequences."""
+        """Return the selected profiles as polygons, including circles."""
         loops: List[List[Point]] = []
         for profile in self.profiles:
-            if (
-                len(profile) >= 3
-                and all(0 <= index < len(sketch.points) for index in profile)
-            ):
-                loops.append([sketch.points[index] for index in profile])
+            points = sketch.loop_points(profile)
+            if len(points) >= 3:
+                loops.append(points)
         if loops or self.profiles:
             return loops
         fallback = sketch.profile_points()

@@ -729,10 +729,11 @@ class AddExtrudeCommand(Command):
         self.sketch = sketch
         self.height = height
         if profiles is None:
-            profile = sketch.profile_indices()
-            profiles = [profile] if len(profile) >= 3 else []
+            profiles = [sketch.profile_indices()]
         self.profiles = [
-            list(profile) for profile in profiles if len(profile) >= 3
+            list(profile)
+            for profile in profiles
+            if len(sketch.loop_points(profile)) >= 3
         ]
         self.feature: Optional[Extrude] = None
 
