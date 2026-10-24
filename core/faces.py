@@ -14,6 +14,9 @@ from .sketch import PlaneFrame, PlaneLike, Point3, plane_frame
 Color = Tuple[int, int, int]
 FaceRef = Tuple[int, int]
 
+# Side panels whose normals differ by less than this angle are one smooth face.
+SMOOTH_ANGLE = math.radians(20.0)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .document import Document
 
@@ -26,6 +29,9 @@ class Face:
     color: Color
     normal: Point3 = (0.0, 0.0, 1.0)
     label: str = "Face"
+    # ``None`` outlines every edge.  Side faces of curved surfaces list which
+    # edges are real creases so tessellation seams are not drawn as mesh edges.
+    sharp_edges: Optional[Tuple[bool, ...]] = None
 
     def to_plane_frame(self) -> PlaneFrame:
         """Return an orthonormal sketch frame lying on this face."""
@@ -132,24 +138,36 @@ def _side_faces(
         area += float(point[0]) * float(nxt[1]) - float(nxt[0]) * float(point[1])
     orientation = 1.0 if area >= 0.0 else -1.0
 
-    faces: List[Face] = []
     count = len(base)
+    normals: List[Point3] = []
     for index in range(count):
         nxt = (index + 1) % count
         dx = float(points[nxt][0]) - float(points[index][0])
         dy = float(points[nxt][1]) - float(points[index][1])
         local_x, local_y = (dy, -dx) if orientation > 0 else (-dy, dx)
-        side_normal = _unit((
+        normals.append(_unit((
             frame.u[0] * local_x + frame.v[0] * local_y,
             frame.u[1] * local_x + frame.v[1] * local_y,
             frame.u[2] * local_x + frame.v[2] * local_y,
-        ))
+        )))
+
+    # A vertical edge is a smooth tessellation seam when the adjacent side
+    # normals are close; curved surfaces then render without mesh lines.
+    smooth = [
+        _angle_between(normals[index - 1], normals[index]) < SMOOTH_ANGLE
+        for index in range(count)
+    ]
+
+    faces: List[Face] = []
+    for index in range(count):
+        nxt = (index + 1) % count
         faces.append(
             Face(
                 (base[index], base[nxt], top[nxt], top[index]),
                 _side_color(points[index], points[nxt]),
-                side_normal,
+                normals[index],
                 f"Side face {index + 1}",
+                (True, not smooth[nxt], True, not smooth[index]),
             )
         )
     return faces
@@ -158,7 +176,11 @@ def _side_faces(
 def iter_solid_faces(
     document: "Document",
 ) -> Iterator[Tuple[int, int, Face]]:
-    """Yield ``(feature_id, face_index, face)`` for every solid face."""
+    """Yield ``(feature_id, face_index, face)`` for every solid face.
+
+    Smooth side-face runs share one ``face_index`` so a tessellated cylinder
+    selects and highlights as a single CAD face.
+    """
     for feature in document.features:
         sketch = document.sketch(feature.sketch_id)
         if sketch is None:
@@ -168,11 +190,48 @@ def iter_solid_faces(
             continue
         face_index = 0
         for profile in union_profiles(profiles):
-            for face in prism_faces(
-                profile, feature.height, sketch.frame()
-            ):
-                yield feature.id, face_index, face
-                face_index += 1
+            faces = prism_faces(profile, feature.height, sketch.frame())
+            groups = _face_groups(faces)
+            for face, group in zip(faces, groups):
+                yield feature.id, face_index + group, face
+            face_index += max(groups, default=-1) + 1
+
+
+def _face_groups(faces: Sequence[Face]) -> List[int]:
+    """Give each face an index, merging smooth side-face runs."""
+    groups: List[int] = []
+    next_index = 0
+    previous_group: Optional[int] = None
+    previous_smooth = False
+    first_group: Optional[int] = None
+    side_indices: List[int] = []
+    for face in faces:
+        if face.sharp_edges is None:
+            groups.append(next_index)
+            next_index += 1
+            continue
+        side_indices.append(len(groups))
+        if previous_group is None:
+            group = next_index
+            next_index += 1
+            first_group = group
+        elif previous_smooth:
+            group = previous_group
+        else:
+            group = next_index
+            next_index += 1
+        groups.append(group)
+        previous_group = group
+        previous_smooth = not face.sharp_edges[1]
+    # A smooth run can wrap around from the last side face to the first.
+    if len(side_indices) > 1 and first_group is not None:
+        last_face = faces[side_indices[-1]]
+        if not last_face.sharp_edges[1]:
+            groups = [
+                first_group if group == previous_group else group
+                for group in groups
+            ]
+    return groups
 
 
 def face_for_ref(
@@ -210,6 +269,12 @@ def _scale(vector: Point3, factor: float) -> Point3:
 
 def _dot(a: Point3, b: Point3) -> float:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _angle_between(a: Point3, b: Point3) -> float:
+    """Return the angle between two directions in radians."""
+    dot = max(-1.0, min(1.0, _dot(_unit(a), _unit(b))))
+    return math.acos(dot)
 
 
 def _cross(a: Point3, b: Point3) -> Point3:

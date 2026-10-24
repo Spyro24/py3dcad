@@ -8,6 +8,7 @@ import pygame
 
 from ..document import Document
 from ..faces import Color, Face, iter_solid_faces
+from ..profiles import union_profiles
 from ..sketch import (
     Circle, PlaneFrame, Sketch, circle_polygon, plane_frame, point_on_plane,
 )
@@ -446,7 +447,10 @@ class SceneRenderer:
         center = rect.center
         view_dir = camera.view_direction()
         faces: List[
-            Tuple[float, int, int, List[Point2], Color]
+            Tuple[
+                float, int, int, List[Point2], Color,
+                Optional[Tuple[bool, ...]],
+            ]
         ] = []
         for feature_id, face_index, face in iter_solid_faces(document):
             # Backface culling: skip faces facing away from camera
@@ -464,6 +468,7 @@ class SceneRenderer:
                 face_index,
                 polygon,
                 face.color,
+                face.sharp_edges,
             ))
 
         faces.sort(key=lambda item: item[0])
@@ -473,41 +478,74 @@ class SceneRenderer:
             active is not None and active.is_custom_plane
         )
         selected: List[List[Point2]] = []
-        for _, feature_id, face_index, polygon, color in faces:
+        for (
+            _, feature_id, face_index, polygon, color, sharp_edges
+        ) in faces:
             if len(polygon) < 3:
                 continue
             pygame.draw.polygon(surface, color, polygon)
-            pygame.draw.polygon(surface, self.palette.edge, polygon, width)
+            self._draw_face_outline(
+                surface, polygon, sharp_edges, width
+            )
             if (
                 show_highlight
                 and (feature_id, face_index) == document.selected_face
             ):
                 selected.append(polygon)
 
-        for polygon in selected:
-            self._draw_face_selection(surface, rect, polygon)
+        if selected:
+            self._draw_face_selection(surface, rect, selected)
+
+    def _draw_face_outline(
+        self,
+        surface: pygame.Surface,
+        polygon: List[Point2],
+        sharp_edges: Optional[Tuple[bool, ...]],
+        width: int,
+    ) -> None:
+        """Draw real face edges, skipping smooth tessellation seams."""
+        if sharp_edges is None:
+            pygame.draw.polygon(surface, self.palette.edge, polygon, width)
+            return
+        count = min(len(polygon), len(sharp_edges))
+        for index in range(count):
+            if not sharp_edges[index]:
+                continue
+            pygame.draw.line(
+                surface,
+                self.palette.edge,
+                polygon[index],
+                polygon[(index + 1) % count],
+                width,
+            )
 
     def _draw_face_selection(
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
-        polygon: List[Point2],
+        polygons: List[List[Point2]],
     ) -> None:
         overlay = self._face_surface
         if overlay is None or overlay.get_size() != rect.size:
             overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
             self._face_surface = overlay
         overlay.fill((0, 0, 0, 0))
-        local_polygon = [
-            (point[0] - rect.x, point[1] - rect.y) for point in polygon
+        local_polygons = [
+            [
+                (point[0] - rect.x, point[1] - rect.y)
+                for point in polygon
+            ]
+            for polygon in polygons
         ]
-        pygame.draw.polygon(
-            overlay, (*self.palette.active, 62), local_polygon
-        )
-        pygame.draw.polygon(
-            overlay, (*self.palette.active, 245), local_polygon,
-            max(1, self._s(2)),
-        )
+        for local_polygon in local_polygons:
+            pygame.draw.polygon(
+                overlay, (*self.palette.active, 62), local_polygon
+            )
+        for loop in union_profiles(local_polygons):
+            pygame.draw.polygon(
+                overlay, (*self.palette.active, 245), loop,
+                max(1, self._s(2)),
+            )
         surface.blit(overlay, rect.topleft)
 
     def _draw_sketch_lines(
