@@ -732,15 +732,16 @@ class AddExtrudeCommand(Command):
         height: float = 20.0,
         profiles: Optional[List[List[int]]] = None,
         cuts: Optional[List[List[int]]] = None,
+        regions: Optional[List[List[List[int]]]] = None,
     ) -> None:
         self.document = document
         self.sketch = sketch
         self.height = height
-        if profiles is None:
+        if profiles is None and regions is None:
             profiles = [sketch.profile_indices()]
         self.profiles = [
             list(profile)
-            for profile in profiles
+            for profile in (profiles or [])
             if len(sketch.loop_points(profile)) >= 3
         ]
         self.cuts = [
@@ -748,6 +749,15 @@ class AddExtrudeCommand(Command):
             for cut in (cuts or [])
             if len(sketch.loop_points(cut)) >= 3
         ]
+        self.regions: List[List[List[int]]] = []
+        for region in regions or []:
+            loops = [
+                list(loop)
+                for loop in region
+                if len(sketch.loop_points(loop)) >= 3
+            ]
+            if loops:
+                self.regions.append(loops)
         self.feature: Optional[Extrude] = None
 
     @property
@@ -759,7 +769,7 @@ class AddExtrudeCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        if not self.profiles:
+        if not self.profiles and not self.regions:
             return
         if self.feature is None:
             self.feature = Extrude(
@@ -769,6 +779,10 @@ class AddExtrudeCommand(Command):
                 self.height,
                 [list(profile) for profile in self.profiles],
                 [list(cut) for cut in self.cuts],
+                [
+                    [list(loop) for loop in region]
+                    for region in self.regions
+                ],
             )
         if self.feature not in self.document.features:
             self.document.features.append(self.feature)

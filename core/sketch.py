@@ -6,7 +6,7 @@ from typing import (
     Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union,
 )
 
-from .profiles import polygon_area
+from .profiles import intersect_loops, polygon_area
 from .solver.objects import circle2d, line2d, point2d
 
 Point = point2d
@@ -1684,6 +1684,10 @@ class Extrude:
     height: float = 20.0
     profiles: List[List[int]] = field(default_factory=list)
     cuts: List[List[int]] = field(default_factory=list)
+    # Each region is a list of loops whose intersection is extruded.  This
+    # represents arrangement regions such as the lens where a circle crosses
+    # a rectangle, which cannot be stored as a single sketch loop.
+    regions: List[List[List[int]]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1694,6 +1698,9 @@ class Extrude:
             "height": self.height,
             "profiles": [list(loop) for loop in self.profiles],
             "cuts": [list(loop) for loop in self.cuts],
+            "regions": [
+                [list(loop) for loop in region] for region in self.regions
+            ],
         }
 
     @classmethod
@@ -1705,7 +1712,21 @@ class Extrude:
             height=float(data.get("height", 20.0)),
             profiles=cls._parse_loops(data.get("profiles", [])),
             cuts=cls._parse_loops(data.get("cuts", [])),
+            regions=cls._parse_regions(data.get("regions", [])),
         )
+
+    @classmethod
+    def _parse_regions(cls, raw_regions: Any) -> List[List[List[int]]]:
+        regions: List[List[List[int]]] = []
+        if not isinstance(raw_regions, (list, tuple)):
+            return regions
+        for raw_region in raw_regions:
+            if not isinstance(raw_region, (list, tuple)):
+                continue
+            region = cls._parse_loops(raw_region)
+            if region:
+                regions.append(region)
+        return regions
 
     @staticmethod
     def _parse_loops(raw_profiles: Any) -> List[List[int]]:
@@ -1733,7 +1754,15 @@ class Extrude:
             points = sketch.loop_points(profile)
             if len(points) >= 3:
                 loops.append(points)
-        if loops or self.profiles:
+        for region in self.regions:
+            polygons: List[List[Point]] = []
+            for loop in region:
+                points = sketch.loop_points(loop)
+                if len(points) >= 3:
+                    polygons.append(points)
+            if polygons:
+                loops.extend(intersect_loops(polygons))
+        if loops or self.profiles or self.regions:
             return loops
         fallback = sketch.profile_points()
         return [fallback] if len(fallback) >= 3 else []

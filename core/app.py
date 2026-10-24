@@ -497,6 +497,7 @@ class Application:
     def extrude_active(
         self,
         profiles: Optional[List[List[int]]] = None,
+        regions: Optional[List[List[List[int]]]] = None,
         cuts: Optional[List[List[int]]] = None,
     ) -> None:
         self._playing = False
@@ -508,24 +509,35 @@ class Application:
         if sketch is None:
             return
         if profiles is None:
-            profiles = self.workspace.selected_profiles(sketch)
+            profiles = []
+        if regions is None:
+            regions = []
+        if not profiles and not regions:
+            regions = self.workspace.selected_regions(sketch)
         if cuts is None:
             cuts = self.workspace.selected_cut_profiles(sketch)
         valid = [
             list(profile)
-            for profile in profiles
+            for profile in (profiles or [])
             if len(sketch.loop_points(profile)) >= 3
+        ]
+        valid_regions = [
+            [list(loop) for loop in region]
+            for region in (regions or [])
+            if region
+            and all(len(sketch.loop_points(loop)) >= 3 for loop in region)
         ]
         valid_cuts = [
             list(cut)
             for cut in cuts
             if len(sketch.loop_points(cut)) >= 3
         ]
-        if not valid:
+        if not valid and not valid_regions:
             return
         stack.execute(
             AddExtrudeCommand(
-                document, sketch, profiles=valid, cuts=valid_cuts
+                document, sketch, profiles=valid, regions=valid_regions,
+                cuts=valid_cuts,
             )
         )
         # The sketch is now consumed by the feature; hide it until selected again.

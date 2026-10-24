@@ -2,13 +2,14 @@
 
 import math
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 import pygame
 
 from ..document import Document
 from ..profiles import (
-    build_regions, loop_cuts_selection, point_in_polygon, union_profiles,
+    build_regions, intersect_loops, loop_cuts_selection, point_in_polygon,
+    union_profiles,
 )
 from ..sketch import (
     Measurement,
@@ -134,7 +135,7 @@ class Workspace:
     def __init__(
         self,
         on_new_sketch: Callable[[], None],
-        on_extrude: Callable[[List[List[int]]], None],
+        on_extrude: Callable[..., None],
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point, Optional[str]], None],
         on_add_circle: Callable[[Point, float], None],
@@ -220,8 +221,11 @@ class Workspace:
         self._measurement_edit_pristine = False
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
-        self._selected_loops: List[int] = []
-        self._hover_loop: Optional[int] = None
+        # A selection is a list of arrangement regions.  Each region is a
+        # tuple of loop indices; a single loop is a one-element tuple and
+        # overlapping loops form their intersection (for example a lens).
+        self._selected_regions: List[Tuple[int, ...]] = []
+        self._hover_region: Optional[Tuple[int, ...]] = None
         self._loop_surface: Optional[pygame.Surface] = None
         self._drag_point_index: Optional[int] = None
         self._drag_point_origin: Optional[Point] = None
@@ -350,8 +354,8 @@ class Workspace:
     def _clear_sketch_selection(self) -> None:
         self._selected_sketch_entity = None
         self._hover_sketch_entity = None
-        self._selected_loops.clear()
-        self._hover_loop = None
+        self._selected_regions.clear()
+        self._hover_region = None
         self._drag_point_index = None
         self._drag_point_origin = None
         self._drag_point_current = None
@@ -359,6 +363,23 @@ class Workspace:
         self._drag_edge_origin = None
         self._drag_edge_anchor = None
         self._drag_edge_current = None
+
+    def _select_sketch_region(
+        self, region: Tuple[int, ...], mods: int
+    ) -> None:
+        """Select or Ctrl-toggle an arrangement region of sketch loops."""
+        if mods & pygame.KMOD_CTRL:
+            if region in self._selected_regions:
+                self._selected_regions.remove(region)
+            else:
+                self._selected_regions.append(region)
+            self._selected_sketch_entity = None
+            self._hover_sketch_entity = None
+        else:
+            self._clear_sketch_selection()
+            self._selected_regions = [region]
+            self._hover_region = region
+        self._reset_line_state()
 
     def _reset_line_state(self) -> None:
         self._line_start = None
@@ -448,7 +469,7 @@ class Workspace:
             layout.viewport,
             document,
             self._selected_tool,
-            len(self._valid_selected_loops(
+            len(self._valid_selected_regions(
                 document.sketch(document.active_sketch_id)
             )),
         )
@@ -608,15 +629,21 @@ class Workspace:
         ):
             self._clear_sketch_selection()
         loops = sketch.closed_loops()
-        self._selected_loops = [
-            index for index in self._selected_loops
-            if 0 <= index < len(loops)
+        self._selected_regions = [
+            tuple(index for index in region if 0 <= index < len(loops))
+            for region in self._selected_regions
+        ]
+        self._selected_regions = [
+            region for region in self._selected_regions if region
         ]
         if (
-            self._hover_loop is not None
-            and not 0 <= self._hover_loop < len(loops)
+            self._hover_region is not None
+            and any(
+                not 0 <= index < len(loops)
+                for index in self._hover_region
+            )
         ):
-            self._hover_loop = None
+            self._hover_region = None
 
     @staticmethod
     def _sketch_entity_limit(
@@ -707,7 +734,7 @@ class Workspace:
         self, region: Rect, document: Document
     ) -> List[Tuple[str, pygame.Rect, bool]]:
         sketch = document.sketch(document.active_sketch_id)
-        extrude_ready = bool(self._valid_selected_loops(sketch))
+        extrude_ready = bool(self._valid_selected_regions(sketch))
         states = (
             ("sketch", True),
             ("extrude", extrude_ready),
@@ -1880,17 +1907,23 @@ class Workspace:
             return "line", nearest_line
         return None
 
-    def _pick_sketch_loop(
+    def _pick_sketch_region(
         self, pos: Tuple[int, int], region: Rect, sketch: Sketch
-    ) -> Optional[int]:
-        """Return the smallest closed profile under the cursor."""
+    ) -> Optional[Tuple[int, ...]]:
+        """Return every closed loop that contains the cursor.
+
+        The intersection of all returned loops is the arrangement region
+        under the cursor.  A single loop is a plain profile; several loops
+        describe an overlap such as the lens where a circle crosses a
+        rectangle.  Containers are kept on purpose so that the cutters can
+        exclude loops that already bound the picked region.
+        """
         world = self.viewport.unproject_on_plane(
             pos, region, sketch.frame()
         )
         if world is None:
             return None
-        best: Optional[int] = None
-        best_area = float("inf")
+        hits: List[int] = []
         for index, loop in enumerate(sketch.closed_loops()):
             circle = sketch.circle_for_loop(loop)
             if circle is not None:
@@ -1898,17 +1931,12 @@ class Workspace:
                 distance = math.hypot(
                     world[0] - center[0], world[1] - center[1]
                 )
-                if distance > circle.radius:
-                    continue
+                if distance <= circle.radius:
+                    hits.append(index)
             else:
-                polygon = sketch.loop_points(loop)
-                if not point_in_polygon(world, polygon):
-                    continue
-            area = sketch.loop_area(loop)
-            if area < best_area:
-                best = index
-                best_area = area
-        return best
+                if point_in_polygon(world, sketch.loop_points(loop)):
+                    hits.append(index)
+        return tuple(hits) if hits else None
 
     def _circle_loop_at_point(
         self, sketch: Sketch, point_index: int
@@ -1924,23 +1952,40 @@ class Workspace:
         return None
 
     def selected_profiles(self, sketch: Sketch) -> List[List[int]]:
-        """Return the point loops selected as extrusion faces."""
+        """Return the point loops involved in the current selection.
+
+        This is the legacy single-loop view.  Use :meth:`selected_regions`
+        for extrusion so that overlapping loops keep their arrangement
+        region (for example a lens) instead of being unioned.
+        """
         loops = sketch.closed_loops()
-        return [
-            list(loops[index])
-            for index in sorted(set(self._valid_selected_loops(sketch)))
-            if 0 <= index < len(loops)
-        ]
+        indices: Set[int] = set()
+        for region in self._valid_selected_regions(sketch):
+            indices.update(region)
+        return [list(loops[index]) for index in sorted(indices)]
+
+    def selected_regions(self, sketch: Sketch) -> List[List[List[int]]]:
+        """Return the selected arrangement regions as lists of loops."""
+        loops = sketch.closed_loops()
+        regions: List[List[List[int]]] = []
+        for region in self._valid_selected_regions(sketch):
+            region_loops = [list(loops[index]) for index in region]
+            if region_loops:
+                regions.append(region_loops)
+        return regions
 
     def selected_cut_profiles(self, sketch: Sketch) -> List[List[int]]:
         """Return unselected loops that carve material out of the selection."""
-        loops = sketch.closed_loops()
-        selected = set(self._valid_selected_loops(sketch))
-        if not selected:
+        valid = self._valid_selected_regions(sketch)
+        if not valid:
             return []
-        selected_polygons = [
-            sketch.loop_points(loops[index]) for index in sorted(selected)
-        ]
+        loops = sketch.closed_loops()
+        selected = {index for region in valid for index in region}
+        selected_polygons: List[List[Point]] = []
+        for region in valid:
+            selected_polygons.extend(self._region_polygons(sketch, region))
+        if not selected_polygons:
+            return []
         selected_union = union_profiles(selected_polygons)
         cuts: List[List[int]] = []
         for index, loop in enumerate(loops):
@@ -1953,18 +1998,33 @@ class Workspace:
                 cuts.append(list(loop))
         return cuts
 
-    def _selected_regions(
-        self, sketch: Sketch, indices: List[int]
-    ) -> List[Tuple[List[Point], List[List[Point]]]]:
-        """Return ``(outer, holes)`` polygons for the given loop indices."""
+    def _region_polygons(
+        self, sketch: Sketch, region: Tuple[int, ...]
+    ) -> List[List[Point]]:
+        """Return the arrangement region bounded by the given loops."""
         loops = sketch.closed_loops()
-        selected = {
-            index for index in indices if 0 <= index < len(loops)
-        }
-        selected_polygons = [
-            sketch.loop_points(loops[index]) for index in sorted(selected)
+        polygons = [
+            sketch.loop_points(loops[index])
+            for index in region
+            if 0 <= index < len(loops)
         ]
-        selected_union = union_profiles(selected_polygons)
+        polygons = [polygon for polygon in polygons if len(polygon) >= 3]
+        if not polygons:
+            return []
+        return intersect_loops(polygons)
+
+    def _face_regions(
+        self, sketch: Sketch, regions: List[Tuple[int, ...]]
+    ) -> List[Tuple[List[Point], List[List[Point]]]]:
+        """Return ``(outer, holes)`` faces for the given arrangement regions."""
+        loops = sketch.closed_loops()
+        selected = {index for region in regions for index in region}
+        polygons: List[List[Point]] = []
+        for region in regions:
+            polygons.extend(self._region_polygons(sketch, region))
+        if not polygons:
+            return []
+        selected_union = union_profiles(polygons)
         cutters: List[List[Point]] = []
         for index, loop in enumerate(loops):
             if index in selected:
@@ -1974,16 +2034,22 @@ class Workspace:
                 continue
             if loop_cuts_selection(polygon, selected_union):
                 cutters.append(polygon)
-        return build_regions(selected_polygons, cutters)
+        return build_regions(polygons, cutters)
 
-    def _valid_selected_loops(self, sketch: Optional[Sketch]) -> List[int]:
+    def _valid_selected_regions(
+        self, sketch: Optional[Sketch]
+    ) -> List[Tuple[int, ...]]:
         if sketch is None:
             return []
         count = len(sketch.closed_loops())
-        return [
-            index for index in self._selected_loops
-            if 0 <= index < count
-        ]
+        regions: List[Tuple[int, ...]] = []
+        for region in self._selected_regions:
+            filtered = tuple(
+                index for index in region if 0 <= index < count
+            )
+            if filtered:
+                regions.append(filtered)
+        return regions
 
     def _draw_sketch_loops(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -1993,10 +2059,9 @@ class Workspace:
         if sketch is None:
             return
         loops = sketch.closed_loops()
-        selected_indices = self._valid_selected_loops(sketch)
-        selected = set(selected_indices)
-        hovered = self._hover_loop
-        if not selected and hovered is None:
+        selected_regions = self._valid_selected_regions(sketch)
+        hovered = self._hover_region
+        if not selected_regions and hovered is None:
             return
         previous_clip = surface.get_clip()
         surface.set_clip(region.rect.clip(previous_clip))
@@ -2005,28 +2070,24 @@ class Workspace:
             overlay = pygame.Surface(region.rect.size, pygame.SRCALPHA)
             self._loop_surface = overlay
         overlay.fill((0, 0, 0, 0))
-        selected_regions = self._selected_regions(
-            sketch, selected_indices
-        )
-        for outer, holes in selected_regions:
+        selected_faces = self._face_regions(sketch, selected_regions)
+        for outer, holes in selected_faces:
             self._draw_region_fill(
                 overlay, sketch, outer, holes, region,
                 self.geometry_selection, 70,
             )
         if (
             hovered is not None
-            and hovered not in selected
-            and 0 <= hovered < len(loops)
+            and hovered not in selected_regions
+            and all(0 <= index < len(loops) for index in hovered)
         ):
-            for outer, holes in self._selected_regions(
-                sketch, [hovered]
-            ):
+            for outer, holes in self._face_regions(sketch, [hovered]):
                 self._draw_region_fill(
                     overlay, sketch, outer, holes, region,
                     self.geometry_hover, 45,
                 )
         surface.blit(overlay, region.rect.topleft)
-        for outer, holes in selected_regions:
+        for outer, holes in selected_faces:
             self._draw_region_outline(
                 surface, sketch, outer, holes, region,
                 self.geometry_selection, 2,
@@ -4209,13 +4270,13 @@ class Workspace:
                 ):
                     # Keep the sketch open, but do not leave a hidden sketch
                     # tool armed while another mode is visible.
-                    selected_loops = list(self._selected_loops)
+                    selected_regions = list(self._selected_regions)
                     self._selected_tool = None
                     self._constraint_tool = None
                     self._clear_measure_state()
                     self._reset_line_state()
                     self._clear_sketch_selection()
-                    self._selected_loops = selected_loops
+                    self._selected_regions = selected_regions
                 return True
             if self._settings_rect(layout.toolbar).collidepoint(event.pos):
                 if self.on_settings is not None:
@@ -4341,7 +4402,7 @@ class Workspace:
                     )
                     if hit is not None:
                         kind, index = hit
-                        loop_hit = None
+                        region_hit: Optional[Tuple[int, ...]] = None
                         if (
                             kind == "point"
                             and self._selected_tool is None
@@ -4353,25 +4414,16 @@ class Workspace:
                             loop_hit = self._circle_loop_at_point(
                                 sketch, index
                             )
-                        if loop_hit is not None:
+                            if loop_hit is not None:
+                                region_hit = (loop_hit,)
+                        if region_hit is not None:
                             mods = getattr(event, "mod", 0)
                             if not mods:
                                 mods = pygame.key.get_mods()
-                            if mods & pygame.KMOD_CTRL:
-                                if loop_hit in self._selected_loops:
-                                    self._selected_loops.remove(loop_hit)
-                                else:
-                                    self._selected_loops.append(loop_hit)
-                                self._selected_sketch_entity = None
-                                self._hover_sketch_entity = None
-                            else:
-                                self._clear_sketch_selection()
-                                self._selected_loops = [loop_hit]
-                                self._hover_loop = loop_hit
+                            self._select_sketch_region(region_hit, mods)
                             self._drag_point_index = index
                             self._drag_point_origin = sketch.points[index]
                             self._drag_point_current = sketch.points[index]
-                            self._reset_line_state()
                             return True
                         self._clear_sketch_selection()
                         self._selected_sketch_entity = hit
@@ -4392,30 +4444,19 @@ class Workspace:
                                 index, sketch, event.pos, layout.viewport
                             )
                         return True
-                    loop_hit = None
+                    region_hit = None
                     if (
                         self._selected_tool is None
                         and self._constraint_tool is None
                     ):
-                        loop_hit = self._pick_sketch_loop(
+                        region_hit = self._pick_sketch_region(
                             event.pos, layout.viewport, sketch
                         )
-                    if loop_hit is not None:
+                    if region_hit is not None:
                         mods = getattr(event, "mod", 0)
                         if not mods:
                             mods = pygame.key.get_mods()
-                        if mods & pygame.KMOD_CTRL:
-                            if loop_hit in self._selected_loops:
-                                self._selected_loops.remove(loop_hit)
-                            else:
-                                self._selected_loops.append(loop_hit)
-                            self._selected_sketch_entity = None
-                            self._hover_sketch_entity = None
-                        else:
-                            self._clear_sketch_selection()
-                            self._selected_loops = [loop_hit]
-                            self._hover_loop = loop_hit
-                        self._reset_line_state()
+                        self._select_sketch_region(region_hit, mods)
                         return True
                     self._clear_sketch_selection()
 
@@ -4704,12 +4745,12 @@ class Workspace:
             self.on_new_sketch()
         elif action == "extrude":
             sketch = document.sketch(document.active_sketch_id)
-            profiles = (
-                self.selected_profiles(sketch)
+            regions = (
+                self.selected_regions(sketch)
                 if sketch is not None else []
             )
-            if profiles:
-                self.on_extrude(profiles)
+            if regions:
+                self.on_extrude(regions=regions)
         elif action == "measure":
             self._activate_measure_tool("auto", document)
         elif action == "finish_sketch":
@@ -4736,7 +4777,7 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self._hover_sketch_entity = None
-        self._hover_loop = None
+        self._hover_region = None
         self._hover_measurement_index = None
         if self._line_menu_open:
             self._line_menu_hover = self._line_menu_index_at(
@@ -4953,14 +4994,14 @@ class Workspace:
                 )
                 if loop_hit is not None:
                     self._hover_sketch_entity = None
-                    self._hover_loop = loop_hit
+                    self._hover_region = (loop_hit,)
             if (
                 self._hover_sketch_entity is None
-                and self._hover_loop is None
+                and self._hover_region is None
                 and self._selected_tool is None
                 and self._constraint_tool is None
             ):
-                self._hover_loop = self._pick_sketch_loop(
+                self._hover_region = self._pick_sketch_region(
                     pos, layout.viewport, sketch
                 )
 

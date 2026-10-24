@@ -190,6 +190,54 @@ def _inside_regions(
     return False
 
 
+def intersect_loops(
+    loops: Sequence[Sequence[Sequence[float]]],
+) -> List[Loop]:
+    """Return the boundary loops shared by every given profile.
+
+    This is the arrangement region under a click that lies inside several
+    overlapping loops, such as the lens where a circle crosses a rectangle.
+    """
+    cleaned = _clean_loops(loops)
+    if not cleaned:
+        return []
+    if len(cleaned) == 1:
+        return [cleaned[0]]
+    segments = _split_segments(cleaned)
+    if not segments:
+        return []
+    all_points = [point for segment in segments for point in segment]
+    diagonal = _diagonal(all_points)
+    sample = max(1e-7, diagonal * 1e-6)
+    boundary: List[Segment] = []
+    for start, end in segments:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length <= _EPS:
+            continue
+        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+        normal = (-dy / length, dx / length)
+        left = (
+            middle[0] + normal[0] * sample,
+            middle[1] + normal[1] * sample,
+        )
+        right = (
+            middle[0] - normal[0] * sample,
+            middle[1] - normal[1] * sample,
+        )
+        inside_left = all(
+            point_in_polygon(left, loop) for loop in cleaned
+        )
+        inside_right = all(
+            point_in_polygon(right, loop) for loop in cleaned
+        )
+        if inside_left == inside_right:
+            continue
+        boundary.append((start, end) if inside_left else (end, start))
+    return _trace_loops(boundary)
+
+
 def loop_intersects(
     first: Sequence[Sequence[float]],
     second: Sequence[Sequence[float]],
