@@ -603,16 +603,31 @@ class SceneRenderer:
             )
             frame = sketch.frame()
             for x, y in sketch.points:
-                point = camera.project(
-                    point_on_plane(frame, (x, y)), center
+                self._draw_sketch_point(
+                    surface, color, camera, frame, (x, y), center, radius
                 )
-                center_point = (int(point[0]), int(point[1]))
-                pygame.draw.circle(
-                    surface, color, center_point, radius
+            for circle in sketch.circles:
+                self._draw_sketch_point(
+                    surface, color, camera, frame,
+                    circle.midPoint, center, radius,
                 )
-                pygame.draw.circle(
-                    surface, self.palette.edge, center_point, radius, 1
-                )
+
+    def _draw_sketch_point(
+        self,
+        surface: pygame.Surface,
+        color: Color,
+        camera: OrbitCamera,
+        frame: PlaneFrame,
+        point: Point2,
+        center: Tuple[int, int],
+        radius: int,
+    ) -> None:
+        projected = camera.project(point_on_plane(frame, point), center)
+        center_point = (int(projected[0]), int(projected[1]))
+        pygame.draw.circle(surface, color, center_point, radius)
+        pygame.draw.circle(
+            surface, self.palette.edge, center_point, radius, 1
+        )
 
     @staticmethod
     def _visible_sketches(document: Document) -> Iterator[Sketch]:

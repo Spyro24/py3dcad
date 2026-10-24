@@ -683,6 +683,54 @@ class AddCircleCommand(Command):
         self.document.dirty = True
 
 
+class MoveCircleCommand(Command):
+    """Move a circle by translating its midpoint."""
+
+    kind = "move_circle"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        index: int,
+        center: Point,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.index = index
+        self.center = point2d(center)
+        self.previous: Optional[Point] = None
+        self.next: Optional[Point] = None
+        if 0 <= index < len(sketch.circles):
+            circle = sketch.circles[index]
+            self.previous = point2d(circle.midPoint)
+            self.next = self.center
+
+    @property
+    def label(self) -> str:
+        return "Move Circle"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self.next is None or not 0 <= self.index < len(self.sketch.circles):
+            return
+        self.sketch.circles[self.index].midPoint.set_pos(self.next)
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if (
+            self.previous is None
+            or not 0 <= self.index < len(self.sketch.circles)
+        ):
+            return
+        self.sketch.circles[self.index].midPoint.set_pos(self.previous)
+        self.document.dirty = True
+
+
 class AddExtrudeCommand(Command):
     """Extrude a sketch into a solid feature."""
 
