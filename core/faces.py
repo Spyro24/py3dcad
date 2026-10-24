@@ -680,6 +680,18 @@ def _rim_strip(
             ),
         ))
 
+    # Where two filleted segments meet at a sharp corner their strips share
+    # one trim curve, so drawing it joins the two rounds into a single edge.
+    # A round that fades out onto a smooth junction is closed by a runout
+    # patch instead, and must not repeat that curve here.
+    start_corner = (
+        start_trim > 1e-9
+        and _turn_angle(points, segment) >= SMOOTH_ANGLE
+    )
+    end_corner = (
+        end_trim > 1e-9
+        and _turn_angle(points, (segment + 1) % count) >= SMOOTH_ANGLE
+    )
     faces: List[Face] = []
     for step in range(steps):
         theta = math.pi * 0.5 * (step + 0.5) / steps
@@ -692,16 +704,16 @@ def _rim_strip(
         normal = _blend_normal(
             outward[segment], cap_outward, theta, vertices
         )
-        # Only the four boundaries of the whole quarter round are real edges:
-        # the two tangent lines along the cap and the wall, and the two end
-        # curves where the fillet meets whatever closes it.  Everything
-        # between them is tessellation and stays invisible.
+        # Only the boundaries of the whole quarter round are real edges: the
+        # two tangent lines along the cap and the wall, and the end curves
+        # where the fillet meets whatever closes it.  Everything between them
+        # is tessellation and stays invisible.
         faces.append(Face(
             vertices,
             _normal_color(normal),
             normal,
             "Fillet face",
-            (False, step == steps - 1, False, step == 0),
+            (start_corner, step == steps - 1, end_corner, step == 0),
         ))
     return faces
 
