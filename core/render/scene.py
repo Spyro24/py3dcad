@@ -684,11 +684,12 @@ class SceneRenderer:
     ) -> None:
         """Highlight a selected solid edge in the geometry selection colour."""
         center = rect.center
-        start = camera.project(edge.start, center)
-        end = camera.project(edge.end, center)
         width = max(2, self._s(3))
-        pygame.draw.line(
-            surface, self.palette.edge_selected, start, end, width
+        points = [camera.project(point, center) for point in edge.chain]
+        if len(points) < 2:
+            return
+        pygame.draw.lines(
+            surface, self.palette.edge_selected, False, points, width
         )
 
     def _draw_face_with_holes(

@@ -83,6 +83,17 @@ class Edge:
     # direction when at least one adjacent face faces the viewer.
     normals: Tuple[Point3, ...] = ()
     label: str = "Edge"
+    # Vertices of the smooth run this edge belongs to.  Tessellated arcs and
+    # rounded rims are made of many small straight edges; a selection should
+    # highlight the whole curve, not one mesh segment.
+    points: Tuple[Point3, ...] = ()
+
+    @property
+    def chain(self) -> Tuple[Point3, ...]:
+        """Return the full polyline of this edge, including smooth neighbours."""
+        if len(self.points) >= 2:
+            return self.points
+        return (self.start, self.end)
 
     @property
     def midpoint(self) -> Point3:
@@ -2007,14 +2018,109 @@ def face_for_ref(
 def edge_for_ref(
     document: "Document", reference: Optional[EdgeRef]
 ) -> Optional[Edge]:
-    """Resolve a ``(feature_id, edge_index)`` reference to live geometry."""
+    """Resolve a ``(feature_id, edge_index)`` reference to live geometry.
+
+    The returned edge keeps the endpoints of the picked tessellation segment
+    so fillet and corner queries still see one straight piece, while
+    ``Edge.points`` carries the whole smooth run for highlighting.
+    """
     if reference is None:
         return None
     feature_id, edge_index = reference
-    for current_id, index, edge in iter_solid_edges(document):
-        if current_id == feature_id and index == edge_index:
-            return edge
+    entries = [
+        (index, edge)
+        for current_id, index, edge in iter_solid_edges(document)
+        if current_id == feature_id
+    ]
+    for index, edge in entries:
+        if index != edge_index:
+            continue
+        points = _edge_run_points(entries, edge_index)
+        if len(points) > 2:
+            return Edge(
+                edge.start,
+                edge.end,
+                edge.normals,
+                edge.label,
+                tuple(points),
+            )
+        return edge
     return None
+
+
+def _edge_run_points(
+    entries: Sequence[Tuple[int, Edge]], edge_index: int
+) -> List[Point3]:
+    """Return the polyline of smooth segments connected to one edge.
+
+    Tessellated arcs and rounded rims are stored as separate straight edges.
+    Walking through shared endpoints and smooth joints recovers the whole
+    curve so a selected arc is highlighted in full instead of as one mesh
+    segment.
+    """
+    segments = {index: edge for index, edge in entries}
+    seed = segments.get(edge_index)
+    if seed is None:
+        return []
+    incident: Dict[Tuple[float, ...], List[int]] = {}
+    for index, edge in segments.items():
+        incident.setdefault(_vertex_key(edge.start), []).append(index)
+        incident.setdefault(_vertex_key(edge.end), []).append(index)
+    used = {edge_index}
+    points = [seed.start, seed.end]
+    normals = list(seed.normals)
+    for reverse in (False, True):
+        while True:
+            anchor = points[0] if reverse else points[-1]
+            previous = points[1] if reverse else points[-2]
+            incoming = _subtract(anchor, previous)
+            best: Optional[
+                Tuple[float, int, Point3, Tuple[Point3, ...]]
+            ] = None
+            for index in incident.get(_vertex_key(anchor), ()):
+                if index in used:
+                    continue
+                edge = segments[index]
+                if _vertex_key(edge.start) == _vertex_key(anchor):
+                    other = edge.end
+                elif _vertex_key(edge.end) == _vertex_key(anchor):
+                    other = edge.start
+                else:
+                    continue
+                turn = _angle_between(
+                    incoming, _subtract(other, anchor)
+                )
+                if turn >= SMOOTH_ANGLE:
+                    continue
+                if not _shares_normal(normals, edge.normals):
+                    continue
+                if best is None or turn < best[0]:
+                    best = (turn, index, other, edge.normals)
+            if best is None:
+                break
+            _, index, other, candidate_normals = best
+            used.add(index)
+            normals.extend(candidate_normals)
+            if reverse:
+                points.insert(0, other)
+            else:
+                points.append(other)
+    return points
+
+
+def _vertex_key(point: Point3) -> Tuple[float, ...]:
+    """Return a stable key for one mesh vertex."""
+    return tuple(round(value, 6) for value in point)
+
+
+def _shares_normal(
+    first: Sequence[Point3], second: Sequence[Point3]
+) -> bool:
+    """Return whether two edges touch a common face."""
+    return any(
+        _dot(_unit(a), _unit(b)) > 0.999
+        for a in first for b in second
+    )
 
 
 def iter_solid_edges(
