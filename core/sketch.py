@@ -1400,6 +1400,45 @@ class Sketch:
                 )
         self.measurements = measurements
 
+    def remove_edge(self, index: int) -> None:
+        """Remove one edge and any measurement that depends on it."""
+        if not 0 <= index < len(self.edges):
+            return
+        del self.edges[index]
+        if index < len(self.edge_constraints):
+            del self.edge_constraints[index]
+        measurements: List[Measurement] = []
+        for measurement in self.measurements:
+            first = self._remap_removed_edge_ref(
+                measurement.first, index
+            )
+            second = self._remap_removed_edge_ref(
+                measurement.second, index
+            )
+            if first is not None and second is not None:
+                measurements.append(
+                    Measurement(
+                        measurement.kind,
+                        first,
+                        second,
+                        measurement.placement,
+                        measurement.value,
+                    )
+                )
+        self.measurements = measurements
+
+    @staticmethod
+    def _remap_removed_edge_ref(
+        ref: Tuple[str, int], removed: int
+    ) -> Optional[Tuple[str, int]]:
+        """Shift a line measurement past a deleted edge."""
+        kind, index = ref
+        if kind != "line":
+            return ref
+        if index == removed:
+            return None
+        return (kind, index - 1 if index > removed else index)
+
     @staticmethod
     def _remap_measurement_ref(
         ref: Tuple[str, int],

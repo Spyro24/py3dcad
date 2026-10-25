@@ -19,6 +19,7 @@ from .commands import (
     AddRectangleCommand,
     AddSketchCommand,
     CommandStack,
+    DeleteSketchEntitiesCommand,
     MoveEdgeCommand,
     MovePointCommand,
     SetEdgeConstraintCommand,
@@ -205,6 +206,7 @@ class Application:
             on_set_measurement_placement=self.set_measurement_placement,
             on_set_measurement_value=self.set_measurement_value,
             on_fillet=self.add_fillet,
+            on_delete_sketch=self.delete_sketch_entities,
         )
         self.save_dialog = SaveDialog(self._save_to)
         self.settings_dialog = SettingsDialog(self._set_orientation_cube)
@@ -489,6 +491,28 @@ class Application:
         stack.execute(
             AddCircleCommand(document, sketch, center, diameter)
         )
+
+    def delete_sketch_entities(
+        self,
+        entity: Optional[Tuple[str, int]],
+        loops: List[List[int]],
+    ) -> bool:
+        """Delete the selected sketch geometry as one undoable action."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return False
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return False
+        command = DeleteSketchEntitiesCommand(
+            document, sketch, entity, loops
+        )
+        if not command.has_targets:
+            return False
+        stack.execute(command)
+        return True
 
     def move_point(self, index: int, point: Point) -> None:
         self._playing = False

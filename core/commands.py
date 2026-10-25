@@ -1,5 +1,6 @@
 """Undoable document editing commands."""
 
+import copy
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
@@ -817,6 +818,142 @@ class AddCircleCommand(Command):
                 continue
             self.sketch.remove_point(index)
         self.created_points = []
+        self.document.dirty = True
+
+
+class DeleteSketchEntitiesCommand(Command):
+    """Delete points, edges or closed loops from a sketch.
+
+    Deletion can remove several edges and points at once, so the command
+    keeps one snapshot of the sketch state instead of trying to replay each
+    individual removal in reverse.
+    """
+
+    kind = "delete"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        entity: Optional[Tuple[str, int]] = None,
+        loops: Optional[List[List[int]]] = None,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.entity = entity
+        self.loops = [list(loop) for loop in (loops or [])]
+        self._before = None
+        self.edge_indices: List[int] = []
+        self.point_indices: List[int] = []
+        self._plan()
+
+    def _plan(self) -> None:
+        """Work out which edges and points the selection covers."""
+        sketch = self.sketch
+        edges = set()
+        points = set()
+        candidates = set()
+
+        if self.entity is not None:
+            kind, index = self.entity
+            if kind == "point" and 0 <= index < len(sketch.points):
+                points.add(index)
+            elif kind == "line" and 0 <= index < len(sketch.edges):
+                edges.add(index)
+                candidates.update(sketch.edges[index])
+
+        for loop in self.loops:
+            if not loop:
+                continue
+            circle = sketch.circle_for_loop(loop)
+            if circle is not None:
+                midpoint = sketch.point_index(circle.midPoint)
+                if midpoint is not None:
+                    points.add(midpoint)
+                continue
+            following = loop[1:] + loop[:1]
+            for first, second in zip(loop, following):
+                if first == second:
+                    continue
+                for edge_index, (start, end) in enumerate(sketch.edges):
+                    if edge_index in edges:
+                        continue
+                    if (
+                        (start == first and end == second)
+                        or (start == second and end == first)
+                    ):
+                        edges.add(edge_index)
+                        break
+            candidates.update(loop)
+
+        edges = {
+            index for index in edges if 0 <= index < len(sketch.edges)
+        }
+        points = {
+            index for index in points if 0 <= index < len(sketch.points)
+        }
+        candidates = {
+            index
+            for index in candidates
+            if 0 <= index < len(sketch.points)
+        }
+
+        # Endpoints that no surviving edge or circle uses disappear with the
+        # geometry that owned them.  A free point elsewhere is untouched.
+        remaining = [
+            edge
+            for index, edge in enumerate(sketch.edges)
+            if index not in edges
+        ]
+        used = {index for edge in remaining for index in edge}
+        for circle in sketch.circles:
+            midpoint = sketch.point_index(circle.midPoint)
+            if midpoint is not None and midpoint not in points:
+                used.add(midpoint)
+        points |= candidates - used - points
+
+        self.edge_indices = sorted(edges)
+        self.point_indices = sorted(points)
+
+    @property
+    def has_targets(self) -> bool:
+        return bool(self.edge_indices or self.point_indices)
+
+    @property
+    def label(self) -> str:
+        return "Delete"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        if self._before is None:
+            self._before = copy.deepcopy((
+                self.sketch.points,
+                self.sketch.edges,
+                self.sketch.edge_constraints,
+                self.sketch.circles,
+                self.sketch.measurements,
+            ))
+        for index in sorted(self.edge_indices, reverse=True):
+            self.sketch.remove_edge(index)
+        for index in sorted(self.point_indices, reverse=True):
+            self.sketch.remove_point(index)
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self._before is None:
+            return
+        (
+            points, edges, constraints, circles, measurements
+        ) = copy.deepcopy(self._before)
+        self.sketch.points = points
+        self.sketch.edges = edges
+        self.sketch.edge_constraints = constraints
+        self.sketch.circles = circles
+        self.sketch.measurements = measurements
         self.document.dirty = True
 
 

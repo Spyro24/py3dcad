@@ -184,6 +184,9 @@ class Workspace:
         on_fillet: Optional[
             Callable[[float], Optional[str]]
         ] = None,
+        on_delete_sketch: Optional[
+            Callable[[Optional[Tuple[str, int]], List[List[int]]], bool]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -205,6 +208,7 @@ class Workspace:
         )
         self.on_set_measurement_value = on_set_measurement_value
         self.on_fillet = on_fillet
+        self.on_delete_sketch = on_delete_sketch
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -395,6 +399,44 @@ class Workspace:
         self._drag_edge_origin = None
         self._drag_edge_anchor = None
         self._drag_edge_current = None
+
+    def delete_sketch_selection(self, document: Document) -> bool:
+        """Delete the selected point, edge, circle or closed profile."""
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return False
+        entity = self._selected_sketch_entity
+        if entity is not None:
+            kind, index = entity
+            limit = self._sketch_entity_limit(sketch, kind)
+            if limit is None or not 0 <= index < limit:
+                entity = None
+        if entity is None and self.on_delete_sketch is None:
+            return False
+        loops = sketch.closed_loops()
+        chosen = set()
+        for region in self._valid_selected_regions(sketch):
+            valid = [
+                index for index in region if 0 <= index < len(loops)
+            ]
+            if not valid:
+                continue
+            # A click inside nested loops selects their arrangement region.
+            # Deleting the innermost loop removes the object under the
+            # cursor instead of the container around it.
+            chosen.add(
+                min(valid, key=lambda index: sketch.loop_area(loops[index]))
+            )
+        targets = [list(loops[index]) for index in sorted(chosen)]
+        if entity is None and not targets:
+            return False
+        if self.on_delete_sketch is None:
+            return False
+        if not self.on_delete_sketch(entity, targets):
+            return False
+        self._clear_sketch_selection()
+        self._clear_measure_state()
+        return True
 
     def _select_sketch_region(
         self, region: Tuple[int, ...], mods: int
@@ -4192,6 +4234,14 @@ class Workspace:
         active_sketch = document.sketch(document.active_sketch_id)
 
         if self._handle_measurement_edit_event(event, document):
+            return True
+
+        if (
+            event.type == pygame.KEYDOWN
+            and event.key == pygame.K_DELETE
+            and active_sketch is not None
+            and self.delete_sketch_selection(document)
+        ):
             return True
 
         # A click outside the open line-style menu dismisses it without
