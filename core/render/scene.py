@@ -135,6 +135,7 @@ class SceneRenderer:
         rect: pygame.Rect,
         document: Document,
         camera: OrbitCamera,
+        preview_document: Optional[Document] = None,
     ) -> None:
         self._init_fonts()
         active = document.sketch(document.active_sketch_id)
@@ -150,7 +151,9 @@ class SceneRenderer:
             self._draw_axes(surface, rect, camera)
             self._draw_origin_marker(surface, rect, camera)
         self._draw_sketch_lines(surface, rect, document, camera)
-        self._draw_solids(surface, rect, document, camera)
+        self._draw_solids(
+            surface, rect, preview_document or document, camera
+        )
         if custom_active:
             # A face sketch lives on top of its solid, so its local grid and
             # the sketch itself must render after the solid faces.

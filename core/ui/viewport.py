@@ -124,6 +124,7 @@ class Viewport:
         document: Document,
         active_tool: Optional[str] = None,
         selected_profiles: int = 0,
+        preview_document: Optional[Document] = None,
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -133,7 +134,10 @@ class Viewport:
         previous_clip = surface.get_clip()
         surface.set_clip(region.rect)
 
-        self.renderer.draw(surface, region.rect, document, self.camera)
+        self.renderer.draw(
+            surface, region.rect, document, self.camera,
+            preview_document=preview_document,
+        )
         if self.show_orientation_cube:
             self.renderer.draw_orientation_cube(
                 surface, region.rect, self.camera

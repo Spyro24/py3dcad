@@ -336,6 +336,12 @@ class Workspace:
     def set_orientation_cube_visible(self, visible: bool) -> None:
         self.viewport.show_orientation_cube = bool(visible)
 
+    def fillet_preview_radius(self) -> Optional[float]:
+        """Return the radius to preview, or None when no fillet is open."""
+        if not self.fillet_window.visible:
+            return None
+        return self.fillet_window.radius()
+
     def set_origin_visible(self, visible: bool) -> None:
         """Show or hide the origin planes, axes and marker."""
         self._origin_visible = bool(visible)
@@ -489,6 +495,7 @@ class Workspace:
         full_history: List[HistoryEntry],
         position: int,
         playing: bool,
+        preview_document: Optional[Document] = None,
     ) -> None:
         self._init_fonts()
         self._sync_history_document(document)
@@ -502,6 +509,7 @@ class Workspace:
             len(self._valid_selected_regions(
                 document.sketch(document.active_sketch_id)
             )),
+            preview_document=preview_document,
         )
         self._draw_sketch_loops(surface, layout.viewport, document)
         self._draw_line_preview(surface, layout.viewport, document)
