@@ -527,6 +527,14 @@ class SceneRenderer:
             List[Tuple[bool, float]],
         ] = {}
         smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]] = set()
+        # Smooth seams have no outline, so a rasterization gap between the two
+        # fills would show the background straight through the solid.  Keep
+        # the projected span and colour of every visible smooth edge so the
+        # nearer panel can seal it after both fills are down.
+        seams: Dict[
+            Tuple[Tuple[float, ...], Tuple[float, ...]],
+            List[Tuple[float, Color, Point2, Point2]],
+        ] = {}
         for feature_id, face_index, face in iter_solid_faces(document):
             front = (face.normal[0] * view_dir[0] +
                      face.normal[1] * view_dir[1] +
@@ -555,6 +563,24 @@ class SceneRenderer:
                 face.color,
                 face.sharp_edges,
             ))
+            sharp = face.sharp_edges
+            if sharp is None:
+                continue
+            depth = camera.depth(face.vertices)
+            count = len(face.vertices)
+            for index in range(count):
+                if index >= len(sharp) or sharp[index]:
+                    continue
+                start = face.vertices[index]
+                end = face.vertices[(index + 1) % count]
+                if start == end:
+                    continue
+                seams.setdefault(self._edge_key(start, end), []).append((
+                    depth,
+                    face.color,
+                    polygon[index],
+                    polygon[(index + 1) % count],
+                ))
 
         faces.sort(key=lambda item: item[0])
         width = self._s(1)
@@ -576,13 +602,25 @@ class SceneRenderer:
                 center, camera, sides, smooth
             )
         )
+        # Only an edge shared by two visible panels can be a crack through the
+        # solid.  Drawing it at the nearer panel's depth lets a genuinely
+        # closer face painted afterwards still cover the seal.
+        for owners in seams.values():
+            if len(owners) != 2:
+                continue
+            near = max(owners, key=lambda owner: owner[0])
+            items.append((near[0], 2, near[1:]))
         items.sort(key=lambda item: (item[0], item[1]))
         for _, kind, payload in items:
-            if kind:
+            if kind == 1:
                 start, end = payload  # type: ignore[misc]
                 pygame.draw.line(
                     surface, self.palette.edge, start, end, width
                 )
+                continue
+            if kind == 2:
+                color, start, end = payload  # type: ignore[misc]
+                pygame.draw.line(surface, color, start, end, width)
                 continue
             (
                 _, feature_id, face_index, polygon, holes, color, sharp_edges

@@ -15,6 +15,8 @@ PY3DCAD: sketches and features driven by named parameters. UI in pygame-ce only.
 - 3D = project triangles to 2D and draw with pygame; no 3D libs.
 - Type hints on public functions. Functions under ~40 lines. No global state.
 - Save format: JSON with `"format": 1`.
+- The objects are Volumetric objects, the rendered mesh of them has to be water thight
+- calculations have to be effiecient
 
 ## Workflow
 - Run: `python main.py`

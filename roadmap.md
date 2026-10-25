@@ -1,5 +1,46 @@
 # Roadmap - PY3DCAD (Python + pygame-ce)
 
+## Workspaces
+[ ] Design
+[ ] Animation
+[ ] Rendering
+[ ] Prototyping (3dprint)
+[ ] CAM
+
+## Tools
+workspaces/design/sketch/create
+[x] Point
+[x] Line
+[ ] Midpoint Line
+[x] 2 Point Rectangle
+[ ] Center Rectangle
+[ ] 3 Point Rectangle
+[ ] Rounded Rectangle
+[x] Center Diameter Circle
+[ ] 2 Point Circle
+[ ] 3 Point Circle
+[ ] 2 Tangent Circle
+[ ] 3 Tangent Circle
+workspaces/design/sketch/constrain
+[x] Sketch Dimension
+[x] Horizontal/Vertical
+[ ] Coincident
+[ ] Tangent
+[ ] Equal
+[ ] Parallel
+[ ] Perpendicular
+[ ] Fix/UnFix
+[ ] Midpoint
+[ ] Concentric
+[ ] Colliniear
+[ ] Symmetry
+[ ] Autoconstrain
+workspaces/design/solid
+[x] Create Sketch2d
+[x] Extrude
+[x] Fillet
+[ ] Champfer
+
 ## M1 - Foundation
 - Window, main loop, event handling
 - 2D viewport with pan and zoom
