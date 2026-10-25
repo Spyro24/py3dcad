@@ -1718,9 +1718,17 @@ def _rounded_segment_sources(
 
 
 def _expand_rim_radii(
-    original_radii: Sequence[float], sources: Sequence[int]
+    original_radii: Sequence[float],
+    sources: Sequence[int],
+    rounded: Optional[Sequence[Point2]] = None,
 ) -> List[float]:
-    """Spread per-profile-segment cap radii over a rounded loop."""
+    """Spread per-profile-segment cap radii over a rounded loop.
+
+    A cap fillet follows the tangent-continuous edge it was placed on.  When
+    that edge passes through a rounded vertical corner, the round has to keep
+    going onto the straight edge behind the corner instead of collapsing on
+    the last tessellation chord, which would leave a beak at the junction.
+    """
     expanded: List[float] = []
     for source in sources:
         if source >= 0:
@@ -1740,7 +1748,44 @@ def _expand_rim_radii(
         )
         values = [value for value in (previous, following) if value > 0.0]
         expanded.append(min(values) if values else 0.0)
+    if rounded is not None:
+        _carry_rim_radii(expanded, sources, rounded)
     return expanded
+
+
+def _carry_rim_radii(
+    radii: List[float],
+    sources: Sequence[int],
+    rounded: Sequence[Point2],
+) -> None:
+    """Carry a cap fillet along the tangent seams of rounded corners.
+
+    Only seams that come from a rounded vertical corner seed the walk.  A
+    tessellated sketch arc is not a corner, so filleting one of its segments
+    must not silently grow the round over the whole arc.
+    """
+    count = len(radii)
+    if count < 3:
+        return
+    seeds = [
+        index for index, source in enumerate(sources)
+        if source < 0 and radii[index] > 1e-9
+    ]
+    pending = list(seeds)
+    seen = set(seeds)
+    while pending:
+        index = pending.pop()
+        for neighbour in ((index - 1) % count, (index + 1) % count):
+            if neighbour in seen or radii[neighbour] > 1e-9:
+                continue
+            vertex = (
+                neighbour if neighbour == (index + 1) % count else index
+            )
+            if _turn_angle(rounded, vertex) >= SMOOTH_ANGLE:
+                continue
+            radii[neighbour] = radii[index]
+            seen.add(neighbour)
+            pending.append(neighbour)
 
 
 def profile_segment_key(
@@ -1938,8 +1983,12 @@ def iter_solid_faces(
                     min(value, limit)
                     for value, limit in zip(end, limits)
                 ]
-                base_radii.append(_expand_rim_radii(base, sources))
-                end_radii.append(_expand_rim_radii(end, sources))
+                base_radii.append(
+                    _expand_rim_radii(base, sources, rounded)
+                )
+                end_radii.append(
+                    _expand_rim_radii(end, sources, rounded)
+                )
             faces, runs = _prism_faces_with_runs(
                 rounded_outer,
                 feature.height,
