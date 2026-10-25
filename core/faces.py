@@ -312,6 +312,32 @@ def _turn_angle(points: Sequence[Point2], vertex: int) -> float:
     return abs(math.atan2(cross, dot))
 
 
+def _corner_needs_taper(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    segment: int,
+    at_start: bool,
+) -> bool:
+    """Return whether a cap fillet has to fade out at one of its ends.
+
+    A round that meets a sharp corner at exactly ninety degrees is closed by
+    the neighbouring panel: the fillet's end ring lies in that panel and the
+    panel is cut back to it.  At any other angle the ring and the panel cut
+    are different curves and would leave a wedge-shaped crack, so the round
+    fades to nothing on the sharp edge instead.  Smooth tessellation seams
+    are always tapered for the same reason.  Concave corners are closed by
+    their runout patch and keep their existing boundary.
+    """
+    count = len(points)
+    vertex = segment if at_start else (segment + 1) % count
+    angle = _turn_angle(points, vertex)
+    if angle < SMOOTH_ANGLE:
+        return True
+    if _concave_runout(points, inward, segment, at_start):
+        return False
+    return abs(angle - 0.5 * math.pi) > 1e-3
+
+
 def _concave_runout(
     points: Sequence[Point2],
     inward: Sequence[Point2],
@@ -409,13 +435,13 @@ def _fillet_taper(
     start = 0.0
     if (
         float(radii[segment - 1]) <= 1e-9
-        and _turn_angle(points, segment) < SMOOTH_ANGLE
+        and _corner_needs_taper(points, inward, segment, True)
     ):
         start = min(radius, length)
     end = 0.0
     if (
         float(radii[following]) <= 1e-9
-        and _turn_angle(points, following) < SMOOTH_ANGLE
+        and _corner_needs_taper(points, inward, segment, False)
     ):
         end = min(radius, length)
     if start + end > length:
@@ -499,7 +525,7 @@ def _segment_stations(
     last = length - end_trim if end_trim > 1e-9 else length
     if start_taper <= 1e-9 and end_taper <= 1e-9:
         return [(0.0, radius), (length, radius)]
-    values = {0.0, length, first, last}
+    values = {0.0, length}
     if start_taper > 1e-9:
         span = min(first + start_taper, last) - first
         values.update(
@@ -510,8 +536,11 @@ def _segment_stations(
         values.update(
             last - span * step / steps for step in range(1, steps + 1)
         )
-    if start_taper > 1e-9 and end_taper > 1e-9:
-        # The two fades may overlap; sample their peak as well so the
+    if (
+        start_taper > 1e-9 and end_taper > 1e-9
+        and start_taper + end_taper >= last - first - 1e-9
+    ):
+        # The two fades overlap; sample their peak as well so the
         # silhouette of a short segment is not cut off between stations.
         peak = first + (last - first) * 0.5
         values.add(peak)
@@ -578,11 +607,12 @@ def _append_taper_cap(
     inward: Sequence[Point2],
     radii: Sequence[float],
     segment: int,
+    at_start: bool,
 ) -> None:
     """Append the cap boundary where a fillet fades out along its segment.
 
-    Only the interior stations are emitted; the neighbouring miter and the
-    sharp vertex are added by :func:`_cap_loop` itself.
+    Only the stations inside the fade are emitted, in the direction the cap
+    loop travels, and the sharp vertex itself is added by :func:`_cap_loop`.
     """
     count = len(points)
     following = (segment + 1) % count
@@ -596,11 +626,22 @@ def _append_taper_cap(
         (points[following][0] - points[segment][0]) / length,
         (points[following][1] - points[segment][1]) / length,
     )
-    for distance, current in _strip_stations(
-        points, inward, radii, segment
-    ):
-        if distance <= 1e-9 or distance >= length - 1e-9:
-            continue
+    start_taper, end_taper = _fillet_taper(points, inward, radii, segment)
+    taper = start_taper if at_start else end_taper
+    if taper <= 1e-9:
+        return
+    stations = _strip_stations(points, inward, radii, segment)
+    for distance, current in stations:
+        if at_start:
+            if distance <= 1e-9:
+                continue
+            if distance > taper + 1e-9:
+                break
+        else:
+            if distance < length - taper - 1e-9:
+                continue
+            if distance >= length - 1e-9:
+                break
         _append_point(result, (
             points[segment][0] + direction[0] * distance
             + inward[segment][0] * current,
@@ -666,7 +707,7 @@ def _cap_loop(
                 # The round grows out of the sharp vertex along the edge.
                 _append_point(result, points[index])
                 _append_taper_cap(
-                    result, points, inward, radii, index
+                    result, points, inward, radii, index, True
                 )
             else:
                 offset = (
@@ -682,7 +723,7 @@ def _cap_loop(
             if end_taper > 1e-9:
                 # The round shrinks back onto the sharp vertex.
                 _append_taper_cap(
-                    result, points, inward, radii, previous
+                    result, points, inward, radii, previous, False
                 )
                 _append_point(result, points[index])
             else:
@@ -1403,14 +1444,20 @@ def _side_faces(
         end_bottom: List[Point3] = []
         end_top: List[Point3] = []
         if bottom_offsets is not None:
-            if _turn_angle(points, index) >= SMOOTH_ANGLE:
+            if (
+                _turn_angle(points, index) >= SMOOTH_ANGLE
+                and bottom_tapers[prev][1] <= 1e-9
+            ):
                 start_bottom = _corner_cut(
                     base[index], forward,
                     _map_direction(inward_2d[prev], frame),
                     bottom_axis_out,
                     float(bottom_offsets[prev]), bottom_offset,
                 )
-            if _turn_angle(points, nxt) >= SMOOTH_ANGLE:
+            if (
+                _turn_angle(points, nxt) >= SMOOTH_ANGLE
+                and bottom_tapers[nxt][0] <= 1e-9
+            ):
                 end_bottom = _corner_cut(
                     base[nxt], backward,
                     _map_direction(inward_2d[nxt], frame),
@@ -1418,14 +1465,20 @@ def _side_faces(
                     float(bottom_offsets[nxt]), bottom_offset,
                 )
         if top_offsets is not None:
-            if _turn_angle(points, index) >= SMOOTH_ANGLE:
+            if (
+                _turn_angle(points, index) >= SMOOTH_ANGLE
+                and top_tapers[prev][1] <= 1e-9
+            ):
                 start_top = _corner_cut(
                     top[index], forward,
                     _map_direction(inward_2d[prev], frame),
                     top_axis_out,
                     float(top_offsets[prev]), top_offset,
                 )
-            if _turn_angle(points, nxt) >= SMOOTH_ANGLE:
+            if (
+                _turn_angle(points, nxt) >= SMOOTH_ANGLE
+                and top_tapers[nxt][0] <= 1e-9
+            ):
                 end_top = _corner_cut(
                     top[nxt], backward,
                     _map_direction(inward_2d[nxt], frame),
