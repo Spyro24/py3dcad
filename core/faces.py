@@ -751,6 +751,33 @@ def _append_point(points: List[Point2], point: Point2) -> None:
     points.append(point)
 
 
+def _offset_radius_limit(
+    points: Sequence[Point2],
+    lengths: Sequence[float],
+    index: int,
+) -> float:
+    """Return the largest radius whose miters still fit in one segment.
+
+    A tessellated arc has short chords but a large curvature radius, so the
+    chord length alone must not cap the fillet.  The miter at a joint is
+    ``r * tan(turn / 2)``; requiring both miters to fit leaves a smooth arc
+    with almost its curvature radius of room, while a sharp corner keeps the
+    old ``0.45 * length`` bound.
+    """
+    count = len(points)
+    start = _turn_angle(points, index)
+    end = _turn_angle(points, (index + 1) % count)
+    spread = (
+        math.tan(min(start, math.pi * 0.5) * 0.5)
+        + math.tan(min(end, math.pi * 0.5) * 0.5)
+    )
+    if spread <= 1e-9:
+        # A straight segment has no curvature to pay for; keep the classic
+        # chord bound so a short edge cannot take an oversized round.
+        return 0.45 * lengths[index]
+    return 0.9 * lengths[index] / spread
+
+
 def _clamp_rim_radii(
     points: Sequence[Point2],
     zero_radii: Sequence[float],
@@ -767,14 +794,18 @@ def _clamp_rim_radii(
         for index in range(count)
     ]
     limit = 0.45 * abs(height)
+    spans = [
+        _offset_radius_limit(points, lengths, index)
+        for index in range(count)
+    ]
     clamped_zero: List[float] = []
     clamped_height: List[float] = []
     for index in range(count):
         local = min(
             limit,
-            0.45 * lengths[index],
-            0.45 * lengths[index - 1],
-            0.45 * lengths[(index + 1) % count],
+            spans[index],
+            spans[index - 1],
+            spans[(index + 1) % count],
         )
         local = max(0.0, local)
         clamped_zero.append(
@@ -1749,28 +1780,26 @@ def _expand_rim_radii(
         values = [value for value in (previous, following) if value > 0.0]
         expanded.append(min(values) if values else 0.0)
     if rounded is not None:
-        _carry_rim_radii(expanded, sources, rounded)
+        _carry_rim_radii(expanded, rounded)
     return expanded
 
 
 def _carry_rim_radii(
     radii: List[float],
-    sources: Sequence[int],
     rounded: Sequence[Point2],
 ) -> None:
-    """Carry a cap fillet along the tangent seams of rounded corners.
+    """Carry a cap fillet along the smooth run of the selected edge.
 
-    Only seams that come from a rounded vertical corner seed the walk.  A
-    tessellated sketch arc is not a corner, so filleting one of its segments
-    must not silently grow the round over the whole arc.
+    A tessellated arc is stored as many short straight segments.  The user
+    selects and sees the whole run, so the round must be generated for the
+    whole run too; tapering it inside one chord would leave a tiny loop on
+    the arc.  Sharp junctions still stop the walk, which keeps the round on
+    the edge the user picked.
     """
     count = len(radii)
     if count < 3:
         return
-    seeds = [
-        index for index, source in enumerate(sources)
-        if source < 0 and radii[index] > 1e-9
-    ]
+    seeds = [index for index, value in enumerate(radii) if value > 1e-9]
     pending = list(seeds)
     seen = set(seeds)
     while pending:
