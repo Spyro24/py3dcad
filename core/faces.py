@@ -135,15 +135,15 @@ def _clamp_fillet_loops(
     ],
     height: float,
 ) -> Tuple[List[List[float]], List[List[float]]]:
-    """Clamp cap fillet radii for a plain, unrounded prism."""
+    """Clamp cap fillet radii so every loop stays watertight."""
     loops = [points, *(hole for hole in holes if len(hole) >= 3)]
     clamped: Tuple[List[List[float]], List[List[float]]] = ([], [])
     for index, loop in enumerate(loops):
         zero = fillets[0][index] if index < len(fillets[0]) else ()
         top = fillets[1][index] if index < len(fillets[1]) else ()
         zero, top = _clamp_rim_radii(loop, zero, top, height)
-        clamped[0].append(zero)
-        clamped[1].append(top)
+        clamped[0].append(_even_corner_radii(zero))
+        clamped[1].append(_even_corner_radii(top))
     return clamped
 
 
@@ -817,6 +817,41 @@ def _clamp_rim_radii(
             if index < len(height_radii) else 0.0
         )
     return clamped_zero, clamped_height
+
+
+def _even_corner_radii(radii: Sequence[float]) -> List[float]:
+    """Give every connected cap-fillet run a single radius.
+
+    Two fillet strips with different radii cannot share a corner: their end
+    rings and the side-panel cuts stop matching, which opens a lens-shaped
+    crack along the seam.  Connected fillets therefore adopt the smallest
+    radius of their run so every joint stays watertight.  An unfilleted
+    segment has radius zero and separates runs, so a fillet that fades out
+    onto the profile rim keeps its own size.
+    """
+    values = [float(value) if value > 1e-9 else 0.0 for value in radii]
+    count = len(values)
+    seen = [False] * count
+    for start in range(count):
+        if seen[start] or values[start] <= 1e-9:
+            continue
+        run: List[int] = []
+        pending = [start]
+        seen[start] = True
+        while pending:
+            index = pending.pop()
+            run.append(index)
+            for neighbour in ((index - 1) % count, (index + 1) % count):
+                if (
+                    not seen[neighbour]
+                    and values[neighbour] > 1e-9
+                ):
+                    seen[neighbour] = True
+                    pending.append(neighbour)
+        smallest = min(values[index] for index in run)
+        for index in run:
+            values[index] = smallest
+    return values
 
 
 def _loop_inward_2d(
@@ -1678,17 +1713,16 @@ def rim_fillet_radii(
     return radii
 
 
-def _vertical_radius_limits(
+def _vertical_vertex_limits(
     loop: Sequence[Point2], fillets: Sequence["Fillet"]
 ) -> List[float]:
-    """Return the cap radius each profile segment can carry at a corner.
+    """Return the cap radius each rounded profile vertex allows.
 
     A cap fillet that wraps around a rounded vertical corner becomes a torus.
     Its radius has to stay below the vertical corner radius or the inset cap
-    loop would turn inside out.
+    loop would turn inside out.  ``inf`` marks a sharp vertex.
     """
-    count = len(loop)
-    limits = [float("inf")] * count
+    limits = [float("inf")] * len(loop)
     for fillet in fillets:
         if fillet.kind != "vertical" or fillet.radius <= 0.0:
             continue
@@ -1697,11 +1731,59 @@ def _vertical_radius_limits(
                 abs(x - fillet.u) <= 1e-4
                 and abs(y - fillet.v) <= 1e-4
             ):
-                limit = 0.9 * fillet.radius
-                for segment in ((vertex - 1) % count, vertex):
-                    limits[segment] = min(limits[segment], limit)
+                limits[vertex] = min(limits[vertex], 0.9 * fillet.radius)
                 break
     return limits
+
+
+def _vertical_radius_limits(
+    loop: Sequence[Point2], fillets: Sequence["Fillet"]
+) -> List[float]:
+    """Return the cap radius each profile segment can carry at its ends."""
+    count = len(loop)
+    vertex = _vertical_vertex_limits(loop, fillets)
+    return [
+        min(vertex[index], vertex[(index + 1) % count])
+        for index in range(count)
+    ]
+
+
+def _rounded_vertical_limits(
+    original: Sequence[Point2],
+    sources: Sequence[int],
+    fillets: Sequence["Fillet"],
+) -> List[float]:
+    """Map the corner limits onto the segments of a rounded loop.
+
+    Straight pieces keep the tighter limit of their two ends; each chord of a
+    rounded corner only answers to the corner it belongs to.
+    """
+    count = len(original)
+    vertex = _vertical_vertex_limits(original, fillets)
+    limits: List[float] = []
+    for source in sources:
+        if source >= 0:
+            limits.append(
+                min(vertex[source], vertex[(source + 1) % count])
+            )
+        else:
+            limits.append(vertex[~source])
+    return limits
+
+
+def _limit_rim_radii(
+    radii: Sequence[float], limits: Sequence[float]
+) -> List[float]:
+    """Keep a carried cap fillet inside the rounded corners it wraps.
+
+    Carrying a round across a rounded vertical corner can push it onto a
+    tighter corner further along the run.  The whole run has one radius, so
+    the tightest limit wins and every strip still shares its seams.
+    """
+    return _even_corner_radii([
+        min(float(value), float(limit))
+        for value, limit in zip(radii, limits)
+    ])
 
 
 def _rounded_segment_sources(
@@ -1781,7 +1863,7 @@ def _expand_rim_radii(
         expanded.append(min(values) if values else 0.0)
     if rounded is not None:
         _carry_rim_radii(expanded, rounded)
-    return expanded
+    return _even_corner_radii(expanded)
 
 
 def _carry_rim_radii(
@@ -2012,12 +2094,17 @@ def iter_solid_faces(
                     min(value, limit)
                     for value, limit in zip(end, limits)
                 ]
-                base_radii.append(
-                    _expand_rim_radii(base, sources, rounded)
+                rounded_limits = _rounded_vertical_limits(
+                    original, sources, feature.fillets
                 )
-                end_radii.append(
-                    _expand_rim_radii(end, sources, rounded)
-                )
+                base_radii.append(_limit_rim_radii(
+                    _expand_rim_radii(base, sources, rounded),
+                    rounded_limits,
+                ))
+                end_radii.append(_limit_rim_radii(
+                    _expand_rim_radii(end, sources, rounded),
+                    rounded_limits,
+                ))
             faces, runs = _prism_faces_with_runs(
                 rounded_outer,
                 feature.height,
