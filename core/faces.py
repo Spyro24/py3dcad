@@ -1743,21 +1743,54 @@ def _expand_rim_radii(
     return _even_corner_radii(expanded)
 
 
+def _run_carries(
+    points: Sequence[Point2],
+    vertex: int,
+    orientation: float,
+) -> bool:
+    """Return whether a cap fillet continues across a loop vertex.
+
+    Smooth seams carry the run, and so does an oblique convex corner: an arc
+    that meets a straight edge at an angle is still one rim run, and stopping
+    there would leave a flat end face in the middle of the round.  Right-
+    angled, reflexive and concave corners end the run instead, because the
+    neighbouring panel closes the round there or the round would fold into
+    the solid.
+    """
+    turn = _turn_angle(points, vertex)
+    if turn < SMOOTH_ANGLE:
+        return True
+    count = len(points)
+    previous = points[(vertex - 1) % count]
+    current = points[vertex]
+    following = points[(vertex + 1) % count]
+    cross = (
+        (current[0] - previous[0]) * (following[1] - current[1])
+        - (current[1] - previous[1]) * (following[0] - current[0])
+    )
+    if cross * orientation <= 0.0:
+        return False
+    return turn < math.pi * 0.5 - 1e-3
+
+
 def _carry_rim_radii(
     radii: List[float],
     rounded: Sequence[Point2],
 ) -> None:
-    """Carry a cap fillet along the smooth run of the selected edge.
+    """Carry a cap fillet along the run of the selected edge.
 
     A tessellated arc is stored as many short straight segments.  The user
     selects and sees the whole run, so the round must be generated for the
     whole run too; tapering it inside one chord would leave a tiny loop on
-    the arc.  Sharp junctions still stop the walk, which keeps the round on
-    the edge the user picked.
+    the arc.  The run also wraps around an oblique corner onto the next edge,
+    which keeps the round full-width where the arc runs out into a straight
+    edge.  Right-angled corners still stop it, so a fillet picked on one side
+    of a box stays on that side.
     """
     count = len(radii)
     if count < 3:
         return
+    orientation = 1.0 if _loop_area(rounded) >= 0.0 else -1.0
     seeds = [index for index, value in enumerate(radii) if value > 1e-9]
     pending = list(seeds)
     seen = set(seeds)
@@ -1769,7 +1802,7 @@ def _carry_rim_radii(
             vertex = (
                 neighbour if neighbour == (index + 1) % count else index
             )
-            if _turn_angle(rounded, vertex) >= SMOOTH_ANGLE:
+            if not _run_carries(rounded, vertex, orientation):
                 continue
             radii[neighbour] = radii[index]
             seen.add(neighbour)
