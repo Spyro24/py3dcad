@@ -303,9 +303,18 @@ def _prism_faces_with_runs(
                     faces.extend(patch)
                     runs.append(len(patch))
 
-        # Adjacent cap fillets meet along their cylinder intersection curves,
-        # which the signed ring trims above already follow.  Sharp corners keep
-        # that miter; asymmetric tangent seams stop on the long edge instead.
+            # Two equal fillets meeting at a sharp corner are joined by a
+            # spherical corner, so the rounds flow into each other there.
+            for vertex in range(count):
+                if radii[vertex - 1] <= 1e-9 or radii[vertex] <= 1e-9:
+                    continue
+                patch = _corner_blend(
+                    loop, cap_points, inward, radii, frame, vertex,
+                    cap_outward,
+                )
+                faces.extend(patch)
+                runs.append(len(patch))
+
     return faces, runs
 
 
@@ -375,6 +384,65 @@ def _convex_corner(points: Sequence[Point2], vertex: int) -> bool:
     )
     orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
     return cross * orientation > 0.0
+
+
+def _blend_corner(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    radii: Sequence[float],
+    vertex: int,
+) -> Optional[Point2]:
+    """Return the sphere centre where two equal cap fillets meet smoothly.
+
+    Two fillets on adjacent edges are both tangent to a ball whose centre is
+    where their axes cross, so a spherical patch joins them without the crease
+    a miter cut leaves.  Unequal radii and corners too shallow to be sharp keep
+    the miter; so do segments too short to hold both trims.
+    """
+    count = len(points)
+    previous = (vertex - 1) % count
+    radius = float(radii[previous])
+    following = float(radii[vertex])
+    if radius <= 1e-9 or abs(radius - following) > 1e-9:
+        return None
+    if _turn_angle(points, vertex) < SMOOTH_ANGLE:
+        return None
+    if not _convex_corner(points, vertex):
+        return None
+    if _asymmetric_seam(points, vertex, radius, following):
+        return None
+    for segment in (previous, vertex):
+        start, end = _fillet_trims(points, inward, radii, segment)
+        if start + end > _segment_length(points, segment) + 1e-9:
+            return None
+    return _miter_point(points, inward, vertex, radius, following)
+
+
+def _blend_trim(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    radii: Optional[Sequence[float]],
+    segment: int,
+    at_start: bool,
+) -> Optional[float]:
+    """Return how far a fillet ring stops short of a blended corner."""
+    if radii is None:
+        return None
+    count = len(points)
+    vertex = segment if at_start else (segment + 1) % count
+    if _blend_corner(points, inward, radii, vertex) is None:
+        return None
+    start, end = _fillet_trims(points, inward, radii, segment)
+    return start if at_start else end
+
+
+def _point_along(point: Point3, direction: Point3, amount: float) -> Point3:
+    """Return a point shifted from another along a direction."""
+    return (
+        point[0] + direction[0] * amount,
+        point[1] + direction[1] * amount,
+        point[2] + direction[2] * amount,
+    )
 
 
 def _needs_runout(
@@ -970,15 +1038,20 @@ def _rim_strip(
     end_normal = _map_direction(
         (-inward[following][0], -inward[following][1]), frame
     )
+    start_blend = _blend_corner(points, inward, radii, segment) is not None
+    end_blend = _blend_corner(points, inward, radii, following) is not None
 
-    # Where two filleted segments meet at a sharp corner their strips share
-    # one trim curve, so drawing it joins the two rounds into a single edge.
+    # Where two fillets meet at a miter their strips share one trim curve, so
+    # drawing it joins the rounds into a single edge.  A spherical blend is
+    # tangent to both strips instead, so its seams stay smooth.
     start_corner = (
         (start_trim > 1e-9 or start_cut)
+        and not start_blend
         and _turn_angle(points, segment) >= SMOOTH_ANGLE
     )
     end_corner = (
         (end_trim > 1e-9 or end_cut)
+        and not end_blend
         and _turn_angle(points, following) >= SMOOTH_ANGLE
     )
     # The miter trim along a tessellated arc is ``r * tan(turn / 2)``; with the
@@ -1010,11 +1083,19 @@ def _rim_strip(
             fade = 1.0 - math.cos(theta)
             amount_in = current * fade
             amount_up = current * (1.0 - math.sin(theta))
-            first_trim = start_trim * fade if index == 0 else 0.0
-            last_trim = (
-                end_trim * fade if index == len(kept) - 1 else 0.0
-            )
-            if first_trim + last_trim > limit:
+            if start_blend:
+                first_trim = start_trim if index == 0 else 0.0
+            else:
+                first_trim = start_trim * fade if index == 0 else 0.0
+            if end_blend:
+                last_trim = end_trim if index == len(kept) - 1 else 0.0
+            else:
+                last_trim = (
+                    end_trim * fade if index == len(kept) - 1 else 0.0
+                )
+            if not start_blend and not end_blend and (
+                first_trim + last_trim > limit
+            ):
                 scale = limit / (first_trim + last_trim)
                 first_trim *= scale
                 last_trim *= scale
@@ -1349,6 +1430,154 @@ def _corner_cut(
     return points
 
 
+def _slerp_direction(a: Point3, b: Point3, amount: float) -> Point3:
+    """Return a unit direction between two unit directions in their plane."""
+    dot = max(-1.0, min(1.0, _dot(a, b)))
+    angle = math.acos(dot)
+    if angle < 1e-9:
+        return a
+    sine = math.sin(angle)
+    first = math.sin((1.0 - amount) * angle) / sine
+    second = math.sin(amount * angle) / sine
+    return _unit((
+        a[0] * first + b[0] * second,
+        a[1] * first + b[1] * second,
+        a[2] * first + b[2] * second,
+    ))
+
+
+def _sphere_faces(
+    rows: Sequence[Sequence[Point3]],
+    apex: Point3,
+    centre: Point3,
+    steps: int,
+) -> List[Face]:
+    """Mesh the spherical patch between two fillet end rings."""
+    faces: List[Face] = []
+    # The meridian seams are tangent to the strips, so only the equator ledge
+    # is a real crease.
+    for row in range(steps):
+        for column in range(steps):
+            if row == steps - 1:
+                vertices = (rows[row][column], rows[row][column + 1], apex)
+                flags = (False, False, False)
+            else:
+                vertices = (
+                    rows[row][column], rows[row][column + 1],
+                    rows[row + 1][column + 1], rows[row + 1][column],
+                )
+                flags = (row == 0, False, False, False)
+            normal = _unit(_subtract(_average(vertices), centre))
+            points, edges = _wind_outward(vertices, flags, normal)
+            faces.append(Face(
+                points, _normal_color(normal), normal,
+                "Fillet corner", edges,
+            ))
+    return faces
+
+
+def _blend_geometry(
+    points: Sequence[Point2],
+    cap_points: Sequence[Point3],
+    inward: Sequence[Point2],
+    radii: Sequence[float],
+    frame: PlaneFrame,
+    vertex: int,
+    cap_outward: Point3,
+) -> Optional[Tuple[Point3, float, Point3, Point3]]:
+    """Return the corner ball's centre, radius and ring directions."""
+    if _blend_corner(points, inward, radii, vertex) is None:
+        return None
+    count = len(points)
+    previous = (vertex - 1) % count
+    radius = float(radii[previous])
+    trim = _fillet_trims(points, inward, radii, previous)[1]
+    direction = _unit(_subtract(cap_points[vertex], cap_points[previous]))
+    inward_prev = _map_direction(inward[previous], frame)
+    edge = _point_along(cap_points[vertex], direction, -trim)
+    edge = _point_along(edge, inward_prev, radius)
+    centre = _point_along(edge, cap_outward, -radius)
+    near = _scale(inward_prev, -1.0)
+    far = _scale(_map_direction(inward[vertex], frame), -1.0)
+    return centre, radius, near, far
+
+
+def _blend_rows(
+    near: Point3,
+    far: Point3,
+    centre: Point3,
+    radius: float,
+    cap_outward: Point3,
+    steps: int,
+) -> List[List[Point3]]:
+    """Mesh a quarter ball between the two fillet end rings."""
+    rows: List[List[Point3]] = []
+    for row in range(steps):
+        theta = math.pi * 0.5 * row / steps
+        width = math.cos(theta)
+        height = math.sin(theta)
+        ring: List[Point3] = []
+        for column in range(steps + 1):
+            ray = _slerp_direction(near, far, column / steps)
+            point = _point_along(centre, ray, radius * width)
+            ring.append(
+                _point_along(point, cap_outward, radius * height)
+            )
+        rows.append(ring)
+    return rows
+
+
+def _blend_shelf(
+    shelf: Point3,
+    ring: Sequence[Point3],
+    cap_outward: Point3,
+    steps: int,
+) -> List[Face]:
+    """Fill the flat ledge between the corner's sharp edge and the ball."""
+    faces: List[Face] = []
+    for column in range(steps):
+        vertices = (shelf, ring[column], ring[column + 1])
+        flags = (column == 0, True, column + 1 == steps)
+        points, edges = _wind_outward(vertices, flags, cap_outward)
+        faces.append(Face(
+            points, _normal_color(cap_outward), cap_outward,
+            "Fillet corner shelf", edges,
+        ))
+    return faces
+
+
+def _corner_blend(
+    points: Sequence[Point2],
+    cap_points: Sequence[Point3],
+    inward: Sequence[Point2],
+    radii: Sequence[float],
+    frame: PlaneFrame,
+    vertex: int,
+    cap_outward: Point3,
+    steps: int = 6,
+) -> List[Face]:
+    """Round a corner where two equal cap fillets meet.
+
+    The fillets are tangent to a ball centred where their axes cross, so the
+    patch continues both rounds without the crease a miter leaves.  A small
+    shelf closes it down to the sharp corner edge below.
+    """
+    geometry = _blend_geometry(
+        points, cap_points, inward, radii, frame, vertex, cap_outward
+    )
+    if geometry is None:
+        return []
+    centre, radius, near, far = geometry
+    rows = _blend_rows(
+        near, far, centre, radius, cap_outward, steps
+    )
+    apex = _point_along(centre, cap_outward, radius)
+    shelf = _point_along(cap_points[vertex], cap_outward, -radius)
+    return _sphere_faces(rows, apex, centre, steps) + _blend_shelf(
+        shelf, rows[0], cap_outward, steps
+    )
+
+
 def _side_faces(
     points: Sequence[Sequence[float]],
     base: Sequence[Point3],
@@ -1482,12 +1711,31 @@ def _side_faces(
             flags.append(flag)
             poly.append(point)
 
+        segment_direction = _unit(_subtract(top[nxt], top[index]))
+        start_bottom_trim = _blend_trim(
+            points, inward_2d, bottom_offsets, index, True
+        )
+        end_bottom_trim = _blend_trim(
+            points, inward_2d, bottom_offsets, index, False
+        )
+        start_top_trim = _blend_trim(
+            points, inward_2d, top_offsets, index, True
+        )
+        end_top_trim = _blend_trim(
+            points, inward_2d, top_offsets, index, False
+        )
+
         if start_bottom:
             poly.append(start_bottom[0])
             for point in start_bottom[1:]:
                 append(point, False)
         else:
             poly.append(bottom)
+            if start_bottom_trim is not None:
+                append(
+                    _point_along(bottom, segment_direction, start_bottom_trim),
+                    True,
+                )
 
         bottom_sharp = bottom_offset <= 1e-9
         if end_bottom:
@@ -1497,7 +1745,14 @@ def _side_faces(
             if len(flags) > before:
                 flags[before] = bottom_sharp
         else:
-            append(bottom_next, bottom_sharp)
+            if end_bottom_trim is not None:
+                append(
+                    _point_along(
+                        bottom_next, segment_direction, -end_bottom_trim
+                    ),
+                    True,
+                )
+            append(bottom_next, bottom_sharp or end_bottom_trim is not None)
 
         # The edge that runs up from here is the shared vertical edge with
         # the next panel; the face grouping code identifies it as edge 1.
@@ -1534,6 +1789,11 @@ def _side_faces(
                 append(point, False)
         else:
             append(upper_next, not smooth[nxt])
+            if end_top_trim is not None:
+                append(
+                    _point_along(upper_next, segment_direction, -end_top_trim),
+                    True,
+                )
 
         top_sharp = top_offset <= 1e-9
         if start_top:
@@ -1543,7 +1803,12 @@ def _side_faces(
             if len(flags) > before:
                 flags[before] = top_sharp
         else:
-            append(upper, top_sharp)
+            if start_top_trim is not None:
+                append(
+                    _point_along(upper, segment_direction, start_top_trim),
+                    True,
+                )
+            append(upper, top_sharp or start_top_trim is not None)
 
         # Mirror the splitting on the closing vertical edge at ``index``.
         if _needs_runout(points, inward_2d, prev, False):
