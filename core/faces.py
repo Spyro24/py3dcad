@@ -20,8 +20,6 @@ EdgeRef = Tuple[int, int]
 
 # Side panels whose normals differ by less than this angle are one smooth face.
 SMOOTH_ANGLE = math.radians(20.0)
-# Samples used to taper a cap fillet down where it runs out onto a sharp edge.
-RUNOUT_STEPS = 4
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .document import Document
@@ -210,19 +208,35 @@ def _prism_faces_with_runs(
         if index > 0
     )
 
+    # The cap loops follow the profile order.  A negative extrusion mirrors
+    # the solid, so the two caps take the opposite winding there to keep their
+    # polygon winding agreeing with their outward normals.
+    if height >= 0.0:
+        far_vertices: Tuple[Point3, ...] = far_cap
+        far_edges = far_holes
+        near_vertices: Tuple[Point3, ...] = tuple(reversed(near_cap))
+        near_edges = tuple(
+            tuple(reversed(hole)) for hole in near_holes
+        )
+    else:
+        far_vertices = tuple(reversed(far_cap))
+        far_edges = tuple(
+            tuple(reversed(hole)) for hole in far_holes
+        )
+        near_vertices = near_cap
+        near_edges = near_holes
+
     faces = [
         Face(
-            far_cap, (190, 190, 198), cap_normal, top_label,
-            holes=far_holes,
+            far_vertices, (190, 190, 198), cap_normal, top_label,
+            holes=far_edges,
         ),
         Face(
-            tuple(reversed(near_cap)),
+            near_vertices,
             (105, 105, 114),
             other_cap_normal,
             bottom_label,
-            holes=tuple(
-                tuple(reversed(hole)) for hole in near_holes
-            ),
+            holes=near_edges,
         ),
     ]
     runs = [1, 1]
@@ -263,24 +277,28 @@ def _prism_faces_with_runs(
             for segment, radius in enumerate(radii):
                 if radius <= 1e-9:
                     continue
-                if (
-                    radii[segment - 1] <= 1e-9
-                    and _concave_runout(loop, inward, segment, True)
+                if radii[segment - 1] <= 1e-9 and _needs_runout(
+                    loop, inward, segment, True
                 ):
                     patch = _runout_patch(
                         cap_points, inward, outward, frame, segment,
                         radius, True, into_solid, cap_outward,
+                        flat=not _concave_runout(
+                            loop, inward, segment, True
+                        ),
                     )
                     faces.extend(patch)
                     runs.append(len(patch))
                 following = (segment + 1) % count
-                if (
-                    radii[following] <= 1e-9
-                    and _concave_runout(loop, inward, segment, False)
+                if radii[following] <= 1e-9 and _needs_runout(
+                    loop, inward, segment, False
                 ):
                     patch = _runout_patch(
                         cap_points, inward, outward, frame, segment,
                         radius, False, into_solid, cap_outward,
+                        flat=not _concave_runout(
+                            loop, inward, segment, False
+                        ),
                     )
                     faces.extend(patch)
                     runs.append(len(patch))
@@ -312,30 +330,34 @@ def _turn_angle(points: Sequence[Point2], vertex: int) -> float:
     return abs(math.atan2(cross, dot))
 
 
-def _corner_needs_taper(
+def _panel_closes_end(
     points: Sequence[Point2],
     inward: Sequence[Point2],
     segment: int,
     at_start: bool,
 ) -> bool:
-    """Return whether a cap fillet has to fade out at one of its ends.
+    """Return whether the neighbouring panel cuts a fillet back to its ring.
 
-    A round that meets a sharp corner at exactly ninety degrees is closed by
-    the neighbouring panel: the fillet's end ring lies in that panel and the
-    panel is cut back to it.  At any other angle the ring and the panel cut
-    are different curves and would leave a wedge-shaped crack, so the round
-    fades to nothing on the sharp edge instead.  Smooth tessellation seams
-    are always tapered for the same reason.  Concave corners are closed by
-    their runout patch and keep their existing boundary.
+    Only a right-angled convex corner does: the fillet's end ring then lies
+    in the neighbouring panel, so that panel is cut back to the ring.  At a
+    concave corner, a smooth junction or any other sharp angle the ring
+    stands off the panel, and the end needs its own closing patch.
     """
     count = len(points)
     vertex = segment if at_start else (segment + 1) % count
-    angle = _turn_angle(points, vertex)
-    if angle < SMOOTH_ANGLE:
-        return True
     if _concave_runout(points, inward, segment, at_start):
         return False
-    return abs(angle - 0.5 * math.pi) > 1e-3
+    return abs(math.sin(_turn_angle(points, vertex)) - 1.0) <= 1e-3
+
+
+def _needs_runout(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    segment: int,
+    at_start: bool,
+) -> bool:
+    """Return whether the end of a fillet strip must be closed by a patch."""
+    return not _panel_closes_end(points, inward, segment, at_start)
 
 
 def _concave_runout(
@@ -407,249 +429,6 @@ def _fillet_trims(
     return start, end
 
 
-def _fillet_taper(
-    points: Sequence[Point2],
-    inward: Sequence[Point2],
-    radii: Sequence[float],
-    segment: int,
-) -> Tuple[float, float]:
-    """Return the length over which a cap fillet fades out at each end.
-
-    A fillet that reaches a smooth junction has no side panel to stop it: the
-    neighbouring profile keeps going in the same direction.  It therefore
-    shrinks to nothing at that vertex, so the round, the cap and the wall all
-    arrive on the sharp profile edge together.  Sharp junctions are closed by
-    the side panel instead and keep their full radius.
-    """
-    count = len(points)
-    following = (segment + 1) % count
-    radius = float(radii[segment])
-    if radius <= 1e-9:
-        return 0.0, 0.0
-    length = math.hypot(
-        points[following][0] - points[segment][0],
-        points[following][1] - points[segment][1],
-    )
-    if length <= 1e-9:
-        return 0.0, 0.0
-    start = 0.0
-    if (
-        float(radii[segment - 1]) <= 1e-9
-        and _corner_needs_taper(points, inward, segment, True)
-    ):
-        start = min(radius, length)
-    end = 0.0
-    if (
-        float(radii[following]) <= 1e-9
-        and _corner_needs_taper(points, inward, segment, False)
-    ):
-        end = min(radius, length)
-    if start + end > length:
-        scale = length / (start + end)
-        start *= scale
-        end *= scale
-    return start, end
-
-
-def _runout_radius(
-    distance: float,
-    length: float,
-    radius: float,
-    start_trim: float,
-    end_trim: float,
-    start_taper: float,
-    end_taper: float,
-) -> float:
-    """Return the fillet radius at one station along a tapering strip.
-
-    The fades span the part of the segment that the miters leave visible, so
-    a round that both meets a neighbouring fillet and runs out on a smooth
-    junction spreads its collapse over the whole exposed length instead of
-    dropping abruptly next to the miter.
-    """
-    first = start_trim if start_trim > 1e-9 else 0.0
-    last = length - end_trim if end_trim > 1e-9 else length
-    value = radius
-
-    def fade(amount: float) -> float:
-        """Smooth 0..1 ramp so the round leaves its miter tangentially."""
-        amount = min(1.0, max(0.0, amount))
-        return amount * amount * (3.0 - 2.0 * amount)
-
-    if start_taper > 1e-9:
-        span = min(first + start_taper, last) - first
-        if span <= 1e-9:
-            return 0.0
-        value = min(
-            value, radius * fade((distance - first) / span)
-        )
-    if end_taper > 1e-9:
-        span = last - max(last - end_taper, first)
-        if span <= 1e-9:
-            return 0.0
-        value = min(
-            value, radius * fade((last - distance) / span)
-        )
-    return max(0.0, value)
-
-
-def _segment_stations(
-    points: Sequence[Point2],
-    inward: Sequence[Point2],
-    radii: Sequence[float],
-    segment: int,
-    steps: int = RUNOUT_STEPS,
-) -> List[Tuple[float, float]]:
-    """Return ``(distance, radius)`` stations along one filleted segment.
-
-    The radius stays constant unless the fillet fades out at a smooth
-    junction.  Stations crowd inside the fade so the cap boundary, the wall
-    rim and the round itself all follow the same curve.  A station whose
-    radius has shrunk to nothing is left out: the caller closes the strip
-    with a triangle fan to the profile vertex.
-    """
-    count = len(points)
-    following = (segment + 1) % count
-    radius = float(radii[segment])
-    if radius <= 1e-9:
-        return []
-    length = math.hypot(
-        points[following][0] - points[segment][0],
-        points[following][1] - points[segment][1],
-    )
-    if length <= 1e-9:
-        return []
-    start_taper, end_taper = _fillet_taper(points, inward, radii, segment)
-    start_trim, end_trim = _fillet_trims(points, inward, radii, segment)
-    first = start_trim if start_trim > 1e-9 else 0.0
-    last = length - end_trim if end_trim > 1e-9 else length
-    if start_taper <= 1e-9 and end_taper <= 1e-9:
-        return [(0.0, radius), (length, radius)]
-    values = {0.0, length}
-    if start_taper > 1e-9:
-        span = min(first + start_taper, last) - first
-        values.update(
-            first + span * step / steps for step in range(1, steps + 1)
-        )
-    if end_taper > 1e-9:
-        span = last - max(last - end_taper, first)
-        values.update(
-            last - span * step / steps for step in range(1, steps + 1)
-        )
-    if (
-        start_taper > 1e-9 and end_taper > 1e-9
-        and start_taper + end_taper >= last - first - 1e-9
-    ):
-        # The two fades overlap; sample their peak as well so the
-        # silhouette of a short segment is not cut off between stations.
-        peak = first + (last - first) * 0.5
-        values.add(peak)
-    stations: List[Tuple[float, float]] = []
-    for distance in sorted(values):
-        if distance < -1e-9 or distance > length + 1e-9:
-            continue
-        distance = min(max(distance, 0.0), length)
-        current = _runout_radius(
-            distance, length, radius,
-            start_trim, end_trim, start_taper, end_taper,
-        )
-        if current <= 1e-9:
-            continue
-        if stations and distance - stations[-1][0] <= 1e-9:
-            if current > stations[-1][1]:
-                stations[-1] = (stations[-1][0], current)
-            continue
-        stations.append((distance, current))
-    return stations
-
-
-def _strip_stations(
-    points: Sequence[Point2],
-    inward: Sequence[Point2],
-    radii: Sequence[float],
-    segment: int,
-    steps: int = RUNOUT_STEPS,
-) -> List[Tuple[float, float]]:
-    """Return the stations that survive the miters at both ends.
-
-    A neighbouring fillet cuts the strip back along its end curve.  Stations
-    inside that cut would make the cap boundary fold over the seam, so they
-    are dropped here and every caller (round, cap and wall) sees the same
-    shortened list.
-    """
-    stations = _segment_stations(points, inward, radii, segment, steps)
-    if len(stations) < 2:
-        return stations
-    count = len(points)
-    following = (segment + 1) % count
-    length = math.hypot(
-        points[following][0] - points[segment][0],
-        points[following][1] - points[segment][1],
-    )
-    start_trim, end_trim = _fillet_trims(points, inward, radii, segment)
-    kept = [
-        (distance, current) for distance, current in stations
-        if distance <= 1e-9
-        or distance >= length - 1e-9
-        or (
-            distance >= start_trim - 1e-9
-            and distance <= length - end_trim + 1e-9
-        )
-    ]
-    if len(kept) < 2:
-        return stations
-    return kept
-
-
-def _append_taper_cap(
-    result: List[Point2],
-    points: Sequence[Point2],
-    inward: Sequence[Point2],
-    radii: Sequence[float],
-    segment: int,
-    at_start: bool,
-) -> None:
-    """Append the cap boundary where a fillet fades out along its segment.
-
-    Only the stations inside the fade are emitted, in the direction the cap
-    loop travels, and the sharp vertex itself is added by :func:`_cap_loop`.
-    """
-    count = len(points)
-    following = (segment + 1) % count
-    length = math.hypot(
-        points[following][0] - points[segment][0],
-        points[following][1] - points[segment][1],
-    )
-    if length <= 1e-9:
-        return
-    direction = (
-        (points[following][0] - points[segment][0]) / length,
-        (points[following][1] - points[segment][1]) / length,
-    )
-    start_taper, end_taper = _fillet_taper(points, inward, radii, segment)
-    taper = start_taper if at_start else end_taper
-    if taper <= 1e-9:
-        return
-    stations = _strip_stations(points, inward, radii, segment)
-    for distance, current in stations:
-        if at_start:
-            if distance <= 1e-9:
-                continue
-            if distance > taper + 1e-9:
-                break
-        else:
-            if distance < length - taper - 1e-9:
-                continue
-            if distance >= length - 1e-9:
-                break
-        _append_point(result, (
-            points[segment][0] + direction[0] * distance
-            + inward[segment][0] * current,
-            points[segment][1] + direction[1] * distance
-            + inward[segment][1] * current,
-        ))
-
-
 def _fillet_radii(
     fillets: Optional[
         Tuple[Sequence[Sequence[float]], Sequence[Sequence[float]]]
@@ -689,53 +468,29 @@ def _cap_loop(
             radii[previous] if previous < len(radii) else 0.0
         )
         following_radius = radii[index] if index < len(radii) else 0.0
-        start_taper = 0.0
-        end_taper = 0.0
-        if previous_radius > 1e-9 or following_radius > 1e-9:
-            if previous_radius <= 1e-9:
-                start_taper = _fillet_taper(
-                    points, inward, radii, index
-                )[0]
-            elif following_radius <= 1e-9:
-                end_taper = _fillet_taper(
-                    points, inward, radii, previous
-                )[1]
         if previous_radius <= 1e-9 and following_radius <= 1e-9:
             _append_point(result, points[index])
         elif previous_radius <= 1e-9:
-            if start_taper > 1e-9:
-                # The round grows out of the sharp vertex along the edge.
+            offset = (
+                points[index][0] + inward[index][0] * following_radius,
+                points[index][1] + inward[index][1] * following_radius,
+            )
+            if _needs_runout(points, inward, index, True):
+                # The flat end face shares the notch the round leaves here.
                 _append_point(result, points[index])
-                _append_taper_cap(
-                    result, points, inward, radii, index, True
-                )
+                _append_point(result, offset)
             else:
-                offset = (
-                    points[index][0] + inward[index][0] * following_radius,
-                    points[index][1] + inward[index][1] * following_radius,
-                )
-                if _concave_runout(points, inward, index, True):
-                    _append_point(result, points[index])
-                    _append_point(result, offset)
-                else:
-                    _append_point(result, offset)
+                _append_point(result, offset)
         elif following_radius <= 1e-9:
-            if end_taper > 1e-9:
-                # The round shrinks back onto the sharp vertex.
-                _append_taper_cap(
-                    result, points, inward, radii, previous, False
-                )
+            offset = (
+                points[index][0] + inward[previous][0] * previous_radius,
+                points[index][1] + inward[previous][1] * previous_radius,
+            )
+            if _needs_runout(points, inward, previous, False):
+                _append_point(result, offset)
                 _append_point(result, points[index])
             else:
-                offset = (
-                    points[index][0] + inward[previous][0] * previous_radius,
-                    points[index][1] + inward[previous][1] * previous_radius,
-                )
-                if _concave_runout(points, inward, index - 1, False):
-                    _append_point(result, offset)
-                    _append_point(result, points[index])
-                else:
-                    _append_point(result, offset)
+                _append_point(result, offset)
         else:
             start = (
                 points[previous][0]
@@ -1096,9 +851,9 @@ def _rim_strip(
     """Build the quarter-round face along one filleted cap edge.
 
     The strip is a grid of cross-sections along the edge.  Trims at the two
-    ends pull the ring corners onto the miters shared with adjacent fillets;
-    where a fillet runs out onto a smooth junction its radius tapers to zero
-    so the strip closes on the sharp profile edge instead of a flat end wall.
+    ends pull the ring corners onto the miters shared with adjacent fillets.
+    Where the round ends at a junction the neighbouring panel cannot close,
+    its full end ring is left for the runout patch to cap.
     """
     count = len(points)
     radius = float(radii[segment])
@@ -1113,12 +868,9 @@ def _rim_strip(
         points, inward, radii, segment
     )
     start_trim, end_trim = _fillet_trims(points, inward, radii, segment)
-    start_taper, end_taper = _fillet_taper(points, inward, radii, segment)
 
     # Where two filleted segments meet at a sharp corner their strips share
     # one trim curve, so drawing it joins the two rounds into a single edge.
-    # A round that fades out onto a smooth junction has no such curve: its
-    # boundary is the sharp profile rim itself.
     start_corner = (
         start_trim > 1e-9
         and _turn_angle(points, segment) >= SMOOTH_ANGLE
@@ -1133,9 +885,7 @@ def _rim_strip(
     # would pull the strip short of the cap corner and open a seam.
     limit = length
 
-    kept = _strip_stations(points, inward, radii, segment)
-    if not kept:
-        return []
+    kept = [(0.0, radius), (length, radius)]
     grid: List[List[Point3]] = []
     for index, (distance, current) in enumerate(kept):
         ring: List[Point3] = []
@@ -1189,12 +939,13 @@ def _rim_strip(
         normal = _blend_normal(
             outward[segment], cap_outward, theta, vertices
         )
+        points, edges = _wind_outward(vertices, flags, normal)
         faces.append(Face(
-            tuple(vertices),
+            points,
             _normal_color(normal),
             normal,
             "Fillet face",
-            tuple(flags),
+            edges,
         ))
 
     # Only the boundaries of the quarter round are real edges: the two
@@ -1212,14 +963,6 @@ def _rim_strip(
                 end_corner and index == last - 1,
                 step == 0,
             ), step)
-    if start_taper > 1e-9:
-        for step in range(steps):
-            vertices = (start, grid[0][step + 1], grid[0][step])
-            add(vertices, (step + 1 == steps, False, step == 0), step)
-    if end_taper > 1e-9:
-        for step in range(steps):
-            vertices = (grid[last][step], grid[last][step + 1], end)
-            add(vertices, (False, step + 1 == steps, step == 0), step)
     return faces
 
 
@@ -1279,20 +1022,27 @@ def _runout_patch(
     into_solid: Point3,
     cap_outward: Point3,
     steps: int = 6,
+    flat: bool = False,
 ) -> List[Face]:
-    """Close a cap fillet where it runs into a sharp concave corner.
+    """Close a cap fillet where a side panel cannot cut it back.
 
-    A convex corner has a side panel that can be cut back to the round.  At
-    the inside of a hole the fillet points away from that panel, so a small
-    fan from the corner to the fillet's end ring closes the solid instead.
+    That is either the inside of a hole, where the fillet points away from
+    the panel, or any junction where the ring stands off the panel.  A small
+    fan from the sharp rim vertex to the fillet's full end ring closes the
+    solid in both cases; ``flat`` marks the planar end face that the latter
+    leaves on the profile rim.
     """
     count = len(cap_points)
+    following = (segment + 1) % count
     if at_start:
         point = cap_points[segment]
         adjacent = (segment - 1) % count
+        # The removed wedge lies ahead, so its end wall faces along the edge.
+        side = 1.0
     else:
-        point = cap_points[(segment + 1) % count]
-        adjacent = (segment + 1) % count
+        point = cap_points[following]
+        adjacent = following
+        side = -1.0
     inward_3d = _map_direction(inward[segment], frame)
     ring: List[Point3] = []
     for step in range(steps + 1):
@@ -1304,11 +1054,17 @@ def _runout_patch(
             point[1] + inward_3d[1] * amount_in + into_solid[1] * amount_up,
             point[2] + inward_3d[2] * amount_in + into_solid[2] * amount_up,
         ))
-    reference = _unit((
-        outward[adjacent][0] + cap_outward[0],
-        outward[adjacent][1] + cap_outward[1],
-        outward[adjacent][2] + cap_outward[2],
-    ))
+    if flat:
+        reference = _scale(
+            _unit(_subtract(cap_points[following], cap_points[segment])),
+            side,
+        )
+    else:
+        reference = _unit((
+            outward[adjacent][0] + cap_outward[0],
+            outward[adjacent][1] + cap_outward[1],
+            outward[adjacent][2] + cap_outward[2],
+        ))
     if _length(reference) < 0.5:
         reference = cap_outward
     faces: List[Face] = []
@@ -1316,13 +1072,20 @@ def _runout_patch(
         vertices = (point, ring[step], ring[step + 1])
         normal = _oriented_normal(vertices, reference)
         # The fan is bounded by the arc it shares with the fillet strip; its
-        # radial edges are tessellation seams and stay invisible.
+        # radial edges are tessellation seams and stay invisible.  A flat end
+        # face instead shows the step down the wall and the notch on the cap.
+        flags = (False, True, False)
+        label = "Fillet runout"
+        if flat:
+            flags = (step == 0, False, step == steps - 1)
+            label = "Fillet end"
+        points, edges = _wind_outward(vertices, flags, normal)
         faces.append(Face(
-            vertices,
+            points,
             _normal_color(normal),
             normal,
-            "Fillet runout",
-            (False, True, False),
+            label,
+            edges,
         ))
     return faces
 
@@ -1356,6 +1119,42 @@ def _oriented_normal(
     if _dot(normal, reference) < 0.0:
         normal = _scale(normal, -1.0)
     return normal
+
+
+def _wind_outward(
+    vertices: Sequence[Point3],
+    flags: Sequence[bool],
+    normal: Point3,
+) -> Tuple[Tuple[Point3, ...], Tuple[bool, ...]]:
+    """Return a polygon wound so it agrees with its outward ``normal``.
+
+    Cap and side faces already wind outwards.  Tessellated fillet faces must
+    as well; otherwise a closed mesh has edges that run the same way in both
+    of the faces that share them.  ``flags`` stay attached to their edges
+    when the winding is reversed.
+    """
+    points = tuple(vertices)
+    edges = tuple(flags)
+    count = len(points)
+    total = [0.0, 0.0, 0.0]
+    for index in range(count):
+        current = points[index]
+        following = points[(index + 1) % count]
+        total[0] += (
+            (current[1] - following[1]) * (current[2] + following[2])
+        )
+        total[1] += (
+            (current[2] - following[2]) * (current[0] + following[0])
+        )
+        total[2] += (
+            (current[0] - following[0]) * (current[1] + following[1])
+        )
+    if _dot((total[0], total[1], total[2]), normal) >= 0.0:
+        return points, edges
+    return (
+        tuple(reversed(points)),
+        tuple(edges[(count - 2 - index) % count] for index in range(count)),
+    )
 
 
 def _normal_color(normal: Point3) -> Color:
@@ -1481,18 +1280,6 @@ def _side_faces(
 
     inward_2d = _loop_inward_2d(points, inward)
 
-    def panel_tapers(
-        offsets: Optional[Sequence[float]],
-    ) -> List[Tuple[float, float]]:
-        if offsets is None:
-            return [(0.0, 0.0)] * count
-        return [
-            _fillet_taper(points, inward_2d, offsets, index)
-            for index in range(count)
-        ]
-
-    top_tapers = panel_tapers(top_offsets)
-    bottom_tapers = panel_tapers(bottom_offsets)
     faces: List[Face] = []
     for index in range(count):
         nxt = (index + 1) % count
@@ -1531,55 +1318,19 @@ def _side_faces(
         bottom_axis_out = _scale(axis, -1.0)
         top_axis_out = axis
 
-        segment_length = math.hypot(
-            points[nxt][0] - points[index][0],
-            points[nxt][1] - points[index][1],
-        )
-        top_start_taper, top_end_taper = top_tapers[index]
-        bottom_start_taper, bottom_end_taper = bottom_tapers[index]
-        top_stations = (
-            _strip_stations(points, inward_2d, top_offsets, index)
-            if top_offsets is not None else []
-        )
-        bottom_stations = (
-            _strip_stations(points, inward_2d, bottom_offsets, index)
-            if bottom_offsets is not None else []
-        )
-
-        def rim_point(
-            distance: float, radius: float, at_top: bool
-        ) -> Point3:
-            """Return a point on the panel rim where the fillet has faded."""
-            origin = top if at_top else base
-            sign = -1.0 if at_top else 1.0
-            return (
-                origin[index][0] + forward[0] * distance
-                + axis[0] * sign * radius,
-                origin[index][1] + forward[1] * distance
-                + axis[1] * sign * radius,
-                origin[index][2] + forward[2] * distance
-                + axis[2] * sign * radius,
-            )
-
         start_bottom: List[Point3] = []
         start_top: List[Point3] = []
         end_bottom: List[Point3] = []
         end_top: List[Point3] = []
         if bottom_offsets is not None:
-            if (
-                _turn_angle(points, index) >= SMOOTH_ANGLE
-                and bottom_tapers[prev][1] <= 1e-9
-            ):
+            if _panel_closes_end(points, inward_2d, prev, False):
                 start_bottom = _corner_cut(
                     base[index], forward,
                     _map_direction(inward_2d[prev], frame),
                     bottom_axis_out,
                     float(bottom_offsets[prev]), bottom_offset,
                 )
-            if (
-                _turn_angle(points, nxt) >= SMOOTH_ANGLE
-                and bottom_tapers[nxt][0] <= 1e-9
-            ):
+            if _panel_closes_end(points, inward_2d, nxt, True):
                 end_bottom = _corner_cut(
                     base[nxt], backward,
                     _map_direction(inward_2d[nxt], frame),
@@ -1587,20 +1338,14 @@ def _side_faces(
                     float(bottom_offsets[nxt]), bottom_offset,
                 )
         if top_offsets is not None:
-            if (
-                _turn_angle(points, index) >= SMOOTH_ANGLE
-                and top_tapers[prev][1] <= 1e-9
-            ):
+            if _panel_closes_end(points, inward_2d, prev, False):
                 start_top = _corner_cut(
                     top[index], forward,
                     _map_direction(inward_2d[prev], frame),
                     top_axis_out,
                     float(top_offsets[prev]), top_offset,
                 )
-            if (
-                _turn_angle(points, nxt) >= SMOOTH_ANGLE
-                and top_tapers[nxt][0] <= 1e-9
-            ):
+            if _panel_closes_end(points, inward_2d, nxt, True):
                 end_top = _corner_cut(
                     top[nxt], backward,
                     _map_direction(inward_2d[nxt], frame),
@@ -1621,14 +1366,6 @@ def _side_faces(
             poly.append(start_bottom[0])
             for point in start_bottom[1:]:
                 append(point, False)
-        elif bottom_start_taper > 1e-9:
-            poly.append(base[index])
-            for distance, radius in bottom_stations:
-                if distance <= 1e-9:
-                    continue
-                if distance > bottom_start_taper + 1e-9:
-                    break
-                append(rim_point(distance, radius, False), False)
         else:
             poly.append(bottom)
 
@@ -1639,14 +1376,6 @@ def _side_faces(
                 append(point, False)
             if len(flags) > before:
                 flags[before] = bottom_sharp
-        elif bottom_end_taper > 1e-9:
-            for distance, radius in bottom_stations:
-                if distance < segment_length - bottom_end_taper - 1e-9:
-                    continue
-                if distance >= segment_length - 1e-9:
-                    continue
-                append(rim_point(distance, radius, False), False)
-            append(base[nxt], bottom_sharp)
         else:
             append(bottom_next, bottom_sharp)
 
@@ -1658,26 +1387,20 @@ def _side_faces(
         # Where that rim sits lower than this panel's rim, split the shared
         # vertical edge there so the two panels and the runout patch that
         # closes the step all share the same seam.
-        if bottom_offsets is not None and (
-            smooth[nxt] or _concave_runout(points, inward_2d, nxt, True)
+        if bottom_offsets is not None and _needs_runout(
+            points, inward_2d, nxt, True
         ):
-            offset = (
-                0.0 if bottom_tapers[nxt][0] > 1e-9
-                else float(bottom_offsets[nxt])
-            )
+            offset = float(bottom_offsets[nxt])
             if offset > bottom_offset + 1e-9:
                 append((
                     base[nxt][0] + axis[0] * offset,
                     base[nxt][1] + axis[1] * offset,
                     base[nxt][2] + axis[2] * offset,
                 ), not smooth[nxt])
-        if top_offsets is not None and (
-            smooth[nxt] or _concave_runout(points, inward_2d, nxt, True)
+        if top_offsets is not None and _needs_runout(
+            points, inward_2d, nxt, True
         ):
-            offset = (
-                0.0 if top_tapers[nxt][0] > 1e-9
-                else float(top_offsets[nxt])
-            )
+            offset = float(top_offsets[nxt])
             if offset > top_offset + 1e-9:
                 append((
                     top[nxt][0] - axis[0] * offset,
@@ -1689,14 +1412,6 @@ def _side_faces(
             append(end_top[0], not smooth[nxt])
             for point in end_top[1:]:
                 append(point, False)
-        elif top_end_taper > 1e-9:
-            append(top[nxt], False)
-            for distance, radius in reversed(top_stations):
-                if distance >= segment_length - 1e-9:
-                    continue
-                if distance < segment_length - top_end_taper - 1e-9:
-                    break
-                append(rim_point(distance, radius, True), False)
         else:
             append(upper_next, not smooth[nxt])
 
@@ -1707,24 +1422,13 @@ def _side_faces(
                 append(point, False)
             if len(flags) > before:
                 flags[before] = top_sharp
-        elif top_start_taper > 1e-9:
-            for distance, radius in reversed(top_stations):
-                if distance <= 1e-9:
-                    break
-                if distance > top_start_taper + 1e-9:
-                    continue
-                append(rim_point(distance, radius, True), False)
-            append(top[index], top_sharp)
         else:
             append(upper, top_sharp)
 
         # Mirror the splitting on the closing vertical edge at ``index``.
-        if smooth[index] or _concave_runout(points, inward_2d, prev, False):
+        if _needs_runout(points, inward_2d, prev, False):
             if top_offsets is not None:
-                offset = (
-                    0.0 if top_tapers[prev][1] > 1e-9
-                    else float(top_offsets[prev])
-                )
+                offset = float(top_offsets[prev])
                 if offset > top_offset + 1e-9:
                     append((
                         top[index][0] - axis[0] * offset,
@@ -1732,10 +1436,7 @@ def _side_faces(
                         top[index][2] - axis[2] * offset,
                     ), not smooth[index])
             if bottom_offsets is not None:
-                offset = (
-                    0.0 if bottom_tapers[prev][1] > 1e-9
-                    else float(bottom_offsets[prev])
-                )
+                offset = float(bottom_offsets[prev])
                 if offset > bottom_offset + 1e-9:
                     append((
                         base[index][0] + axis[0] * offset,
@@ -1750,6 +1451,7 @@ def _side_faces(
         shift = (shared_start - 1) % len(poly)
         poly = poly[shift:] + poly[:shift]
         flags = flags[shift:] + flags[:shift]
+        poly, flags = _wind_outward(poly, flags, normals[index])
         faces.append(
             Face(
                 tuple(poly),
