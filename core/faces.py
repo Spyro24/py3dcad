@@ -336,18 +336,45 @@ def _panel_closes_end(
     segment: int,
     at_start: bool,
 ) -> bool:
-    """Return whether the neighbouring panel cuts a fillet back to its ring.
+    """Return whether the neighbouring panel can close a fillet end.
 
-    Only a right-angled convex corner does: the fillet's end ring then lies
-    in the neighbouring panel, so that panel is cut back to the ring.  At a
-    concave corner, a smooth junction or any other sharp angle the ring
-    stands off the panel, and the end needs its own closing patch.
+    A sharp convex corner ends the round inside the neighbouring panel's
+    plane: the strip's last ring is trimmed onto that plane and the panel is
+    cut back along the same curve.  The cut needs the run to cross the panel
+    plane, so a smooth junction (where the panel is parallel to the run) and
+    a concave corner (where the round would fold into the solid) still need
+    their own closing patch.
     """
     count = len(points)
     vertex = segment if at_start else (segment + 1) % count
-    if _concave_runout(points, inward, segment, at_start):
+    if _turn_angle(points, vertex) < SMOOTH_ANGLE:
         return False
-    return abs(math.sin(_turn_angle(points, vertex)) - 1.0) <= 1e-3
+    if not _convex_corner(points, vertex):
+        return False
+    neighbour = (segment - 1) % count if at_start else (segment + 1) % count
+    following = (segment + 1) % count
+    dx = points[following][0] - points[segment][0]
+    dy = points[following][1] - points[segment][1]
+    length = math.hypot(dx, dy)
+    if length < 1e-9:
+        return False
+    normal = (-float(inward[neighbour][0]), -float(inward[neighbour][1]))
+    across = (dx * normal[0] + dy * normal[1]) / length
+    return abs(across) > math.sin(SMOOTH_ANGLE)
+
+
+def _convex_corner(points: Sequence[Point2], vertex: int) -> bool:
+    """Return whether a loop vertex turns towards the material side."""
+    count = len(points)
+    previous = points[(vertex - 1) % count]
+    current = points[vertex]
+    following = points[(vertex + 1) % count]
+    cross = (
+        (current[0] - previous[0]) * (following[1] - current[1])
+        - (current[1] - previous[1]) * (following[0] - current[0])
+    )
+    orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
+    return cross * orientation > 0.0
 
 
 def _needs_runout(
@@ -445,6 +472,58 @@ def _fillet_radii(
     return radii
 
 
+def _offset_join(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    vertex: int,
+    previous_radius: float,
+    following_radius: float,
+) -> Point2:
+    """Return where one fillet's offset line meets the sharp neighbour's rim.
+
+    A cap fillet that ends at a sharp corner runs into the neighbouring wall.
+    Its offset boundary crosses that wall's rim line just beyond the profile
+    vertex; joining the two there keeps the cap polygon inside the solid and
+    lines it up with the fillet's oblique end ring.
+    """
+    count = len(points)
+    previous = (vertex - 1) % count
+    following = (vertex + 1) % count
+    dx_in = points[vertex][0] - points[previous][0]
+    dy_in = points[vertex][1] - points[previous][1]
+    dx_out = points[following][0] - points[vertex][0]
+    dy_out = points[following][1] - points[vertex][1]
+    vx, vy = float(points[vertex][0]), float(points[vertex][1])
+    if following_radius <= 1e-9:
+        start = (
+            points[previous][0] + inward[previous][0] * previous_radius,
+            points[previous][1] + inward[previous][1] * previous_radius,
+        )
+        end = (vx, vy)
+        fallback = (
+            vx + inward[previous][0] * previous_radius,
+            vy + inward[previous][1] * previous_radius,
+        )
+    else:
+        start = (vx, vy)
+        end = (
+            vx + inward[vertex][0] * following_radius,
+            vy + inward[vertex][1] * following_radius,
+        )
+        fallback = end
+    cross = dx_in * dy_out - dy_in * dx_out
+    if abs(cross) < 1e-12:
+        return fallback
+    amount = (
+        (end[0] - start[0]) * dy_out
+        - (end[1] - start[1]) * dx_out
+    ) / cross
+    return (
+        start[0] + dx_in * amount,
+        start[1] + dy_in * amount,
+    )
+
+
 def _cap_loop(
     points: Sequence[Point2],
     radii: Sequence[float],
@@ -480,7 +559,10 @@ def _cap_loop(
                 _append_point(result, points[index])
                 _append_point(result, offset)
             else:
-                _append_point(result, offset)
+                _append_point(result, _offset_join(
+                    points, inward, index,
+                    previous_radius, following_radius,
+                ))
         elif following_radius <= 1e-9:
             offset = (
                 points[index][0] + inward[previous][0] * previous_radius,
@@ -490,7 +572,10 @@ def _cap_loop(
                 _append_point(result, offset)
                 _append_point(result, points[index])
             else:
-                _append_point(result, offset)
+                _append_point(result, _offset_join(
+                    points, inward, index,
+                    previous_radius, following_radius,
+                ))
         else:
             start = (
                 points[previous][0]
@@ -852,8 +937,9 @@ def _rim_strip(
 
     The strip is a grid of cross-sections along the edge.  Trims at the two
     ends pull the ring corners onto the miters shared with adjacent fillets.
-    Where the round ends at a junction the neighbouring panel cannot close,
-    its full end ring is left for the runout patch to cap.
+    Where the run ends at a sharp corner the last ring slides along the run
+    until it lies in the neighbouring panel's plane, so the round ends flush
+    and that panel closes it without a flat end face.
     """
     count = len(points)
     radius = float(radii[segment])
@@ -868,16 +954,32 @@ def _rim_strip(
         points, inward, radii, segment
     )
     start_trim, end_trim = _fillet_trims(points, inward, radii, segment)
+    previous = (segment - 1) % count
+    following = (segment + 1) % count
+    start_cut = (
+        radii[previous] <= 1e-9
+        and _panel_closes_end(points, inward, segment, True)
+    )
+    end_cut = (
+        radii[following] <= 1e-9
+        and _panel_closes_end(points, inward, segment, False)
+    )
+    start_normal = _map_direction(
+        (-inward[previous][0], -inward[previous][1]), frame
+    )
+    end_normal = _map_direction(
+        (-inward[following][0], -inward[following][1]), frame
+    )
 
     # Where two filleted segments meet at a sharp corner their strips share
     # one trim curve, so drawing it joins the two rounds into a single edge.
     start_corner = (
-        start_trim > 1e-9
+        (start_trim > 1e-9 or start_cut)
         and _turn_angle(points, segment) >= SMOOTH_ANGLE
     )
     end_corner = (
-        end_trim > 1e-9
-        and _turn_angle(points, (segment + 1) % count) >= SMOOTH_ANGLE
+        (end_trim > 1e-9 or end_cut)
+        and _turn_angle(points, following) >= SMOOTH_ANGLE
     )
     # The miter trim along a tessellated arc is ``r * tan(turn / 2)``; with the
     # cap radius capped at 0.9 of the vertical radius this stays well inside
@@ -916,7 +1018,16 @@ def _rim_strip(
                 scale = limit / (first_trim + last_trim)
                 first_trim *= scale
                 last_trim *= scale
-            along = distance + first_trim - last_trim
+            slide = 0.0
+            if start_cut and index == 0:
+                slide = -amount_in * _dot(inward_3d, start_normal) / _dot(
+                    direction, start_normal
+                )
+            elif end_cut and index == len(kept) - 1:
+                slide = -amount_in * _dot(inward_3d, end_normal) / _dot(
+                    direction, end_normal
+                )
+            along = distance + first_trim - last_trim + slide
             ring.append((
                 start[0] + direction[0] * along
                 + inward_3d[0] * amount_in + into_solid[0] * amount_up,
@@ -1193,8 +1304,9 @@ def _offset_points(
 
 def _corner_cut(
     vertex: Point3,
-    into_dir: Point3,
+    direction: Point3,
     inward_adjacent: Point3,
+    panel_normal: Point3,
     axis_out: Point3,
     adjacent_radius: float,
     own_radius: float,
@@ -1202,30 +1314,37 @@ def _corner_cut(
 ) -> List[Point3]:
     """Return the panel boundary where a neighbouring cap fillet ends.
 
-    A cap fillet that stops at a sharp corner cuts back into the side panel
-    that meets it there.  This returns the quarter-circle cross-section of
-    that fillet, projected onto the panel, from the vertical edge up to the
-    panel's own rim.  An empty list means the neighbouring fillet does not
-    reach past this panel's rim, so the corner stays sharp.
+    A cap fillet that stops at a sharp corner ends on the neighbouring panel's
+    plane.  Its end ring is an oblique slice of the quarter round: each
+    cross-section point slides along the run until it meets that plane, so the
+    panel is cut back along a smooth convex curve instead of a flat end face.
+    An empty list means the neighbouring fillet does not reach past this
+    panel's rim, so the corner stays sharp.
     """
     if adjacent_radius <= own_radius + 1e-9:
         return []
-    along = _dot(inward_adjacent, into_dir)
-    if along <= 1e-9:
+    denominator = _dot(direction, panel_normal)
+    if abs(denominator) < 1e-6:
         return []
     ratio = max(0.0, min(1.0, own_radius / adjacent_radius))
     theta_max = math.asin(max(0.0, min(1.0, 1.0 - ratio)))
     if theta_max <= 1e-6:
         return []
+    sliding = _dot(inward_adjacent, panel_normal) / denominator
+    into_solid = _scale(axis_out, -1.0)
     points: List[Point3] = []
     for step in range(steps + 1):
         theta = theta_max * step / steps
-        horizontal = adjacent_radius * along * (1.0 - math.cos(theta))
-        depth = adjacent_radius * (1.0 - math.sin(theta))
+        amount_in = adjacent_radius * (1.0 - math.cos(theta))
+        amount_up = adjacent_radius * (1.0 - math.sin(theta))
+        shift = -amount_in * sliding
         points.append((
-            vertex[0] + into_dir[0] * horizontal - axis_out[0] * depth,
-            vertex[1] + into_dir[1] * horizontal - axis_out[1] * depth,
-            vertex[2] + into_dir[2] * horizontal - axis_out[2] * depth,
+            vertex[0] + direction[0] * shift
+            + inward_adjacent[0] * amount_in + into_solid[0] * amount_up,
+            vertex[1] + direction[1] * shift
+            + inward_adjacent[1] * amount_in + into_solid[1] * amount_up,
+            vertex[2] + direction[2] * shift
+            + inward_adjacent[2] * amount_in + into_solid[2] * amount_up,
         ))
     return points
 
@@ -1313,8 +1432,9 @@ def _side_faces(
         )
 
         prev = (index - 1) % count
-        forward = _unit(_subtract(top[nxt], top[index]))
-        backward = _scale(forward, -1.0)
+        previous_direction = _unit(_subtract(top[index], top[prev]))
+        following_vertex = (nxt + 1) % count
+        next_direction = _unit(_subtract(top[following_vertex], top[nxt]))
         bottom_axis_out = _scale(axis, -1.0)
         top_axis_out = axis
 
@@ -1325,31 +1445,31 @@ def _side_faces(
         if bottom_offsets is not None:
             if _panel_closes_end(points, inward_2d, prev, False):
                 start_bottom = _corner_cut(
-                    base[index], forward,
+                    base[index], previous_direction,
                     _map_direction(inward_2d[prev], frame),
-                    bottom_axis_out,
+                    normals[index], bottom_axis_out,
                     float(bottom_offsets[prev]), bottom_offset,
                 )
             if _panel_closes_end(points, inward_2d, nxt, True):
                 end_bottom = _corner_cut(
-                    base[nxt], backward,
+                    base[nxt], next_direction,
                     _map_direction(inward_2d[nxt], frame),
-                    bottom_axis_out,
+                    normals[index], bottom_axis_out,
                     float(bottom_offsets[nxt]), bottom_offset,
                 )
         if top_offsets is not None:
             if _panel_closes_end(points, inward_2d, prev, False):
                 start_top = _corner_cut(
-                    top[index], forward,
+                    top[index], previous_direction,
                     _map_direction(inward_2d[prev], frame),
-                    top_axis_out,
+                    normals[index], top_axis_out,
                     float(top_offsets[prev]), top_offset,
                 )
             if _panel_closes_end(points, inward_2d, nxt, True):
                 end_top = _corner_cut(
-                    top[nxt], backward,
+                    top[nxt], next_direction,
                     _map_direction(inward_2d[nxt], frame),
-                    top_axis_out,
+                    normals[index], top_axis_out,
                     float(top_offsets[nxt]), top_offset,
                 )
 
@@ -1746,31 +1866,16 @@ def _expand_rim_radii(
 def _run_carries(
     points: Sequence[Point2],
     vertex: int,
-    orientation: float,
 ) -> bool:
     """Return whether a cap fillet continues across a loop vertex.
 
-    Smooth seams carry the run, and so does an oblique convex corner: an arc
-    that meets a straight edge at an angle is still one rim run, and stopping
-    there would leave a flat end face in the middle of the round.  Right-
-    angled, reflexive and concave corners end the run instead, because the
-    neighbouring panel closes the round there or the round would fold into
-    the solid.
+    Only a smooth seam carries the run.  A tessellated arc is stored as many
+    short chords and the user selects and sees the whole run, so the round
+    has to follow those chords.  A sharp corner ends the run: the round then
+    stops flush inside the neighbouring panel instead of spilling onto an
+    edge the user did not select.
     """
-    turn = _turn_angle(points, vertex)
-    if turn < SMOOTH_ANGLE:
-        return True
-    count = len(points)
-    previous = points[(vertex - 1) % count]
-    current = points[vertex]
-    following = points[(vertex + 1) % count]
-    cross = (
-        (current[0] - previous[0]) * (following[1] - current[1])
-        - (current[1] - previous[1]) * (following[0] - current[0])
-    )
-    if cross * orientation <= 0.0:
-        return False
-    return turn < math.pi * 0.5 - 1e-3
+    return _turn_angle(points, vertex) < SMOOTH_ANGLE
 
 
 def _carry_rim_radii(
@@ -1782,15 +1887,12 @@ def _carry_rim_radii(
     A tessellated arc is stored as many short straight segments.  The user
     selects and sees the whole run, so the round must be generated for the
     whole run too; tapering it inside one chord would leave a tiny loop on
-    the arc.  The run also wraps around an oblique corner onto the next edge,
-    which keeps the round full-width where the arc runs out into a straight
-    edge.  Right-angled corners still stop it, so a fillet picked on one side
-    of a box stays on that side.
+    the arc.  Sharp corners stop the run, where the neighbouring panel closes
+    the round flush.
     """
     count = len(radii)
     if count < 3:
         return
-    orientation = 1.0 if _loop_area(rounded) >= 0.0 else -1.0
     seeds = [index for index, value in enumerate(radii) if value > 1e-9]
     pending = list(seeds)
     seen = set(seeds)
@@ -1802,7 +1904,7 @@ def _carry_rim_radii(
             vertex = (
                 neighbour if neighbour == (index + 1) % count else index
             )
-            if not _run_carries(rounded, vertex, orientation):
+            if not _run_carries(rounded, vertex):
                 continue
             radii[neighbour] = radii[index]
             seen.add(neighbour)
