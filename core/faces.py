@@ -286,8 +286,8 @@ def _prism_faces_with_runs(
                     runs.append(len(patch))
 
         # Adjacent cap fillets meet along their cylinder intersection curves,
-        # which the signed ring trims above already follow.  This holds for
-        # convex corners and for the concave corners inside a hole alike.
+        # which the signed ring trims above already follow.  Sharp corners keep
+        # that miter; asymmetric tangent seams stop on the long edge instead.
     return faces, runs
 
 
@@ -759,6 +759,16 @@ def _cap_loop(
                 start_direction[0] * end_direction[1]
                 - start_direction[1] * end_direction[0]
             )
+            if _asymmetric_seam(
+                points, index, previous_radius, following_radius
+            ):
+                # Stop on the long edge's offset endpoint; the short strip
+                # blends its cross-section into that endpoint.
+                _append_point(result, _asymmetric_cap_point(
+                    points, inward, index,
+                    previous_radius, following_radius,
+                ))
+                continue
             if abs(cross) < 1e-12:
                 # Collinear neighbours: either offset point is on the same
                 # line, so a midpoint keeps the loop stable.
@@ -945,6 +955,97 @@ def _map_direction(direction: Point2, frame: PlaneFrame) -> Point3:
     ))
 
 
+def _segment_length(points: Sequence[Point2], segment: int) -> float:
+    """Return the length of one profile segment."""
+    count = len(points)
+    following = (segment + 1) % count
+    return math.hypot(
+        points[following][0] - points[segment][0],
+        points[following][1] - points[segment][1],
+    )
+
+
+def _asymmetric_seam(
+    points: Sequence[Point2],
+    vertex: int,
+    previous_radius: float,
+    following_radius: float,
+    ratio: float = 2.5,
+) -> bool:
+    """Return whether a smooth seam joins one short and one long edge.
+
+    Tessellated arcs are made of equal chords, so their seams are symmetric
+    and miter cleanly.  The tangent where an arc meets a long straight edge
+    is not: mitering there pushes the cap boundary past the tangent.  Such a
+    seam takes the long edge's offset instead and the short strip blends in.
+    """
+    if previous_radius <= 1e-9 or following_radius <= 1e-9:
+        return False
+    if abs(previous_radius - following_radius) > 1e-9:
+        return False
+    if _turn_angle(points, vertex) >= SMOOTH_ANGLE:
+        return False
+    count = len(points)
+    previous = (vertex - 1) % count
+    first = _segment_length(points, previous)
+    second = _segment_length(points, vertex)
+    shortest = min(first, second)
+    return shortest > 1e-9 and max(first, second) >= ratio * shortest
+
+
+def _asymmetric_cap_point(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    vertex: int,
+    previous_radius: float,
+    following_radius: float,
+) -> Point2:
+    """Return the cap-loop point at a chord-to-long-edge tangent seam."""
+    count = len(points)
+    previous = (vertex - 1) % count
+    if _segment_length(points, previous) >= _segment_length(points, vertex):
+        return (
+            points[vertex][0] + inward[previous][0] * previous_radius,
+            points[vertex][1] + inward[previous][1] * previous_radius,
+        )
+    return (
+        points[vertex][0] + inward[vertex][0] * following_radius,
+        points[vertex][1] + inward[vertex][1] * following_radius,
+    )
+
+
+def _strip_inwards(
+    points: Sequence[Point2],
+    inward: Sequence[Point2],
+    radii: Sequence[float],
+    segment: int,
+) -> Tuple[Point2, Point2]:
+    """Return the cross-section directions at a fillet strip's two ends.
+
+    A short tessellation chord that runs into a long straight edge starts on
+    the long edge's cross-section, so the cap boundary stays tangent there.
+    Blending back to the chord's own direction by the far end keeps both
+    seams tight.
+    """
+    count = len(points)
+    previous = (segment - 1) % count
+    following = (segment + 1) % count
+    length = _segment_length(points, segment)
+    start = inward[segment]
+    end = inward[segment]
+    if (
+        _asymmetric_seam(points, segment, radii[previous], radii[segment])
+        and _segment_length(points, previous) > length
+    ):
+        start = inward[previous]
+    if (
+        _asymmetric_seam(points, following, radii[segment], radii[following])
+        and _segment_length(points, following) > length
+    ):
+        end = inward[following]
+    return start, end
+
+
 def _edge_trim(
     points: Sequence[Point2],
     inward: Sequence[Point2],
@@ -963,9 +1064,14 @@ def _edge_trim(
     """
     if previous_radius <= 1e-9 or following_radius <= 1e-9:
         return 0.0
-    # The cap loop miters at every vertex, including the tangent junctions of
-    # a rounded vertical corner.  Applying the same miter here keeps the strip
-    # ends on that corner instead of stopping short of it.
+    # Where a short tessellation chord meets a much longer edge the two
+    # offset lines intersect past the tangent.  That miter would grow a beak
+    # on the cap, so the strips stop on the long edge's offset endpoint and
+    # the short strip blends its cross-section into that endpoint.
+    if _asymmetric_seam(
+        points, vertex, previous_radius, following_radius
+    ):
+        return 0.0
     miter = _miter_point(
         points, inward, vertex, previous_radius, following_radius
     )
@@ -1003,7 +1109,9 @@ def _rim_strip(
     if length <= 1e-9 or radius <= 1e-9:
         return []
     direction = _scale(span, 1.0 / length)
-    inward_3d = _map_direction(inward[segment], frame)
+    start_inward, end_inward = _strip_inwards(
+        points, inward, radii, segment
+    )
     start_trim, end_trim = _fillet_trims(points, inward, radii, segment)
     start_taper, end_taper = _fillet_taper(points, inward, radii, segment)
 
@@ -1031,6 +1139,20 @@ def _rim_strip(
     grid: List[List[Point3]] = []
     for index, (distance, current) in enumerate(kept):
         ring: List[Point3] = []
+        amount = distance / length if length > 1e-9 else 0.0
+        local_inward = (
+            start_inward[0] * (1.0 - amount) + end_inward[0] * amount,
+            start_inward[1] * (1.0 - amount) + end_inward[1] * amount,
+        )
+        local_length = math.hypot(*local_inward)
+        if local_length <= 1e-9:
+            local_inward = inward[segment]
+        else:
+            local_inward = (
+                local_inward[0] / local_length,
+                local_inward[1] / local_length,
+            )
+        inward_3d = _map_direction(local_inward, frame)
         for step in range(steps + 1):
             theta = math.pi * 0.5 * step / steps
             fade = 1.0 - math.cos(theta)
@@ -2334,9 +2456,10 @@ def _vertex_key(point: Point3) -> Tuple[float, ...]:
 def _shares_normal(
     first: Sequence[Point3], second: Sequence[Point3]
 ) -> bool:
-    """Return whether two edges touch a common face."""
+    """Return whether two edges touch a smoothly connected face."""
+    limit = math.cos(SMOOTH_ANGLE)
     return any(
-        _dot(_unit(a), _unit(b)) > 0.999
+        _dot(_unit(a), _unit(b)) >= limit
         for a in first for b in second
     )
 
