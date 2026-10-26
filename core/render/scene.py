@@ -603,13 +603,13 @@ class SceneRenderer:
             )
         )
         # Only an edge shared by two visible panels can be a crack through the
-        # solid.  Drawing it at the nearer panel's depth lets a genuinely
-        # closer face painted afterwards still cover the seal.
+        # solid.  Sealing it at the nearer panel's depth keeps it underneath
+        # that panel, so a later fill or crease outlines stays authoritative.
         for owners in seams.values():
             if len(owners) != 2:
                 continue
             near = max(owners, key=lambda owner: owner[0])
-            items.append((near[0], 2, near[1:]))
+            items.append((near[0], -1, near[1:]))
         items.sort(key=lambda item: (item[0], item[1]))
         for _, kind, payload in items:
             if kind == 1:
@@ -618,7 +618,7 @@ class SceneRenderer:
                     surface, self.palette.edge, start, end, width
                 )
                 continue
-            if kind == 2:
+            if kind == -1:
                 color, start, end = payload  # type: ignore[misc]
                 pygame.draw.line(surface, color, start, end, width)
                 continue
