@@ -663,8 +663,6 @@ class Workspace:
         highlight: Tuple[int, ...] = ()
         if extrude_preview is not None:
             highlight = extrude_preview.highlight
-        elif fillet_preview is not None:
-            highlight = fillet_preview.highlight
         self.viewport.draw(
             surface,
             layout.viewport,

@@ -129,8 +129,6 @@ class FilletPreview:
     handle_end: Optional[Point3] = None
     normal: Point3 = (0.0, 0.0, 1.0)
     radius: float = 0.0
-    # The rounded body, highlighted while the tool is open.
-    highlight: Tuple[int, ...] = ()
 
 
 def build_fillet_preview(
@@ -192,7 +190,6 @@ def build_fillet_preview(
     )
     return FilletPreview(
         preview, ghost_faces, start, end, normal, radius,
-        highlight=(feature.id,),
     )
 
 
