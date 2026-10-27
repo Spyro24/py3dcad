@@ -7,7 +7,7 @@ application model can resolve a selected face without pulling in the UI.
 import math
 from dataclasses import dataclass, replace
 from typing import (
-    Dict, Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING,
+    Dict, Iterator, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING,
 )
 
 from .profiles import (
@@ -2896,6 +2896,297 @@ def fillet_slices(
             ),
         ))
     return slices
+
+
+def stack_has_corner(
+    slices: Sequence[ExtrudeSlice], corner: Point2, tolerance: float = 1e-4
+) -> bool:
+    """Return whether any slice loop still has a sharp corner at ``corner``."""
+    for entry in slices:
+        for group in entry.regions:
+            for loop in group:
+                for x, y in loop:
+                    if (
+                        abs(x - corner[0]) <= tolerance
+                        and abs(y - corner[1]) <= tolerance
+                    ):
+                        return True
+    return False
+
+
+def stack_cap_segment_key(
+    slices: Sequence[ExtrudeSlice],
+    z: float,
+    point: Point2,
+    tolerance: float = 1e-4,
+) -> Optional[Tuple[Point2, Point2]]:
+    """Return the cap segment under a local point on a sliced body."""
+    for entry in slices:
+        if (
+            abs(entry.z0 - z) > 1e-6
+            and abs(entry.z1 - z) > 1e-6
+        ):
+            continue
+        for group in entry.regions:
+            for loop in group:
+                count = len(loop)
+                for index in range(count):
+                    start = loop[index]
+                    end = loop[(index + 1) % count]
+                    if (
+                        _point_segment_distance(point, start, end)
+                        <= tolerance
+                    ):
+                        first = (round(start[0], 6), round(start[1], 6))
+                        second = (round(end[0], 6), round(end[1], 6))
+                        return (
+                            (first, second) if first <= second
+                            else (second, first)
+                        )
+    return None
+
+
+def fillet_stack_slices(
+    slices: Sequence[ExtrudeSlice],
+    fillet: "Fillet",
+    steps: int = FILLET_SAMPLE_STEPS,
+) -> Optional[List[ExtrudeSlice]]:
+    """Round one edge of a body that is already stored as z-slices.
+
+    A cut or joined body is still one body; its edge is filleted by rounding
+    the corresponding slice loops instead of going back to a prism profile.
+    Returns ``None`` when the edge no longer exists, which means it is either
+    not filletable or already rounded.
+    """
+    entries = [
+        entry for entry in slices
+        if entry.regions and entry.z1 - entry.z0 > 1e-9
+    ]
+    if not entries or fillet.radius <= 1e-9:
+        return None
+    if fillet.kind == "vertical":
+        return _vertical_fillet_stack(entries, fillet)
+    return _cap_fillet_stack(entries, fillet, steps)
+
+
+def _vertical_fillet_stack(
+    entries: Sequence[ExtrudeSlice], fillet: "Fillet"
+) -> Optional[List[ExtrudeSlice]]:
+    """Round one vertical corner in every affected slice loop."""
+    result: List[ExtrudeSlice] = []
+    changed = False
+    for entry in entries:
+        regions: List[List[List[Point2]]] = []
+        for group in entry.regions:
+            rounded_group: List[List[Point2]] = []
+            for loop in group:
+                rounded = _round_loop(loop, [fillet])
+                if rounded != loop:
+                    changed = True
+                rounded_group.append(rounded)
+            regions.append(rounded_group)
+        result.append(replace(entry, regions=regions))
+    return result if changed else None
+
+
+def _cap_fillet_stack(
+    entries: Sequence[ExtrudeSlice], fillet: "Fillet", steps: int
+) -> Optional[List[ExtrudeSlice]]:
+    """Sample a rounded top or bottom rim over a sliced body."""
+    zmin = min(entry.z0 for entry in entries)
+    zmax = max(entry.z1 for entry in entries)
+    cap_z = zmax if fillet.kind == "top" else zmin
+    direction = -1.0 if fillet.kind == "top" else 1.0
+    point = (fillet.u, fillet.v)
+    if _cap_fillet_segment(entries, cap_z, point) is None:
+        return None
+    radius = fillet.radius
+    levels = {zmin, zmax}
+    for step in range(steps + 1):
+        levels.add(max(
+            zmin,
+            min(zmax, cap_z + direction * radius * step / steps),
+        ))
+    for entry in entries:
+        levels.add(entry.z0)
+        levels.add(entry.z1)
+    ordered = sorted(levels)
+    result: List[ExtrudeSlice] = []
+    for z0, z1 in zip(ordered, ordered[1:]):
+        if z1 - z0 <= 1e-9:
+            continue
+        # Sample the boundary nearer the cap so the cap face keeps its exact
+        # cross-section instead of being undersized by half a step.
+        sample = z1 if fillet.kind == "top" else z0
+        base = _stack_regions_at(entries, sample)
+        if not base:
+            continue
+        inset = _cap_fillet_inset(abs(cap_z - sample), radius)
+        regions = _inset_cap_regions(base, point, inset)
+        if not regions:
+            continue
+        result.append(ExtrudeSlice(
+            z0, z1, regions,
+            smooth_z0=(
+                _band_smooth(z0, cap_z, radius)
+                or _original_smooth(entries, z0)
+            ),
+            smooth_z1=(
+                _band_smooth(z1, cap_z, radius)
+                or _original_smooth(entries, z1)
+            ),
+        ))
+    return result
+
+
+def _stack_regions_at(
+    entries: Sequence[ExtrudeSlice], z: float
+) -> List[List[List[Point2]]]:
+    """Return the cross-section of the slice containing ``z``."""
+    for entry in entries:
+        if entry.z0 - 1e-9 <= z <= entry.z1 + 1e-9:
+            return entry.regions
+    return []
+
+
+def _cap_fillet_segment(
+    entries: Sequence[ExtrudeSlice], cap_z: float, point: Point2
+) -> Optional[Tuple[Point2, Point2]]:
+    """Return the straight cap edge that carries a new rim fillet."""
+    for entry in entries:
+        if (
+            abs(entry.z0 - cap_z) > 1e-6
+            and abs(entry.z1 - cap_z) > 1e-6
+        ):
+            continue
+        for group in entry.regions:
+            for loop in group:
+                count = len(loop)
+                for index in range(count):
+                    start = loop[index]
+                    end = loop[(index + 1) % count]
+                    if (
+                        _point_segment_distance(point, start, end)
+                        <= 1e-4
+                    ):
+                        return (start, end)
+    return None
+
+
+def _inset_cap_regions(
+    groups: Sequence[Sequence[Sequence[Point2]]],
+    point: Point2,
+    inset: float,
+) -> List[List[List[Point2]]]:
+    """Inset the filleted run of every loop at one sampled height."""
+    if inset <= 1e-9:
+        return [list(group) for group in groups]
+    regions: List[List[List[Point2]]] = []
+    for group in groups:
+        inset_group: List[List[Point2]] = []
+        for index, loop in enumerate(group):
+            segments = _fillet_run_segments(loop, point)
+            if not segments:
+                inset_group.append(list(loop))
+                continue
+            offsets = [
+                inset if segment in segments else 0.0
+                for segment in range(len(loop))
+            ]
+            inset_loop = _cap_loop(loop, offsets, index > 0)
+            inset_group.append(
+                inset_loop if len(inset_loop) >= 3 else list(loop)
+            )
+        if inset_group:
+            regions.append(inset_group)
+    return regions
+
+
+def _fillet_run_segments(
+    loop: Sequence[Point2], point: Point2, tolerance: float = 1e-4
+) -> Set[int]:
+    """Return the contiguous straight run of a loop under ``point``."""
+    count = len(loop)
+    if count < 3:
+        return set()
+    best: Optional[int] = None
+    best_distance = tolerance
+    for index in range(count):
+        distance = _point_segment_distance(
+            point, loop[index], loop[(index + 1) % count]
+        )
+        if distance <= best_distance:
+            best_distance = distance
+            best = index
+    if best is None:
+        return set()
+    start = loop[best]
+    end = loop[(best + 1) % count]
+    length = math.hypot(end[0] - start[0], end[1] - start[1])
+    if length <= 1e-9:
+        return {best}
+    direction = (
+        (end[0] - start[0]) / length,
+        (end[1] - start[1]) / length,
+    )
+    segments = {best}
+    for step in (-1, 1):
+        index = (best + step) % count
+        for _ in range(count):
+            if index == best or not _same_edge_line(
+                loop[index],
+                loop[(index + 1) % count],
+                start,
+                direction,
+                tolerance,
+            ):
+                break
+            segments.add(index)
+            index = (index + step) % count
+    return segments
+
+
+def _same_edge_line(
+    start: Point2,
+    end: Point2,
+    origin: Point2,
+    direction: Point2,
+    tolerance: float,
+) -> bool:
+    """Return whether a segment continues the straight run under test."""
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-9:
+        return False
+    cross = dx * direction[1] - dy * direction[0]
+    dot = dx * direction[0] + dy * direction[1]
+    if dot <= 0.0 or abs(cross) > tolerance:
+        return False
+    offset_x = start[0] - origin[0]
+    offset_y = start[1] - origin[1]
+    return (
+        abs(offset_x * direction[1] - offset_y * direction[0])
+        <= tolerance
+    )
+
+
+def _band_smooth(z: float, cap_z: float, radius: float) -> bool:
+    """Return whether a height lies inside a rounded rim transition."""
+    distance = abs(cap_z - z)
+    return 1e-9 < distance <= radius + 1e-9
+
+
+def _original_smooth(
+    entries: Sequence[ExtrudeSlice], z: float
+) -> bool:
+    """Return whether the original stack marks this height as smooth."""
+    for entry in entries:
+        if abs(entry.z0 - z) <= 1e-9 and entry.smooth_z0:
+            return True
+        if abs(entry.z1 - z) <= 1e-9 and entry.smooth_z1:
+            return True
+    return False
 
 
 def _stacked_feature_faces(

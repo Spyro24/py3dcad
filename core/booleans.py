@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
-from .faces import fillet_slices
+from .faces import fillet_slices, fillet_stack_slices
 from .profiles import (
     Region, build_regions, region_difference, region_intersection,
     region_union, split_loop_at_points,
@@ -18,7 +18,7 @@ from .sketch import Extrude, ExtrudeSlice, PlaneFrame
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .document import Document
-    from .sketch import Sketch
+    from .sketch import Fillet, Sketch
 
 Point2 = Tuple[float, float]
 Group = List[List[float]]
@@ -311,6 +311,17 @@ def combine_stacks(
     merged = _merge_slices(result)
     _split_shared_boundaries(merged)
     return merged
+
+
+def fillet_slices_body(
+    slices: Sequence[ExtrudeSlice], fillet: "Fillet"
+) -> Optional[List[ExtrudeSlice]]:
+    """Round one edge of a sliced body and keep the result watertight."""
+    result = fillet_stack_slices(slices, fillet)
+    if result is None:
+        return None
+    _split_shared_boundaries(result)
+    return result
 
 
 def _surface_boundary(

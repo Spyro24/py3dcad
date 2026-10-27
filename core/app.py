@@ -27,12 +27,15 @@ from .commands import (
     SetMeasurementPlacementCommand,
     SetMeasurementValueCommand,
 )
-from .booleans import build_tool_stack, plan_boolean
+from .booleans import (
+    build_tool_stack, fillet_slices_body, plan_boolean,
+)
 from .config import Config, format_opened
 from .document import Document
 from .faces import (
     edge_for_ref, face_for_ref, profile_has_corner,
-    profile_segment_key, vertical_edge_corner,
+    profile_segment_key, stack_cap_segment_key, stack_has_corner,
+    vertical_edge_corner,
 )
 from .preview import ExtrudePreview, build_extrude_preview
 from .sketch import (
@@ -68,6 +71,19 @@ def _plane_offset(point, frame) -> float:
     )
 
 
+def _stack_cap_side(
+    feature: Extrude, offset: float
+) -> Tuple[Optional[str], float]:
+    """Return which cap of a sliced body lies at a local plane offset."""
+    zmin = min(entry.z0 for entry in feature.slices)
+    zmax = max(entry.z1 for entry in feature.slices)
+    if abs(offset - zmax) <= 1e-4:
+        return "top", zmax
+    if abs(offset - zmin) <= 1e-4:
+        return "bottom", zmin
+    return None, offset
+
+
 def _resolve_fillet(
     document: Document, radius: float
 ) -> Tuple[Optional[str], Optional[Extrude], Optional[str], float, float]:
@@ -95,8 +111,6 @@ def _resolve_fillet(
     )
     if feature is None or edge is None or sketch is None:
         return "Select a solid edge first", None, None, 0.0, 0.0
-    if feature.slices:
-        return "Fillet is not available on a combined body", None, None, 0.0, 0.0
     frame = sketch.frame()
     delta = (
         edge.end[0] - edge.start[0],
@@ -113,10 +127,15 @@ def _resolve_fillet(
     )
     if along_axis > 0.999:
         corner = vertical_edge_corner(edge, frame)
-        if (
-            corner is None
-            or not profile_has_corner(document, feature, corner)
-        ):
+        has_corner = (
+            corner is not None
+            and (
+                stack_has_corner(feature.slices, corner)
+                if feature.slices
+                else profile_has_corner(document, feature, corner)
+            )
+        )
+        if not has_corner or corner is None:
             return "Edge is already filleted", None, None, 0.0, 0.0
         kind = "vertical"
         segment_key = None
@@ -142,21 +161,32 @@ def _resolve_fillet(
             + offset[1] * frame.v[1]
             + offset[2] * frame.v[2]
         )
-        segment_key = profile_segment_key(
-            document, feature, (u, v)
-        )
+        if feature.slices:
+            kind, cap_z = _stack_cap_side(feature, start_offset)
+            if kind is None:
+                return "Fillet needs a solid edge", None, None, 0.0, 0.0
+            segment_key = stack_cap_segment_key(
+                feature.slices, cap_z, (u, v)
+            )
+        else:
+            segment_key = profile_segment_key(
+                document, feature, (u, v)
+            )
         if segment_key is None:
             return "Edge is already filleted", None, None, 0.0, 0.0
-        # The cap on the positive-normal side is the top face.
-        center = feature.start + feature.height * 0.5
-        kind = (
-            "top"
-            if (start_offset + end_offset) * 0.5 > center
-            else "bottom"
-        )
+        if not feature.slices:
+            # The cap on the positive-normal side is the top face.
+            center = feature.start + feature.height * 0.5
+            kind = (
+                "top"
+                if (start_offset + end_offset) * 0.5 > center
+                else "bottom"
+            )
     if radius <= 0.0:
         return "Enter a radius greater than zero", None, None, 0.0, 0.0
-    if kind == "vertical":
+    if feature.slices:
+        duplicate = False
+    elif kind == "vertical":
         duplicate = any(
             fillet.kind == "vertical"
             and abs(fillet.u - u) <= 1e-4
@@ -814,6 +844,10 @@ class Application:
                     candidate.sketch_id,
                     candidate.height,
                     len(candidate.fillets),
+                    tuple(
+                        (entry.z0, entry.z1, len(entry.regions))
+                        for entry in candidate.slices
+                    ),
                 )
                 for candidate in document.features
             ),
@@ -840,7 +874,14 @@ class Application:
         )
         if target is None:
             return None
-        target.fillets.append(Fillet(kind, u, v, radius))
+        fillet = Fillet(kind, u, v, radius)
+        if target.slices:
+            rounded = fillet_slices_body(target.slices, fillet)
+            if rounded is None:
+                return None
+            target.slices = rounded
+        else:
+            target.fillets.append(fillet)
         # The user is seeing the result, not the old edge, so no stale
         # selection highlight may cover the preview.
         preview.selected_edge = None

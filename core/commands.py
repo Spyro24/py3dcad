@@ -4,7 +4,7 @@ import copy
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
-from .booleans import OPERATION_LABELS
+from .booleans import OPERATION_LABELS, fillet_slices_body
 from .document import Document
 from .sketch import (
     Extrude,
@@ -1118,19 +1118,33 @@ class AddFilletCommand(Command):
         self.document = document
         self.feature = feature
         self.fillet = Fillet(kind, float(u), float(v), float(radius))
+        self._before_slices: Optional[List[ExtrudeSlice]] = None
 
     @property
     def label(self) -> str:
         return f"Fillet {self.fillet.radius:g} mm"
 
     def do(self) -> None:
-        if not any(
+        if self.feature.slices:
+            # A cut or joined body keeps its slices as the source of truth,
+            # so the rounding is baked into them instead of a prism profile.
+            if self._before_slices is None:
+                self._before_slices = copy.deepcopy(self.feature.slices)
+            rounded = fillet_slices_body(
+                self.feature.slices, self.fillet
+            )
+            if rounded is None:
+                return
+            self.feature.slices = rounded
+        elif not any(
             entry is self.fillet for entry in self.feature.fillets
         ):
             self.feature.fillets.append(self.fillet)
         self.document.dirty = True
 
     def undo(self) -> None:
+        if self._before_slices is not None:
+            self.feature.slices = copy.deepcopy(self._before_slices)
         self.feature.fillets[:] = [
             entry
             for entry in self.feature.fillets
