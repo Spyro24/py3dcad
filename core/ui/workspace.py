@@ -2,15 +2,18 @@
 
 import math
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, List, Optional, Sequence, Set, Tuple
 
 import pygame
 
 from ..document import Document
+from ..faces import Face
+from ..preview import ExtrudePreview
 from ..profiles import (
     build_regions, intersect_loops, loop_cuts_selection, point_in_polygon,
     union_profiles,
 )
+from ..render.camera import PROJECTION_SCALE
 from ..sketch import (
     Measurement,
     Point,
@@ -39,6 +42,17 @@ class HistoryEntry:
     kind: str
     label: str
     timeline_visible: bool = True
+
+
+@dataclass
+class _ExtrudeArrowDrag:
+    """Screen and model anchors captured when an extrude drag starts."""
+
+    start_pos: Tuple[int, int]
+    base_height: float
+    base_half: float
+    screen_axis: Tuple[float, float]
+    symmetric: bool
 
 
 @dataclass
@@ -282,6 +296,8 @@ class Workspace:
         self.sketch_palette_window = SketchPaletteWindow()
         self.fillet_window = FilletWindow()
         self.extrude_window = ExtrudeWindow()
+        self._extrude_preview: Optional[ExtrudePreview] = None
+        self._extrude_arrow_drag: Optional[_ExtrudeArrowDrag] = None
         self._history_document: Optional[int] = None
         self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
@@ -360,6 +376,8 @@ class Workspace:
             return False
         self.create_sketch_window.close()
         self.fillet_window.close()
+        self._extrude_arrow_drag = None
+        self._extrude_preview = None
         self.extrude_window.open(len(regions))
         return True
 
@@ -396,6 +414,8 @@ class Workspace:
             window.set_error(error)
             return
         window.close()
+        self._extrude_arrow_drag = None
+        self._extrude_preview = None
 
     def set_origin_visible(self, visible: bool) -> None:
         """Show or hide the origin planes, axes and marker."""
@@ -589,26 +609,31 @@ class Workspace:
         position: int,
         playing: bool,
         preview_document: Optional[Document] = None,
+        ghost_faces: Sequence[Face] = (),
+        extrude_preview: Optional[ExtrudePreview] = None,
     ) -> None:
         self._init_fonts()
         self._sync_history_document(document)
+        self._extrude_preview = extrude_preview
         self._draw_toolbar(surface, layout.toolbar, document)
         self._draw_tree(surface, layout.document_tree, document)
         self.viewport.draw(
             surface,
             layout.viewport,
             document,
-            self._selected_tool,
+            "extrude" if self.extrude_window.visible else self._selected_tool,
             len(self._valid_selected_regions(
                 document.sketch(document.active_sketch_id)
             )),
             preview_document=preview_document,
+            ghost_faces=ghost_faces,
         )
         self._draw_sketch_loops(surface, layout.viewport, document)
         self._draw_line_preview(surface, layout.viewport, document)
         self._draw_rectangle_preview(surface, layout.viewport, document)
         self._draw_circle_preview(surface, layout.viewport, document)
         self._draw_sketch_selection(surface, layout.viewport, document)
+        self._draw_extrude_arrow(surface, layout.viewport)
         if layout.command_bar.w > 0:
             self._draw_command_bar(
                 surface,
@@ -2271,21 +2296,24 @@ class Workspace:
             self._loop_surface = overlay
         overlay.fill((0, 0, 0, 0))
         selected_faces = self._face_regions(sketch, selected_regions)
-        for outer, holes in selected_faces:
-            self._draw_region_fill(
-                overlay, sketch, outer, holes, region,
-                self.geometry_selection, 70,
-            )
-        if (
-            hovered is not None
-            and hovered not in selected_regions
-            and all(0 <= index < len(loops) for index in hovered)
-        ):
-            for outer, holes in self._face_regions(sketch, [hovered]):
+        # While the extrude panel is open the live solid preview replaces the
+        # flat yellow selection fill.
+        if not self.extrude_window.visible:
+            for outer, holes in selected_faces:
                 self._draw_region_fill(
                     overlay, sketch, outer, holes, region,
-                    self.geometry_hover, 45,
+                    self.geometry_selection, 70,
                 )
+            if (
+                hovered is not None
+                and hovered not in selected_regions
+                and all(0 <= index < len(loops) for index in hovered)
+            ):
+                for outer, holes in self._face_regions(sketch, [hovered]):
+                    self._draw_region_fill(
+                        overlay, sketch, outer, holes, region,
+                        self.geometry_hover, 45,
+                    )
         surface.blit(overlay, region.rect.topleft)
         for outer, holes in selected_faces:
             self._draw_region_outline(
@@ -2293,6 +2321,62 @@ class Workspace:
                 self.geometry_selection, 2,
             )
         surface.set_clip(previous_clip)
+
+    def _draw_extrude_arrow(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        """Draw the distance handle at the end of a pending extrusion."""
+        points = self._extrude_arrow_points(region)
+        if points is None:
+            return
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        start, end = points
+        color = self.accent
+        width = max(2, self._s(2))
+        pygame.draw.line(surface, color, start, end, width)
+        radius = max(3, self._s(3))
+        pygame.draw.circle(surface, color, start, radius)
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length < 1.0:
+            pygame.draw.circle(surface, color, end, max(4, self._s(5)))
+            surface.set_clip(previous_clip)
+            return
+        unit_x, unit_y = dx / length, dy / length
+        head = min(self._s(13), length * 0.7)
+        wing = head * 0.45
+        left = (
+            end[0] - unit_x * head - unit_y * wing,
+            end[1] - unit_y * head + unit_x * wing,
+        )
+        right = (
+            end[0] - unit_x * head + unit_y * wing,
+            end[1] - unit_y * head - unit_x * wing,
+        )
+        pygame.draw.polygon(surface, color, [end, left, right])
+        pygame.draw.circle(
+            surface, pygame.Color(235, 242, 255), end, max(2, self._s(2))
+        )
+        surface.set_clip(previous_clip)
+
+    def _extrude_arrow_points(
+        self, region: Rect
+    ) -> Optional[
+        Tuple[Tuple[float, float], Tuple[float, float]]
+    ]:
+        preview = self._extrude_preview
+        if (
+            preview is None
+            or preview.handle_start is None
+            or preview.handle_end is None
+        ):
+            return None
+        return (
+            self.viewport.project(preview.handle_start, region),
+            self.viewport.project(preview.handle_end, region),
+        )
 
     def _draw_region_fill(
         self,
@@ -4278,6 +4362,107 @@ class Workspace:
     # Interaction
     # ------------------------------------------------------------------
 
+    def _handle_extrude_arrow_event(
+        self, event: pygame.event.Event, region: Rect
+    ) -> bool:
+        """Start or update a drag of the extrusion distance handle."""
+        if self._extrude_arrow_drag is not None:
+            if event.type == pygame.MOUSEMOTION:
+                self._drag_extrude_arrow(event.pos)
+                return True
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._extrude_arrow_drag = None
+                return True
+            return False
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self.extrude_window.visible
+            and region.collidepoint(event.pos)
+            and self._extrude_arrow_hit(event.pos, region)
+        ):
+            return self._begin_extrude_arrow_drag(event.pos, region)
+        return False
+
+    def _extrude_arrow_hit(
+        self, pos: Tuple[int, int], region: Rect
+    ) -> bool:
+        points = self._extrude_arrow_points(region)
+        if points is None:
+            return False
+        start, end = points
+        if math.hypot(pos[0] - end[0], pos[1] - end[1]) <= self._s(15):
+            return True
+        return (
+            self._distance_to_segment(pos, start, end) <= self._s(7)
+        )
+
+    def _begin_extrude_arrow_drag(
+        self, pos: Tuple[int, int], region: Rect
+    ) -> bool:
+        preview = self._extrude_preview
+        distance = self.extrude_window.distance_value()
+        if (
+            preview is None
+            or preview.handle_start is None
+            or preview.handle_end is None
+            or distance is None
+        ):
+            return False
+        start = preview.handle_start
+        end = preview.handle_end
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        dz = end[2] - start[2]
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length <= 1e-9:
+            return False
+        axis = (dx / length, dy / length, dz / length)
+        anchor = self.viewport.project(start, region)
+        unit = self.viewport.project(
+            (
+                start[0] + axis[0],
+                start[1] + axis[1],
+                start[2] + axis[2],
+            ),
+            region,
+        )
+        screen_axis = (unit[0] - anchor[0], unit[1] - anchor[1])
+        projection_scale = PROJECTION_SCALE * self.viewport.camera.zoom
+        if math.hypot(*screen_axis) < max(0.5, projection_scale * 0.15):
+            # Viewed straight down the normal the projected arrow collapses to
+            # a dot.  Fall back to a vertical drag so the handle stays usable.
+            screen_axis = (0.0, -projection_scale)
+            if abs(screen_axis[1]) <= 1e-6:
+                return False
+        self._extrude_arrow_drag = _ExtrudeArrowDrag(
+            start_pos=pos,
+            base_height=preview.height,
+            base_half=distance * 0.5,
+            screen_axis=screen_axis,
+            symmetric=self.extrude_window.is_symmetric(),
+        )
+        return True
+
+    def _drag_extrude_arrow(self, pos: Tuple[int, int]) -> None:
+        drag = self._extrude_arrow_drag
+        if drag is None:
+            return
+        dx = pos[0] - drag.start_pos[0]
+        dy = pos[1] - drag.start_pos[1]
+        sx, sy = drag.screen_axis
+        denominator = sx * sx + sy * sy
+        if denominator <= 1e-9:
+            return
+        world = (dx * sx + dy * sy) / denominator
+        if drag.symmetric:
+            half = max(0.05, drag.base_half + world)
+            self.extrude_window.set_distance_value(half * 2.0)
+            return
+        signed = drag.base_height + world
+        self.extrude_window.set_distance_value(abs(signed))
+        self.extrude_window.reverse = signed < 0.0
+
     def handle_event(
         self,
         event: pygame.event.Event,
@@ -4292,6 +4477,14 @@ class Workspace:
 
         active_sketch = document.sketch(document.active_sketch_id)
 
+        # A drag on the viewport handle must keep receiving motion even when
+        # the pointer crosses the property panel.
+        if (
+            self._extrude_arrow_drag is not None
+            and self._handle_extrude_arrow_event(event, layout.viewport)
+        ):
+            return True
+
         # The extrude panel owns keyboard input while it is open, so typing a
         # distance never reaches the sketch tools or the application shortcuts.
         if self.extrude_window.visible:
@@ -4302,7 +4495,14 @@ class Workspace:
                 self._apply_extrude(document)
                 return True
             if action is not ExtrudeWindowAction.NONE:
+                if not self.extrude_window.visible:
+                    self._extrude_arrow_drag = None
                 return True
+        else:
+            self._extrude_arrow_drag = None
+
+        if self._handle_extrude_arrow_event(event, layout.viewport):
+            return True
 
         if self._handle_measurement_edit_event(event, document):
             return True

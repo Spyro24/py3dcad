@@ -1650,6 +1650,12 @@ class ExtrudeWindow:
             return None
         return value if value > 0.0 else None
 
+    def set_distance_value(self, value: float) -> None:
+        """Update the distance from a viewport drag handle."""
+        self.distance = f"{max(0.05, value):.2f}".rstrip("0").rstrip(".")
+        self._replace_text = False
+        self.error = ""
+
     def taper_value(self) -> Optional[float]:
         """Return the entered taper angle in degrees, or None when invalid."""
         try:

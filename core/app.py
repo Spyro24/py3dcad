@@ -34,6 +34,7 @@ from .faces import (
     edge_for_ref, face_for_ref, profile_has_corner,
     profile_segment_key, vertical_edge_corner,
 )
+from .preview import ExtrudePreview, build_extrude_preview
 from .sketch import (
     Extrude,
     Fillet,
@@ -223,6 +224,7 @@ class Application:
         self._playing = False
         self._play_accumulator = 0.0
         self._fillet_preview_cache = None
+        self._extrude_preview_cache = None
 
         self._scale_index = self._nearest_scale_index(self.config.ui_scale)
         self._apply_scale(save=False)
@@ -846,6 +848,89 @@ class Application:
         self._fillet_preview_cache = (key, preview)
         return preview
 
+    def extrude_preview(
+        self, document: Optional[Document] = None
+    ) -> Optional[ExtrudePreview]:
+        """Return a throwaway document for the pending extrude panel state."""
+        if document is None:
+            document = self.active_document()
+        window = self.workspace.extrude_window
+        if document is None or not window.visible:
+            return None
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return None
+        distance = window.distance_value()
+        taper = window.taper_value()
+        if distance is None or taper is None or window.thin:
+            return None
+        if abs(taper) > 1e-9:
+            return None
+        regions = self.workspace.selected_regions(sketch)
+        if not regions:
+            return None
+        symmetric = window.is_symmetric()
+        height = distance if symmetric or not window.reverse else -distance
+        start = -distance * 0.5 if symmetric else 0.0
+        key = self._extrude_preview_key(
+            document, sketch, regions, height, start,
+            window.operation,
+        )
+        cached = self._extrude_preview_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        cuts = self.workspace.selected_cut_profiles(sketch)
+        preview = build_extrude_preview(
+            document, sketch, height, start, [], regions, cuts,
+            window.operation,
+        )
+        self._extrude_preview_cache = (key, preview)
+        return preview
+
+    @staticmethod
+    def _extrude_preview_key(
+        document: Document,
+        sketch: Sketch,
+        regions: List[List[List[int]]],
+        height: float,
+        start: float,
+        operation: str,
+    ) -> Tuple:
+        """Fingerprint every input that can change the preview."""
+        features = tuple(
+            (
+                feature.id,
+                feature.sketch_id,
+                round(feature.start, 9),
+                round(feature.height, 9),
+                len(feature.fillets),
+                tuple(
+                    (
+                        round(entry.z0, 9),
+                        round(entry.z1, 9),
+                        len(entry.regions),
+                    )
+                    for entry in feature.slices
+                ),
+            )
+            for feature in document.features
+        )
+        return (
+            document.id,
+            sketch.id,
+            len(sketch.points),
+            len(sketch.edges),
+            len(sketch.circles),
+            tuple(
+                tuple(tuple(loop) for loop in region)
+                for region in regions
+            ),
+            round(height, 9),
+            round(start, 9),
+            operation,
+            features,
+        )
+
     def select_sketch(self, sketch_id: int) -> None:
         document = self.active_document()
         if document is not None:
@@ -1140,10 +1225,16 @@ class Application:
                 if entry.timeline_visible
             ]
             radius = self.workspace.fillet_preview_radius()
-            preview = (
-                self.fillet_preview(radius)
-                if radius is not None else None
-            )
+            extrude_preview = self.extrude_preview(document)
+            if extrude_preview is not None:
+                preview = extrude_preview.document
+                ghost_faces = extrude_preview.ghost_faces
+            else:
+                preview = (
+                    self.fillet_preview(radius)
+                    if radius is not None else None
+                )
+                ghost_faces = ()
             self.workspace.draw(
                 surface,
                 self.layout,
@@ -1153,6 +1244,8 @@ class Application:
                 stack.position if stack else 0,
                 self._playing,
                 preview_document=preview,
+                ghost_faces=ghost_faces,
+                extrude_preview=extrude_preview,
             )
         else:
             self.start_page.draw(surface, self._content_region())

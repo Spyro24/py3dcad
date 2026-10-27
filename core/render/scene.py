@@ -72,6 +72,8 @@ class ScenePalette:
     text_muted: Color = (125, 125, 136)
     edge: Color = (55, 55, 65)
     edge_selected: Color = (255, 193, 110)
+    ghost_fill: Color = (225, 64, 64)
+    ghost_edge: Color = (255, 120, 120)
     cube_top: Color = (145, 145, 155)
     cube_bottom: Color = (82, 82, 92)
     cube_side: Color = (122, 122, 132)
@@ -92,6 +94,7 @@ class SceneRenderer:
         self._plane_surface: Optional[pygame.Surface] = None
         self._face_surface: Optional[pygame.Surface] = None
         self._hole_surface: Optional[pygame.Surface] = None
+        self._ghost_surface: Optional[pygame.Surface] = None
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.ui_scale) < 1e-6:
@@ -136,6 +139,7 @@ class SceneRenderer:
         document: Document,
         camera: OrbitCamera,
         preview_document: Optional[Document] = None,
+        ghost_faces: Sequence[Face] = (),
     ) -> None:
         self._init_fonts()
         active = document.sketch(document.active_sketch_id)
@@ -154,6 +158,10 @@ class SceneRenderer:
         self._draw_solids(
             surface, rect, preview_document or document, camera
         )
+        if ghost_faces:
+            self._draw_ghost_solids(
+                surface, rect, ghost_faces, camera
+            )
         if custom_active:
             # A face sketch lives on top of its solid, so its local grid and
             # the sketch itself must render after the solid faces.
@@ -648,6 +656,80 @@ class SceneRenderer:
             edge = edge_for_ref(document, document.selected_edge)
             if edge is not None:
                 self._draw_edge_selection(surface, rect, camera, edge)
+
+    def _draw_ghost_solids(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        faces: Sequence[Face],
+        camera: OrbitCamera,
+    ) -> None:
+        """Draw removed material as a translucent red volume."""
+        overlay = self._ghost_surface
+        if overlay is None or overlay.get_size() != rect.size:
+            overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+            self._ghost_surface = overlay
+        overlay.fill((0, 0, 0, 0))
+        ordered = sorted(
+            faces, key=lambda face: camera.depth(face.vertices)
+        )
+        self._ghost_fills(overlay, ordered, rect, camera)
+        self._ghost_outlines(overlay, ordered, rect, camera)
+        surface.blit(overlay, rect.topleft)
+
+    def _ghost_fills(
+        self,
+        overlay: pygame.Surface,
+        faces: Sequence[Face],
+        rect: pygame.Rect,
+        camera: OrbitCamera,
+    ) -> None:
+        fill = (*self.palette.ghost_fill, 78)
+        for face in faces:
+            polygon = self._ghost_polygon(face.vertices, rect, camera)
+            if len(polygon) < 3:
+                continue
+            pygame.draw.polygon(overlay, fill, polygon)
+            for hole in face.holes:
+                hole_polygon = self._ghost_polygon(hole, rect, camera)
+                if len(hole_polygon) >= 3:
+                    pygame.draw.polygon(
+                        overlay, (0, 0, 0, 0), hole_polygon
+                    )
+
+    def _ghost_outlines(
+        self,
+        overlay: pygame.Surface,
+        faces: Sequence[Face],
+        rect: pygame.Rect,
+        camera: OrbitCamera,
+    ) -> None:
+        edge = (*self.palette.ghost_edge, 190)
+        width = max(1, self._s(1))
+        for face in faces:
+            polygon = self._ghost_polygon(face.vertices, rect, camera)
+            if len(polygon) < 3:
+                continue
+            pygame.draw.lines(overlay, edge, True, polygon, width)
+            for hole in face.holes:
+                hole_polygon = self._ghost_polygon(hole, rect, camera)
+                if len(hole_polygon) >= 3:
+                    pygame.draw.lines(
+                        overlay, edge, True, hole_polygon, width
+                    )
+
+    @staticmethod
+    def _ghost_polygon(
+        points: Sequence[Sequence[float]],
+        rect: pygame.Rect,
+        camera: OrbitCamera,
+    ) -> List[Point2]:
+        """Project ghost geometry into overlay-local coordinates."""
+        polygon: List[Point2] = []
+        for point in points:
+            x, y = camera.project(point, rect.center)
+            polygon.append((x - rect.x, y - rect.y))
+        return polygon
 
     @staticmethod
     def _edge_key(

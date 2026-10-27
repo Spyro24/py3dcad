@@ -5,7 +5,7 @@ from typing import Callable, Optional, Sequence, Tuple
 import pygame
 
 from ..document import Document
-from ..faces import edge_for_ref, face_for_ref
+from ..faces import Face, edge_for_ref, face_for_ref
 from ..render import OrbitCamera, SceneRenderer
 from ..sketch import PlaneLike, Point
 from .layout import Rect
@@ -125,6 +125,7 @@ class Viewport:
         active_tool: Optional[str] = None,
         selected_profiles: int = 0,
         preview_document: Optional[Document] = None,
+        ghost_faces: Sequence[Face] = (),
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -137,6 +138,7 @@ class Viewport:
         self.renderer.draw(
             surface, region.rect, document, self.camera,
             preview_document=preview_document,
+            ghost_faces=ghost_faces,
         )
         if self.show_orientation_cube:
             self.renderer.draw_orientation_cube(
@@ -167,7 +169,12 @@ class Viewport:
                 )
                 status += f"  ·  {len(active.circles)} {circle_word}"
             profile_count = len(active.closed_loops())
-            if active_tool == "line":
+            if active_tool == "extrude":
+                hint = (
+                    "Drag the blue arrow to set the distance"
+                    "  ·  Enter to apply  ·  Esc to cancel"
+                )
+            elif active_tool == "line":
                 hint = "Click to draw a line  ·  Esc to deselect"
             elif active_tool == "rectangle":
                 hint = (
