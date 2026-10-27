@@ -18,6 +18,9 @@ from ..sketch import (
 from .camera import OrbitCamera, Point2, PROJECTION_SCALE
 from .orientation_cube import OrientationCube
 
+FaceEdgeKey = Tuple[Tuple[float, ...], Tuple[float, ...]]
+FaceEdgeEntry = Optional[Tuple[FaceEdgeKey, bool]]
+
 GRID_STEP = 10.0
 ORIGIN_GIZMO_SCALE = 0.9
 ORIGIN_PLANE_HALF = 46.0
@@ -95,6 +98,9 @@ class SceneRenderer:
         self._face_surface: Optional[pygame.Surface] = None
         self._hole_surface: Optional[pygame.Surface] = None
         self._ghost_surface: Optional[pygame.Surface] = None
+        self._edge_key_cache: Dict[
+            int, Tuple[Face, List[FaceEdgeEntry]]
+        ] = {}
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.ui_scale) < 1e-6:
@@ -547,9 +553,10 @@ class SceneRenderer:
             front = (face.normal[0] * view_dir[0] +
                      face.normal[1] * view_dir[1] +
                      face.normal[2] * view_dir[2]) > 0
+            depth = camera.depth(face.vertices)
             if face.label.startswith("Side face"):
                 self._collect_edge_sides(
-                    face, front, camera.depth(face.vertices), sides, smooth
+                    face, front, depth, sides, smooth
                 )
             # Backface culling: skip faces facing away from camera
             if not front:
@@ -563,7 +570,7 @@ class SceneRenderer:
                 for hole in face.holes
             ]
             faces.append((
-                camera.depth(face.vertices),
+                depth,
                 feature_id,
                 face_index,
                 polygon,
@@ -574,16 +581,15 @@ class SceneRenderer:
             sharp = face.sharp_edges
             if sharp is None:
                 continue
-            depth = camera.depth(face.vertices)
             count = len(face.vertices)
+            keys = self._face_edge_keys(face)
             for index in range(count):
                 if index >= len(sharp) or sharp[index]:
                     continue
-                start = face.vertices[index]
-                end = face.vertices[(index + 1) % count]
-                if start == end:
+                entry = keys[index]
+                if entry is None:
                     continue
-                seams.setdefault(self._edge_key(start, end), []).append((
+                seams.setdefault(entry[0], []).append((
                     depth,
                     face.color,
                     polygon[index],
@@ -752,17 +758,46 @@ class SceneRenderer:
         smooth: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]],
     ) -> None:
         """Record the facing and depth of both panels along every edge."""
+        for entry in self._face_edge_keys(face):
+            if entry is None:
+                continue
+            key, is_smooth = entry
+            sides.setdefault(key, []).append((front, depth))
+            if is_smooth:
+                smooth.add(key)
+
+    def _face_edge_keys(self, face: Face) -> List[FaceEdgeEntry]:
+        """Return one rounded mesh key per face edge, built once per face.
+
+        Rounding every endpoint of a tessellated body on every frame is the
+        single most expensive step of drawing a sliced body, so the keys
+        travel with the face.  Entries are aligned with ``face.vertices``;
+        degenerate edges map to ``None``.  Faces are rebuilt whenever their
+        slices change, so a cached list always matches its face.
+        """
+        cached = self._edge_key_cache.get(id(face))
+        if cached is not None and cached[0] is face:
+            return cached[1]
         count = len(face.vertices)
         sharp = face.sharp_edges
+        entries: List[FaceEdgeEntry] = []
         for index in range(count):
             start = face.vertices[index]
             end = face.vertices[(index + 1) % count]
             if start == end:
+                entries.append(None)
                 continue
-            key = self._edge_key(start, end)
-            sides.setdefault(key, []).append((front, depth))
-            if sharp is not None and index < len(sharp) and not sharp[index]:
-                smooth.add(key)
+            is_smooth = (
+                sharp is not None
+                and index < len(sharp)
+                and not sharp[index]
+            )
+            entries.append((self._edge_key(start, end), is_smooth))
+        if len(self._edge_key_cache) > 4096:
+            self._edge_key_cache.clear()
+        # Holding the face keeps its id unique for as long as the entry lives.
+        self._edge_key_cache[id(face)] = (face, entries)
+        return entries
 
     def _silhouette_edges(
         self,

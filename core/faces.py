@@ -24,6 +24,15 @@ EdgeRef = Tuple[int, int]
 # Side panels whose normals differ by less than this angle are one smooth face.
 SMOOTH_ANGLE = math.radians(20.0)
 
+# Interface caps depend on just two slices, so unchanged neighbours can reuse
+# the polygon differences.  A live preview rebuilds its stack on every drag
+# step while only the slices near the moving boundary actually change.
+_interface_cap_cache: Dict[
+    Tuple[object, ...],
+    List[Tuple[float, float, List[List[List[float]]], bool]],
+] = {}
+_INTERFACE_CAP_CACHE_LIMIT = 256
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .document import Document
     from .sketch import Extrude, Fillet, Sketch
@@ -543,9 +552,33 @@ def _stack_caps(
     return caps
 
 
+def _regions_cache_key(
+    regions: Sequence[Sequence[Sequence[float]]],
+) -> Tuple[Tuple[Tuple[Tuple[float, float], ...], ...], ...]:
+    """Return a hashable snapshot of a slice's cross-section."""
+    return tuple(
+        tuple(
+            tuple((float(x), float(y)) for x, y in loop)
+            for loop in group
+        )
+        for group in regions
+    )
+
+
 def _interface_caps(
     lower: ExtrudeSlice, upper: ExtrudeSlice
 ) -> List[Tuple[float, float, List[List[List[float]]], bool]]:
+    """Return the caps between two slices, reusing unchanged neighbours."""
+    key = (
+        lower.z1,
+        lower.smooth_z1,
+        upper.smooth_z0,
+        _regions_cache_key(lower.regions),
+        _regions_cache_key(upper.regions),
+    )
+    cached = _interface_cap_cache.get(key)
+    if cached is not None:
+        return cached
     z = lower.z1
     smooth = lower.smooth_z1 and upper.smooth_z0
     lower_pairs = _group_pairs(lower.regions)
@@ -569,6 +602,9 @@ def _interface_caps(
         groups = _split_groups(_region_groups(pairs), points)
         if groups:
             caps.append((z, sign, groups, smooth))
+    _interface_cap_cache[key] = caps
+    if len(_interface_cap_cache) > _INTERFACE_CAP_CACHE_LIMIT:
+        _interface_cap_cache.pop(next(iter(_interface_cap_cache)))
     return caps
 
 
@@ -2862,6 +2898,35 @@ def fillet_slices(
     return slices
 
 
+def _stacked_feature_faces(
+    feature: "Extrude", frame: PlaneFrame
+) -> Tuple[List[Face], List[int]]:
+    """Build a combined body's faces, reusing the last build when unchanged.
+
+    Rebuilding a sampled fillet's caps needs a polygon difference per slice,
+    which is far too slow to repeat on every frame.  A command replaces the
+    feature's ``slices`` list whenever the body changes, so the list identity
+    plus its levels identify one immutable build.
+    """
+    slices = feature.slices
+    levels = tuple((entry.z0, entry.z1) for entry in slices)
+    frame_key = (frame.origin, frame.u, frame.v, frame.normal)
+    cached = getattr(feature, "_stacked_face_cache", None)
+    if (
+        cached is not None
+        and cached[0] is slices
+        and cached[1] == levels
+        and cached[2] == frame_key
+    ):
+        return cached[3], cached[4]
+    faces, runs = stacked_faces(slices, frame)
+    # Holding the list keeps its identity stable while the cache lives.
+    feature._stacked_face_cache = (
+        slices, levels, frame_key, faces, runs
+    )
+    return faces, runs
+
+
 def iter_solid_faces(
     document: "Document",
 ) -> Iterator[Tuple[int, int, Face]]:
@@ -2877,7 +2942,7 @@ def iter_solid_faces(
             continue
         face_index = 0
         if feature.slices:
-            faces, runs = stacked_faces(feature.slices, sketch.frame())
+            faces, runs = _stacked_feature_faces(feature, sketch.frame())
             groups = _face_groups(faces, runs)
             for face, group in zip(faces, groups):
                 yield feature.id, face_index + group, face

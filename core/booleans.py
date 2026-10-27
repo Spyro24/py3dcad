@@ -32,6 +32,12 @@ OPERATION_LABELS = {
 }
 TOLERANCE = 1e-6
 
+# ``_apply`` is a pure function of two cross-sections.  A live preview walks
+# the same slice pairs on every drag step, so caching its results keeps the
+# boolean cost proportional to what actually moved.
+_apply_cache: Dict[Tuple[object, ...], List["Group"]] = {}
+_APPLY_CACHE_LIMIT = 512
+
 
 @dataclass(frozen=True)
 class _FrameMap:
@@ -322,6 +328,14 @@ def _surface_boundary(
 def _apply(
     operation: Operation, first: List[Group], second: List[Group]
 ) -> List[Group]:
+    key = (
+        operation,
+        _groups_cache_key(first),
+        _groups_cache_key(second),
+    )
+    cached = _apply_cache.get(key)
+    if cached is not None:
+        return list(cached)
     first_pairs = _pairs(first)
     second_pairs = _pairs(second)
     if operation == "join":
@@ -330,7 +344,26 @@ def _apply(
         pairs = region_difference(first_pairs, second_pairs)
     else:
         pairs = region_intersection(first_pairs, second_pairs)
-    return _groups(pairs)
+    groups = _groups(pairs)
+    _apply_cache[key] = groups
+    if len(_apply_cache) > _APPLY_CACHE_LIMIT:
+        _apply_cache.pop(next(iter(_apply_cache)))
+    return list(groups)
+
+
+def _groups_cache_key(
+    groups: Sequence[Group],
+) -> Tuple[Tuple[Tuple[Tuple[float, float], ...], ...], ...]:
+    """Return a hashable snapshot of one cross-section."""
+    return tuple(
+        tuple(
+            tuple(
+                (round(float(x), 6), round(float(y), 6)) for x, y in loop
+            )
+            for loop in group
+        )
+        for group in groups
+    )
 
 
 def _pairs(groups: Sequence[Group]) -> List[Region]:
