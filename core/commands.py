@@ -4,9 +4,11 @@ import copy
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
+from .booleans import OPERATION_LABELS
 from .document import Document
 from .sketch import (
     Extrude,
+    ExtrudeSlice,
     Fillet,
     Measurement,
     PlaneFrame,
@@ -970,10 +972,14 @@ class AddExtrudeCommand(Command):
         profiles: Optional[List[List[int]]] = None,
         cuts: Optional[List[List[int]]] = None,
         regions: Optional[List[List[List[int]]]] = None,
+        start: float = 0.0,
+        operation: str = "new_body",
     ) -> None:
         self.document = document
         self.sketch = sketch
         self.height = height
+        self.start = start
+        self.operation = operation
         if profiles is None and regions is None:
             profiles = [sketch.profile_indices()]
         self.profiles = [
@@ -1020,6 +1026,8 @@ class AddExtrudeCommand(Command):
                     [list(loop) for loop in region]
                     for region in self.regions
                 ],
+                start=self.start,
+                operation=self.operation,
             )
         if self.feature not in self.document.features:
             self.document.features.append(self.feature)
@@ -1036,6 +1044,59 @@ class AddExtrudeCommand(Command):
         while f"Extrude {index}" in names:
             index += 1
         return f"Extrude {index}"
+
+
+class BooleanExtrudeCommand(Command):
+    """Replace a touched body with the result of a boolean extrusion."""
+
+    kind = "extrude"
+
+    def __init__(
+        self,
+        document: Document,
+        target: Extrude,
+        slices: List[ExtrudeSlice],
+        operation: str,
+    ) -> None:
+        self.document = document
+        self.target = target
+        self.operation = operation
+        self.slices = [
+            ExtrudeSlice(
+                entry.z0,
+                entry.z1,
+                [
+                    [
+                        [(float(x), float(y)) for x, y in loop]
+                        for loop in group
+                    ]
+                    for group in entry.regions
+                ],
+            )
+            for entry in slices
+        ]
+        self._before_slices: Optional[List[ExtrudeSlice]] = None
+        self._before_operation: Optional[str] = None
+
+    @property
+    def label(self) -> str:
+        name = OPERATION_LABELS.get(self.operation, self.operation)
+        return f"{self.target.name} · {name}"
+
+    def do(self) -> None:
+        if self._before_slices is None:
+            self._before_slices = copy.deepcopy(self.target.slices)
+            self._before_operation = self.target.operation
+        self.target.slices = copy.deepcopy(self.slices)
+        self.target.operation = self.operation
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self._before_slices is not None:
+            self.target.slices = copy.deepcopy(self._before_slices)
+        if self._before_operation is not None:
+            self.target.operation = self._before_operation
+        self.document.dirty = True
 
 
 class AddFilletCommand(Command):

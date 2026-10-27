@@ -20,6 +20,8 @@ from ..sketch import (
 )
 from .layout import Rect, UILayout
 from .tool_properties import (
+    ExtrudeWindow,
+    ExtrudeWindowAction,
     FilletWindow,
     FilletWindowAction,
     SketchPaletteAction,
@@ -150,7 +152,7 @@ class Workspace:
     def __init__(
         self,
         on_new_sketch: Callable[[], None],
-        on_extrude: Callable[..., None],
+        on_extrude: Callable[..., Optional[str]],
         on_add_point: Callable[[Point], None],
         on_add_line: Callable[[Point, Point, Optional[str]], None],
         on_add_circle: Callable[[Point, float], None],
@@ -279,6 +281,7 @@ class Workspace:
         )
         self.sketch_palette_window = SketchPaletteWindow()
         self.fillet_window = FilletWindow()
+        self.extrude_window = ExtrudeWindow()
         self._history_document: Optional[int] = None
         self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
@@ -332,6 +335,7 @@ class Workspace:
         self.create_sketch_window.set_scale(scale)
         self.sketch_palette_window.set_scale(scale)
         self.fillet_window.set_scale(scale)
+        self.extrude_window.set_scale(scale)
         self._font_label = None
         self._font_small = None
         self._font_tab = None
@@ -345,6 +349,53 @@ class Workspace:
         if not self.fillet_window.visible:
             return None
         return self.fillet_window.radius()
+
+    def open_extrude(self, document: Document) -> bool:
+        """Open the extrude property panel for the current sketch selection."""
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return False
+        regions = self.selected_regions(sketch)
+        if not regions:
+            return False
+        self.create_sketch_window.close()
+        self.fillet_window.close()
+        self.extrude_window.open(len(regions))
+        return True
+
+    def _apply_extrude(self, document: Document) -> None:
+        """Read the panel values and send them to the model."""
+        window = self.extrude_window
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            window.set_error("Open a sketch to extrude")
+            return
+        regions = self.selected_regions(sketch)
+        if not regions:
+            window.set_error("Select at least one profile")
+            return
+        distance = window.distance_value()
+        if distance is None:
+            window.set_error("Enter a distance greater than zero")
+            return
+        if self.on_extrude is None:
+            window.set_error("Extrude is unavailable")
+            return
+        symmetric = window.is_symmetric()
+        height = distance if symmetric or not window.reverse else -distance
+        start = -distance * 0.5 if symmetric else 0.0
+        error = self.on_extrude(
+            regions=regions,
+            cuts=self.selected_cut_profiles(sketch),
+            height=height,
+            start=start,
+            operation=window.operation,
+            taper=window.taper_value() or 0.0,
+        )
+        if error:
+            window.set_error(error)
+            return
+        window.close()
 
     def set_origin_visible(self, visible: bool) -> None:
         """Show or hide the origin planes, axes and marker."""
@@ -570,8 +621,16 @@ class Workspace:
         )
         active_sketch = document.sketch(document.active_sketch_id)
         if active_sketch is not None:
-            self.sketch_palette_window.draw(surface, layout.viewport)
+            if self.extrude_window.visible:
+                self.extrude_window.set_profile_count(
+                    len(self.selected_regions(active_sketch))
+                )
+                self.extrude_window.draw(surface, layout.viewport)
+            else:
+                self.sketch_palette_window.draw(surface, layout.viewport)
         else:
+            if self.extrude_window.visible:
+                self.extrude_window.close()
             self.create_sketch_window.draw(surface, layout.viewport)
             self.fillet_window.set_edge_label(
                 "Edge selected"
@@ -4233,6 +4292,18 @@ class Workspace:
 
         active_sketch = document.sketch(document.active_sketch_id)
 
+        # The extrude panel owns keyboard input while it is open, so typing a
+        # distance never reaches the sketch tools or the application shortcuts.
+        if self.extrude_window.visible:
+            action = self.extrude_window.handle_event(
+                event, layout.viewport
+            )
+            if action is ExtrudeWindowAction.APPLY:
+                self._apply_extrude(document)
+                return True
+            if action is not ExtrudeWindowAction.NONE:
+                return True
+
         if self._handle_measurement_edit_event(event, document):
             return True
 
@@ -4958,13 +5029,7 @@ class Workspace:
         if action == "sketch":
             self.on_new_sketch()
         elif action == "extrude":
-            sketch = document.sketch(document.active_sketch_id)
-            regions = (
-                self.selected_regions(sketch)
-                if sketch is not None else []
-            )
-            if regions:
-                self.on_extrude(regions=regions)
+            self.open_extrude(document)
         elif action == "fillet":
             self.create_sketch_window.close()
             self.fillet_window.open(
@@ -5164,6 +5229,8 @@ class Workspace:
         else:
             self._rectangle_preview = None
         if self.create_sketch_window.update_hover(pos, layout.viewport):
+            return
+        if self.extrude_window.update_hover(pos, layout.viewport):
             return
         if self.fillet_window.update_hover(pos, layout.viewport):
             return

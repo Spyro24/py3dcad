@@ -10,8 +10,8 @@ from typing import (
     Dict, Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING,
 )
 
-from .profiles import build_regions
-from .sketch import PlaneFrame, PlaneLike, Point3, plane_frame
+from .profiles import build_regions, region_difference, split_loop_at_points
+from .sketch import ExtrudeSlice, PlaneFrame, PlaneLike, Point3, plane_frame
 
 Color = Tuple[int, int, int]
 Point2 = Tuple[float, float]
@@ -316,6 +316,175 @@ def _prism_faces_with_runs(
                 runs.append(len(patch))
 
     return faces, runs
+
+
+def stacked_faces(
+    slices: Sequence[ExtrudeSlice], plane: PlaneLike = "XY"
+) -> Tuple[List[Face], List[int]]:
+    """Build faces for a body made of stacked constant-cross-section slices."""
+    frame = plane_frame(plane)
+    entries = [
+        entry for entry in slices
+        if entry.regions and entry.z1 - entry.z0 > 1e-9
+    ]
+    entries.sort(key=lambda entry: entry.z0)
+    if not entries:
+        return [], []
+    faces: List[Face] = []
+    runs: List[int] = []
+    for entry in entries:
+        shifted = _offset_frame(frame, entry.z0)
+        height = entry.z1 - entry.z0
+        for group in entry.regions:
+            if not group:
+                continue
+            _append_wall_faces(
+                faces, runs, group[0], group[1:], height, shifted
+            )
+    for z, sign, groups in _stack_caps(entries):
+        for group in groups:
+            if not group:
+                continue
+            faces.append(_stack_cap_face(group[0], group[1:], z, sign, frame))
+            runs.append(1)
+    return faces, runs
+
+
+def _offset_frame(frame: PlaneFrame, distance: float) -> PlaneFrame:
+    normal = frame.normal
+    return PlaneFrame(
+        (
+            frame.origin[0] + normal[0] * distance,
+            frame.origin[1] + normal[1] * distance,
+            frame.origin[2] + normal[2] * distance,
+        ),
+        frame.u,
+        frame.v,
+        normal,
+        frame.label,
+    )
+
+
+def _append_wall_faces(
+    faces: List[Face],
+    runs: List[int],
+    outer: Sequence[Sequence[float]],
+    holes: Sequence[Sequence[Sequence[float]]],
+    height: float,
+    frame: PlaneFrame,
+) -> None:
+    loops = [(outer, False), *((hole, True) for hole in holes)]
+    for loop, inward in loops:
+        if len(loop) < 3:
+            continue
+        base = _map_points(loop, frame)
+        top = _offset_points(base, frame.normal, height)
+        side = _side_faces(loop, base, top, frame, inward=inward)
+        if side:
+            faces.extend(side)
+            runs.append(len(side))
+
+
+def _stack_caps(
+    entries: Sequence[ExtrudeSlice],
+) -> List[Tuple[float, float, List[List[List[float]]]]]:
+    """Return bottom, interface and top caps with their outward z sign."""
+    caps: List[Tuple[float, float, List[List[List[float]]]]] = []
+    runs: List[List[ExtrudeSlice]] = []
+    for entry in entries:
+        if runs and abs(runs[-1][-1].z1 - entry.z0) <= 1e-6:
+            runs[-1].append(entry)
+        else:
+            runs.append([entry])
+    for run in runs:
+        caps.append((run[0].z0, -1.0, run[0].regions))
+        caps.append((run[-1].z1, 1.0, run[-1].regions))
+        for lower, upper in zip(run, run[1:]):
+            caps.extend(_interface_caps(lower, upper))
+    return caps
+
+
+def _interface_caps(
+    lower: ExtrudeSlice, upper: ExtrudeSlice
+) -> List[Tuple[float, float, List[List[List[float]]]]]:
+    z = lower.z1
+    lower_pairs = _group_pairs(lower.regions)
+    upper_pairs = _group_pairs(upper.regions)
+    points = [
+        point
+        for group in (*lower.regions, *upper.regions)
+        for loop in group
+        for point in loop
+    ]
+    caps: List[Tuple[float, float, List[List[List[float]]]]] = []
+    for sign, pairs in (
+        (1.0, region_difference(lower_pairs, upper_pairs)),
+        (-1.0, region_difference(upper_pairs, lower_pairs)),
+    ):
+        groups = _split_groups(_region_groups(pairs), points)
+        if groups:
+            caps.append((z, sign, groups))
+    return caps
+
+
+def _group_pairs(
+    groups: Sequence[Sequence[Sequence[float]]],
+) -> List[Tuple[Sequence[Sequence[float]], List[Sequence[Sequence[float]]]]]:
+    return [
+        (group[0], [hole for hole in group[1:] if len(hole) >= 3])
+        for group in groups if group
+    ]
+
+
+def _region_groups(
+    pairs: Sequence[Tuple[Sequence[Sequence[float]], List[Sequence[Sequence[float]]]]],
+) -> List[List[List[Tuple[float, float]]]]:
+    return [
+        [
+            [(float(x), float(y)) for x, y in loop]
+            for loop in (outer, *holes)
+        ]
+        for outer, holes in pairs if len(outer) >= 3
+    ]
+
+
+def _split_groups(
+    groups: Sequence[Sequence[Sequence[float]]],
+    points: Sequence[Sequence[float]],
+) -> List[List[List[Tuple[float, float]]]]:
+    result: List[List[List[Tuple[float, float]]]] = []
+    for group in groups:
+        loops = [
+            split_loop_at_points(loop, points)
+            for loop in group if len(loop) >= 3
+        ]
+        loops = [loop for loop in loops if len(loop) >= 3]
+        if loops:
+            result.append(loops)
+    return result
+
+
+def _stack_cap_face(
+    outer: Sequence[Sequence[float]],
+    holes: Sequence[Sequence[Sequence[float]]],
+    z: float,
+    sign: float,
+    frame: PlaneFrame,
+) -> Face:
+    """Build one horizontal cap, winding it to agree with its normal."""
+    shifted = _offset_frame(frame, z)
+    outer_points = _map_points(outer, shifted)
+    hole_points = tuple(_map_points(hole, shifted) for hole in holes)
+    if sign < 0.0:
+        outer_points = tuple(reversed(outer_points))
+        hole_points = tuple(tuple(reversed(hole)) for hole in hole_points)
+    normal = (
+        frame.normal if sign > 0.0
+        else _scale(frame.normal, -1.0)
+    )
+    color = (190, 190, 198) if sign > 0.0 else (105, 105, 114)
+    label = "Top face" if sign > 0.0 else "Bottom face"
+    return Face(outer_points, color, normal, label, holes=hole_points)
 
 
 def _turn_angle(points: Sequence[Point2], vertex: int) -> float:
@@ -1875,6 +2044,8 @@ def profile_has_corner(
     tolerance: float = 1e-4,
 ) -> bool:
     """Return whether a local corner exists on the feature's profile."""
+    if feature.slices:
+        return False
     sketch = document.sketch(feature.sketch_id)
     if sketch is None:
         return False
@@ -2183,6 +2354,8 @@ def profile_segment_key(
     tolerance: float = 1e-4,
 ) -> Optional[Tuple[Point2, Point2]]:
     """Return a stable key for the profile segment under a local point."""
+    if feature.slices:
+        return None
     sketch = document.sketch(feature.sketch_id)
     if sketch is None:
         return None
@@ -2329,11 +2502,18 @@ def iter_solid_faces(
         sketch = document.sketch(feature.sketch_id)
         if sketch is None:
             continue
+        face_index = 0
+        if feature.slices:
+            faces, runs = stacked_faces(feature.slices, sketch.frame())
+            groups = _face_groups(faces, runs)
+            for face, group in zip(faces, groups):
+                yield feature.id, face_index + group, face
+            continue
         profiles = feature.resolve_profiles(sketch)
         if not profiles:
             continue
         cuts = feature.resolve_cuts(sketch)
-        face_index = 0
+        frame = _offset_frame(sketch.frame(), feature.start)
         for outer, holes in build_regions(profiles, cuts):
             inner = [hole for hole in holes if len(hole) >= 3]
             original_loops = [outer, *inner]
@@ -2385,7 +2565,7 @@ def iter_solid_faces(
             faces, runs = _prism_faces_with_runs(
                 rounded_outer,
                 feature.height,
-                sketch.frame(),
+                frame,
                 rounded_holes,
                 (base_radii, end_radii),
             )

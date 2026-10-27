@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Sequence, Tuple, List
 
 import pygame
 
@@ -828,7 +828,6 @@ class SketchPaletteWindow:
     def _draw_body(
         self, surface: pygame.Surface, layout: _PaletteLayout
     ) -> None:
-        panel = layout.panel
         options = layout.options
         opt_fill = (
             self.header_hover_bg if self._hover_options else self.header_bg
@@ -1499,3 +1498,819 @@ class FilletWindow:
             cancel_text,
             cancel_text.get_rect(center=cancel_rect.center),
         )
+
+
+class ExtrudeWindowAction(Enum):
+    """Result of passing an event to the extrude window."""
+
+    NONE = "none"
+    CONSUMED = "consumed"
+    APPLY = "apply"
+    CANCEL = "cancel"
+
+
+@dataclass(frozen=True)
+class _PanelMetrics:
+    """Resolved vertical layout for the extrude panel in one viewport."""
+
+    panel: pygame.Rect
+    rows_top: int
+    row_height: int
+    field_height: int
+    status_y: int
+    hint_y: Optional[int]
+    buttons_y: int
+
+
+class ExtrudeWindow:
+    """Property panel for a new extrusion and its boolean operation."""
+
+    CUBE_SIZE = 92
+    CUBE_MARGIN = 12
+    CUBE_GAP = 12
+    PANEL_WIDTH = 344
+    TITLE_HEIGHT = 34
+    ROW_HEIGHT = 32
+    HINT_MIN_ROW = 28
+    MIN_ROW_HEIGHT = 22
+    FIELD_INSET = 6
+    FIELD_WIDTH = 176
+    MENU_ROW_HEIGHT = 26
+
+    START_ITEMS = (("profile_plane", "Profile Plane"),)
+    DIRECTION_ITEMS = (("one_side", "One Side"), ("symmetric", "Symmetric"))
+    EXTENT_ITEMS = (("distance", "Distance"),)
+    OPERATION_ITEMS = (
+        ("new_body", "New Body"),
+        ("join", "Join"),
+        ("cut", "Cut"),
+        ("intersect", "Intersect"),
+    )
+    ROW_KEYS = (
+        ("profiles", 0),
+        ("thin", 1),
+        ("start", 2),
+        ("direction", 3),
+        ("reverse", 4),
+        ("extent", 5),
+        ("distance", 6),
+        ("taper", 7),
+        ("operation", 8),
+    )
+
+    def __init__(self) -> None:
+        self.visible = False
+        self.scale = 1.0
+        self.distance = "20"
+        self.taper = "0"
+        self.start = "profile_plane"
+        self.direction = "one_side"
+        self.extent = "distance"
+        self.operation = "new_body"
+        self.thin = False
+        self.reverse = False
+        self.profile_count = 1
+        self.error = ""
+        self.focused: Optional[str] = "distance"
+        self._replace_text = True
+        self._open_menu: Optional[str] = None
+        self._menu_hover = -1
+        self._hover_dropdown: Optional[str] = None
+        self._hover_apply = False
+        self._hover_cancel = False
+        self._font_title: Optional[pygame.font.Font] = None
+        self._font_text: Optional[pygame.font.Font] = None
+
+        self.panel_bg = pygame.Color(38, 40, 48)
+        self.title_bg = pygame.Color(48, 50, 60)
+        self.border_color = pygame.Color(50, 50, 58)
+        self.text_primary = pygame.Color(225, 225, 230)
+        self.text_secondary = pygame.Color(202, 205, 212)
+        self.text_muted = pygame.Color(125, 125, 136)
+        self.accent = pygame.Color(59, 130, 246)
+        self.error_color = pygame.Color(235, 100, 100)
+        self.field_bg = pygame.Color(35, 37, 46)
+        self.field_hover_bg = pygame.Color(52, 58, 72)
+        self.button_bg = pygame.Color(44, 47, 57)
+        self.button_hover_bg = pygame.Color(58, 61, 72)
+        self.selection_bg = pygame.Color(45, 75, 125)
+
+    # ------------------------------------------------------------------
+    # State
+    # ------------------------------------------------------------------
+
+    def set_scale(self, scale: float) -> None:
+        if abs(scale - self.scale) < 1e-6:
+            return
+        self.scale = scale
+        self._font_title = None
+        self._font_text = None
+        self._open_menu = None
+        self._hover_apply = False
+        self._hover_cancel = False
+
+    def open(self, profile_count: int) -> None:
+        self.visible = True
+        self.profile_count = max(1, int(profile_count))
+        # Never reopen with an emptied field that would block Apply.
+        if self.distance_value() is None:
+            self.distance = "20"
+        if self.taper_value() is None:
+            self.taper = "0"
+        self.error = ""
+        self.focused = "distance"
+        self._replace_text = True
+        self._open_menu = None
+        self._menu_hover = -1
+        self._hover_dropdown = None
+        self._hover_apply = False
+        self._hover_cancel = False
+
+    def close(self) -> None:
+        self.visible = False
+        self.error = ""
+        self._open_menu = None
+        self._menu_hover = -1
+        self._hover_dropdown = None
+        self.focused = None
+        self._hover_apply = False
+        self._hover_cancel = False
+
+    def set_profile_count(self, count: int) -> None:
+        self.profile_count = max(0, int(count))
+
+    def set_error(self, message: str) -> None:
+        self.error = message
+
+    def distance_value(self) -> Optional[float]:
+        """Return the entered distance, or None when it is not valid."""
+        try:
+            value = float(self.distance)
+        except ValueError:
+            return None
+        return value if value > 0.0 else None
+
+    def taper_value(self) -> Optional[float]:
+        """Return the entered taper angle in degrees, or None when invalid."""
+        try:
+            value = float(self.taper)
+        except ValueError:
+            return None
+        return value if -89.0 < value < 89.0 else None
+
+    def is_symmetric(self) -> bool:
+        return self.direction == "symmetric"
+
+    # ------------------------------------------------------------------
+    # Geometry
+    # ------------------------------------------------------------------
+
+    def _s(self, value: float) -> int:
+        return max(1, int(round(value * self.scale)))
+
+    def _init_fonts(self) -> None:
+        if self._font_title is not None:
+            return
+        self._font_title = pygame.font.SysFont(
+            "Segoe UI", self._s(12), bold=True
+        )
+        self._font_text = pygame.font.SysFont("Segoe UI", self._s(12))
+
+    def _row_size(
+        self, available: int, minimum: Optional[int] = None
+    ) -> Tuple[int, int, bool]:
+        """Choose a row height for the space below the orientation cube.
+
+        Short viewports drop the keyboard hint line first, then compress the
+        rows, so the operation field and the buttons never overlap.
+        """
+        rows = len(self.ROW_KEYS)
+        maximum = self._s(self.ROW_HEIGHT)
+        hinted = (available - self._s(138)) // rows
+        if hinted >= self._s(self.HINT_MIN_ROW):
+            row = min(maximum, hinted)
+            return row, row - self._s(self.FIELD_INSET), True
+        floor = self._s(self.MIN_ROW_HEIGHT) if minimum is None else minimum
+        row = (available - self._s(118)) // rows
+        row = max(floor, min(maximum, row))
+        field = max(1, min(row, row - self._s(self.FIELD_INSET)))
+        return row, field, False
+
+    def _stack(
+        self, row: int, hinted: bool
+    ) -> Tuple[int, int, Optional[int], int, int]:
+        """Return row, status, hint and button offsets and total height."""
+        rows_top = self._s(self.TITLE_HEIGHT) + self._s(10)
+        status_y = rows_top + row * len(self.ROW_KEYS) + self._s(15)
+        hint_y = status_y + self._s(20) if hinted else None
+        buttons_y = (
+            hint_y if hint_y is not None else status_y
+        ) + self._s(17)
+        return rows_top, status_y, hint_y, buttons_y, buttons_y + self._s(42)
+
+    def _metrics(self, region: Rect) -> _PanelMetrics:
+        """Lay out rows, status and buttons so they always stay separate."""
+        margin = self._s(self.CUBE_MARGIN)
+        width = min(self._s(self.PANEL_WIDTH), max(1, region.w - margin * 2))
+        natural_top = (
+            region.y + margin + self._s(self.CUBE_SIZE)
+            + self._s(self.CUBE_GAP)
+        )
+        bottom_limit = region.bottom - margin
+        available = max(1, bottom_limit - natural_top)
+        row, field, hinted = self._row_size(available)
+        offsets = self._stack(row, hinted)
+        rows_top, status_y, hint_y, buttons_y, height = offsets
+        top = natural_top
+        if height > available:
+            # A very short viewport also overlaps the orientation cube rather
+            # than letting the buttons spill into the timeline.
+            hard_available = region.h - margin * 2
+            row, field, hinted = self._row_size(
+                hard_available, minimum=self._s(9)
+            )
+            offsets = self._stack(row, hinted)
+            rows_top, status_y, hint_y, buttons_y, height = offsets
+            top = region.y + margin
+            if height > hard_available:
+                top = max(region.y + margin, bottom_limit - height)
+        panel = pygame.Rect(
+            region.right - margin - width, top, width, height
+        )
+        return _PanelMetrics(
+            panel,
+            panel.y + rows_top,
+            row,
+            field,
+            panel.y + status_y,
+            panel.y + hint_y if hint_y is not None else None,
+            panel.y + buttons_y,
+        )
+
+    def panel_rect(self, region: Rect) -> pygame.Rect:
+        return self._metrics(region).panel
+
+    def field_rect(self, region: Rect, index: int) -> pygame.Rect:
+        metrics = self._metrics(region)
+        top = metrics.rows_top + index * metrics.row_height
+        top += (metrics.row_height - metrics.field_height) // 2
+        return pygame.Rect(
+            metrics.panel.right - self._s(16) - self._s(self.FIELD_WIDTH),
+            top,
+            self._s(self.FIELD_WIDTH),
+            metrics.field_height,
+        )
+
+    def apply_rect(self, region: Rect) -> pygame.Rect:
+        metrics = self._metrics(region)
+        width = self._s(96)
+        height = self._s(28)
+        return pygame.Rect(
+            metrics.panel.right - self._s(16) - width,
+            metrics.buttons_y,
+            width,
+            height,
+        )
+
+    def cancel_rect(self, region: Rect) -> pygame.Rect:
+        apply_rect = self.apply_rect(region)
+        width = self._s(80)
+        return pygame.Rect(
+            apply_rect.x - self._s(8) - width,
+            apply_rect.y,
+            width,
+            apply_rect.h,
+        )
+
+    def menu_rect(self, region: Rect, key: str) -> pygame.Rect:
+        index = dict(self.ROW_KEYS).get(key)
+        items = self._menu_items(key)
+        if index is None or not items:
+            return pygame.Rect(0, 0, 0, 0)
+        field = self.field_rect(region, index)
+        panel = self.panel_rect(region)
+        metrics = self._metrics(region)
+        height = self._s(self.MENU_ROW_HEIGHT) * len(items)
+        top = field.bottom + self._s(2)
+        if top + height > panel.bottom - self._s(6):
+            # Open upwards over the rows, matching their boundaries so no
+            # label is drawn half-hidden behind the list.
+            bottom = field.y - self._s(2)
+            top = bottom - height
+            if self._menu_edge_cuts_field(top, region, index):
+                top = self._snap_menu(top, metrics, upward=True)
+            return pygame.Rect(field.x, top, field.w, bottom - top)
+        bottom = top + height
+        if self._menu_edge_cuts_field(bottom, region, index):
+            bottom = self._snap_menu(bottom, metrics, upward=False)
+        return pygame.Rect(field.x, top, field.w, bottom - top)
+
+    def _menu_edge_cuts_field(
+        self, y: int, region: Rect, skip: int
+    ) -> bool:
+        """Return whether a menu edge would slice through a visible field."""
+        for index in range(len(self.ROW_KEYS)):
+            if index == skip:
+                continue
+            field = self.field_rect(region, index)
+            if field.top < y < field.bottom:
+                return True
+        return False
+
+    def _snap_menu(
+        self, y: int, metrics: _PanelMetrics, upward: bool
+    ) -> int:
+        """Move a menu edge to the nearest row boundary."""
+        row = max(1, metrics.row_height)
+        offset = y - metrics.rows_top
+        remainder = offset % row
+        if not remainder:
+            return y
+        return y - remainder if upward else y + (row - remainder)
+
+    def _menu_items(self, key: str) -> Sequence[Tuple[str, str]]:
+        return {
+            "start": self.START_ITEMS,
+            "direction": self.DIRECTION_ITEMS,
+            "extent": self.EXTENT_ITEMS,
+            "operation": self.OPERATION_ITEMS,
+        }.get(key, ())
+
+    def _current_value(self, key: str) -> str:
+        return str(getattr(self, key, ""))
+
+    def _set_value(self, key: str, value: str) -> None:
+        if key in ("start", "direction", "extent", "operation"):
+            setattr(self, key, value)
+        self.error = ""
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def update_hover(self, pos: Tuple[int, int], region: Rect) -> bool:
+        """Update hover state and report whether the panel or menu is hovered."""
+        if not self.visible:
+            self._hover_apply = False
+            self._hover_cancel = False
+            self._hover_dropdown = None
+            return False
+        panel = self.panel_rect(region)
+        if self._open_menu is not None:
+            self._menu_hover = self._menu_index_at(pos, region)
+            if self._menu_hover >= 0:
+                self._hover_dropdown = self._open_menu
+                return True
+        self._menu_hover = -1
+        self._hover_apply = self.apply_rect(region).collidepoint(pos)
+        self._hover_cancel = self.cancel_rect(region).collidepoint(pos)
+        self._hover_dropdown = None
+        for key, index in self.ROW_KEYS:
+            if not self._menu_items(key):
+                continue
+            if self.field_rect(region, index).collidepoint(pos):
+                self._hover_dropdown = key
+                break
+        return panel.collidepoint(pos)
+
+    def handle_event(
+        self, event: pygame.event.Event, region: Rect
+    ) -> ExtrudeWindowAction:
+        if not self.visible:
+            return ExtrudeWindowAction.NONE
+        if self._open_menu is not None:
+            return self._handle_menu_event(event, region)
+        if event.type == pygame.KEYDOWN:
+            return self._handle_key(event)
+        if event.type == pygame.MOUSEMOTION:
+            return (
+                ExtrudeWindowAction.CONSUMED
+                if self.update_hover(event.pos, region) else
+                ExtrudeWindowAction.NONE
+            )
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            return self._handle_click(event.pos, region)
+        return ExtrudeWindowAction.NONE
+
+    def _handle_menu_event(
+        self, event: pygame.event.Event, region: Rect
+    ) -> ExtrudeWindowAction:
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self._open_menu = None
+                self._menu_hover = -1
+            return ExtrudeWindowAction.CONSUMED
+        if event.type == pygame.MOUSEMOTION:
+            self._menu_hover = self._menu_index_at(event.pos, region)
+            return ExtrudeWindowAction.CONSUMED
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            index = self._menu_index_at(event.pos, region)
+            if index >= 0 and self._open_menu is not None:
+                items = self._menu_items(self._open_menu)
+                self._set_value(self._open_menu, items[index][0])
+            self._open_menu = None
+            self._menu_hover = -1
+            return ExtrudeWindowAction.CONSUMED
+        return ExtrudeWindowAction.CONSUMED
+
+    def _menu_index_at(self, pos: Tuple[int, int], region: Rect) -> int:
+        if self._open_menu is None:
+            return -1
+        items = self._menu_items(self._open_menu)
+        rect = self.menu_rect(region, self._open_menu)
+        if not rect.collidepoint(pos):
+            return -1
+        index = (pos[1] - rect.y) // max(1, self._s(self.MENU_ROW_HEIGHT))
+        return index if 0 <= index < len(items) else -1
+
+    def _handle_key(self, event: pygame.event.Event) -> ExtrudeWindowAction:
+        if event.key == pygame.K_ESCAPE:
+            self.close()
+            return ExtrudeWindowAction.CANCEL
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            return self._submit()
+        if event.key == pygame.K_TAB:
+            self.focused = (
+                "taper" if self.focused == "distance" else "distance"
+            )
+            self._replace_text = True
+            self.error = ""
+            return ExtrudeWindowAction.CONSUMED
+        if event.key == pygame.K_BACKSPACE:
+            if self.focused is not None:
+                setattr(self, self.focused, getattr(self, self.focused)[:-1])
+                self._replace_text = False
+                self.error = ""
+            return ExtrudeWindowAction.CONSUMED
+        character = event.unicode
+        if character and self.focused is not None:
+            current = "" if self._replace_text else getattr(self, self.focused)
+            if self._accept_character(character, current):
+                setattr(self, self.focused, current + character)
+                self._replace_text = False
+                self.error = ""
+        return ExtrudeWindowAction.CONSUMED
+
+    def _accept_character(self, character: str, current: str) -> bool:
+        if character.isdigit():
+            return True
+        if character == "-":
+            return self.focused == "taper" and not current
+        return character == "." and "." not in current
+
+    def _handle_click(
+        self, pos: Tuple[int, int], region: Rect
+    ) -> ExtrudeWindowAction:
+        panel = self.panel_rect(region)
+        if not panel.collidepoint(pos):
+            self.focused = None
+            return ExtrudeWindowAction.NONE
+        if self.apply_rect(region).collidepoint(pos):
+            return self._submit()
+        if self.cancel_rect(region).collidepoint(pos):
+            self.close()
+            return ExtrudeWindowAction.CANCEL
+        for key, index in self.ROW_KEYS:
+            if not self.field_rect(region, index).collidepoint(pos):
+                continue
+            if key in ("distance", "taper"):
+                self.focused = key
+                self._replace_text = True
+                self.error = ""
+            elif key == "thin":
+                self.thin = not self.thin
+                self.error = ""
+            elif key == "reverse":
+                self.reverse = not self.reverse
+                self.error = ""
+            elif self._menu_items(key):
+                self._open_menu = key
+                self._menu_hover = -1
+                self.focused = None
+            return ExtrudeWindowAction.CONSUMED
+        self.focused = None
+        return ExtrudeWindowAction.CONSUMED
+
+    def _submit(self) -> ExtrudeWindowAction:
+        if self.distance_value() is None:
+            self.error = "Enter a distance greater than zero"
+            return ExtrudeWindowAction.CONSUMED
+        if self.taper_value() is None:
+            self.error = "Taper must be between -89 and 89 degrees"
+            return ExtrudeWindowAction.CONSUMED
+        if self.thin:
+            self.error = "Thin feature is not supported yet"
+            return ExtrudeWindowAction.CONSUMED
+        if abs(self.taper_value() or 0.0) > 1e-9:
+            self.error = "Taper is not supported yet"
+            return ExtrudeWindowAction.CONSUMED
+        self.error = ""
+        return ExtrudeWindowAction.APPLY
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
+
+    def draw(self, surface: pygame.Surface, region: Rect) -> None:
+        if not self.visible:
+            return
+        self._init_fonts()
+        panel = self.panel_rect(region)
+        pygame.draw.rect(
+            surface, self.panel_bg, panel, border_radius=self._s(6)
+        )
+        pygame.draw.rect(
+            surface, self.title_bg,
+            (panel.x, panel.y, panel.w, self._s(self.TITLE_HEIGHT)),
+            border_top_left_radius=self._s(6),
+            border_top_right_radius=self._s(6),
+        )
+        pygame.draw.rect(
+            surface, self.border_color, panel,
+            width=1, border_radius=self._s(6),
+        )
+        self._draw_title(surface, panel)
+        self._draw_rows(surface, region)
+        self._draw_status(surface, region)
+        self._draw_buttons(surface, region)
+        if self._open_menu is not None:
+            self._draw_menu(surface, region, self._open_menu)
+
+    def _draw_title(
+        self, surface: pygame.Surface, panel: pygame.Rect
+    ) -> None:
+        y = panel.y + self._s(self.TITLE_HEIGHT) // 2
+        pygame.draw.line(
+            surface, self.text_primary,
+            (panel.x + self._s(14), y), (panel.x + self._s(22), y),
+            self._s(2),
+        )
+        title = self._font_title.render("EXTRUDE", True, self.text_primary)
+        surface.blit(
+            title, title.get_rect(midleft=(panel.x + self._s(30), y))
+        )
+        pygame.draw.line(
+            surface, self.border_color,
+            (panel.x, panel.y + self._s(self.TITLE_HEIGHT)),
+            (panel.right, panel.y + self._s(self.TITLE_HEIGHT)),
+        )
+
+    def _draw_rows(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        panel = self.panel_rect(region)
+        labels = {
+            "profiles": "Profiles",
+            "thin": "Thin Feature",
+            "start": "Start",
+            "direction": "Direction",
+            "reverse": "Reverse",
+            "extent": "Extent Type",
+            "distance": "Distance",
+            "taper": "Taper Angle",
+            "operation": "Operation",
+        }
+        for key, index in self.ROW_KEYS:
+            field = self.field_rect(region, index)
+            label = self._font_text.render(
+                labels[key], True, self.text_secondary
+            )
+            surface.blit(
+                label,
+                label.get_rect(
+                    midleft=(panel.x + self._s(16), field.centery)
+                ),
+            )
+            if key == "profiles":
+                self._draw_chip(surface, field)
+            elif key in ("thin", "reverse"):
+                checked = self.thin if key == "thin" else self.reverse
+                box = pygame.Rect(
+                    field.right - self._s(18),
+                    field.centery - self._s(9),
+                    self._s(18), self._s(18),
+                )
+                self._draw_checkbox(surface, box, checked)
+            elif key in ("distance", "taper"):
+                self._draw_number_field(surface, field, key)
+            else:
+                self._draw_dropdown(surface, field, key)
+
+    def _draw_chip(
+        self, surface: pygame.Surface, field: pygame.Rect
+    ) -> None:
+        pygame.draw.rect(
+            surface, self.field_bg, field, border_radius=self._s(4)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, field,
+            width=1, border_radius=self._s(4),
+        )
+        count = self.profile_count
+        text = f"{count} profile" + ("" if count == 1 else "s")
+        label = self._font_text.render(text, True, self.text_secondary)
+        surface.blit(
+            label, label.get_rect(midleft=(field.x + self._s(10), field.centery))
+        )
+
+    def _draw_checkbox(
+        self, surface: pygame.Surface, box: pygame.Rect, checked: bool
+    ) -> None:
+        pygame.draw.rect(
+            surface, self.field_bg, box, border_radius=self._s(3)
+        )
+        pygame.draw.rect(
+            surface, self.accent if checked else self.border_color, box,
+            width=self._s(2) if checked else 1,
+            border_radius=self._s(3),
+        )
+        if checked:
+            pygame.draw.lines(
+                surface, self.text_primary, False,
+                [
+                    (box.x + self._s(4), box.centery),
+                    (box.x + self._s(8), box.bottom - self._s(5)),
+                    (box.right - self._s(4), box.y + self._s(5)),
+                ],
+                max(1, self._s(2)),
+            )
+
+    def _draw_dropdown(
+        self, surface: pygame.Surface, field: pygame.Rect, key: str
+    ) -> None:
+        hovered = self._hover_dropdown == key or self._open_menu == key
+        pygame.draw.rect(
+            surface,
+            self.field_hover_bg if hovered else self.field_bg,
+            field, border_radius=self._s(4),
+        )
+        pygame.draw.rect(
+            surface, self.accent if self._open_menu == key else self.border_color,
+            field, width=1, border_radius=self._s(4),
+        )
+        label = self._menu_label(key, self._current_value(key))
+        text = self._font_text.render(label, True, self.text_primary)
+        surface.blit(
+            text, text.get_rect(midleft=(field.x + self._s(10), field.centery))
+        )
+        cx = field.right - self._s(12)
+        cy = field.centery
+        pygame.draw.polygon(
+            surface, self.text_muted,
+            [(cx - self._s(4), cy - self._s(2)),
+             (cx + self._s(4), cy - self._s(2)),
+             (cx, cy + self._s(3))],
+        )
+
+    def _menu_label(self, key: str, value: str) -> str:
+        for item_value, label in self._menu_items(key):
+            if item_value == value:
+                return label
+        return value
+
+    def _draw_number_field(
+        self, surface: pygame.Surface, field: pygame.Rect, key: str
+    ) -> None:
+        focused = self.focused == key
+        pygame.draw.rect(
+            surface, self.field_hover_bg if focused else self.field_bg,
+            field, border_radius=self._s(4),
+        )
+        pygame.draw.rect(
+            surface, self.accent if focused else self.border_color,
+            field, width=self._s(2) if focused else 1,
+            border_radius=self._s(4),
+        )
+        value = self._font_text.render(
+            getattr(self, key), True, self.text_primary
+        )
+        value_rect = value.get_rect(
+            midleft=(field.x + self._s(10), field.centery)
+        )
+        replacing = focused and self._replace_text and bool(getattr(self, key))
+        if replacing:
+            pygame.draw.rect(
+                surface, self.selection_bg,
+                value_rect.inflate(self._s(4), self._s(2)),
+                border_radius=self._s(2),
+            )
+        surface.blit(value, value_rect)
+        unit = "mm" if key == "distance" else "°"
+        unit_text = self._font_text.render(unit, True, self.text_muted)
+        surface.blit(
+            unit_text,
+            unit_text.get_rect(midright=(field.right - self._s(10), field.centery)),
+        )
+        if (
+            focused and not replacing
+            and (pygame.time.get_ticks() // 500) % 2 == 0
+        ):
+            cursor_x = field.x + self._s(10) + value.get_width() + self._s(2)
+            pygame.draw.line(
+                surface, self.text_primary,
+                (cursor_x, field.y + self._s(6)),
+                (cursor_x, field.bottom - self._s(6)),
+                max(1, self._s(1)),
+            )
+
+    def _draw_status(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        metrics = self._metrics(region)
+        panel = metrics.panel
+        if self.operation == "new_body":
+            message = "Creates a new independent body"
+        else:
+            message = "Target: the body this extrusion touches"
+        color = self.text_muted
+        if self.error:
+            message = self.error
+            color = self.error_color
+        text = self._font_text.render(message, True, color)
+        surface.blit(
+            text,
+            text.get_rect(midleft=(panel.x + self._s(16), metrics.status_y)),
+        )
+        if metrics.hint_y is None:
+            return
+        hint = self._font_text.render(
+            "Enter to apply  ·  Esc to cancel", True, self.text_muted
+        )
+        surface.blit(
+            hint,
+            hint.get_rect(midleft=(panel.x + self._s(16), metrics.hint_y)),
+        )
+
+    def _draw_buttons(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        apply_rect = self.apply_rect(region)
+        pygame.draw.rect(
+            surface,
+            pygame.Color(88, 155, 255)
+            if self._hover_apply else self.accent,
+            apply_rect, border_radius=self._s(4),
+        )
+        apply_text = self._font_text.render(
+            "Apply", True, pygame.Color(255, 255, 255)
+        )
+        surface.blit(
+            apply_text, apply_text.get_rect(center=apply_rect.center)
+        )
+        cancel_rect = self.cancel_rect(region)
+        pygame.draw.rect(
+            surface,
+            self.button_hover_bg if self._hover_cancel else self.button_bg,
+            cancel_rect, border_radius=self._s(4),
+        )
+        pygame.draw.rect(
+            surface, self.border_color, cancel_rect,
+            width=1, border_radius=self._s(4),
+        )
+        cancel_text = self._font_text.render(
+            "Cancel", True, self.text_primary
+        )
+        surface.blit(
+            cancel_text, cancel_text.get_rect(center=cancel_rect.center)
+        )
+
+    def _draw_menu(
+        self, surface: pygame.Surface, region: Rect, key: str
+    ) -> None:
+        rect = self.menu_rect(region, key)
+        items = self._menu_items(key)
+        if rect.w <= 0 or not items:
+            return
+        pygame.draw.rect(
+            surface, self.panel_bg, rect, border_radius=self._s(4)
+        )
+        pygame.draw.rect(
+            surface, self.border_color, rect,
+            width=1, border_radius=self._s(4),
+        )
+        row_height = self._s(self.MENU_ROW_HEIGHT)
+        current = self._current_value(key)
+        for index, (value, label) in enumerate(items):
+            row = pygame.Rect(
+                rect.x + self._s(2),
+                rect.y + index * row_height + self._s(2),
+                rect.w - self._s(4),
+                row_height - self._s(3),
+            )
+            if index == self._menu_hover:
+                pygame.draw.rect(
+                    surface, self.field_hover_bg, row,
+                    border_radius=self._s(3),
+                )
+            color = (
+                self.accent if value == current
+                else (self.text_primary if index == self._menu_hover
+                      else self.text_secondary)
+            )
+            text = self._font_text.render(label, True, color)
+            surface.blit(
+                text,
+                text.get_rect(
+                    midleft=(row.x + self._s(10), row.centery)
+                ),
+            )

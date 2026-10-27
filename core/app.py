@@ -18,6 +18,7 @@ from .commands import (
     AddPointCommand,
     AddRectangleCommand,
     AddSketchCommand,
+    BooleanExtrudeCommand,
     CommandStack,
     DeleteSketchEntitiesCommand,
     MoveEdgeCommand,
@@ -26,6 +27,7 @@ from .commands import (
     SetMeasurementPlacementCommand,
     SetMeasurementValueCommand,
 )
+from .booleans import build_tool_stack, plan_boolean
 from .config import Config, format_opened
 from .document import Document
 from .faces import (
@@ -36,6 +38,7 @@ from .sketch import (
     Extrude,
     Fillet,
     Point,
+    Sketch,
     normalize_measurement_placement,
     normalize_measurement_value,
 )
@@ -91,6 +94,8 @@ def _resolve_fillet(
     )
     if feature is None or edge is None or sketch is None:
         return "Select a solid edge first", None, None, 0.0, 0.0
+    if feature.slices:
+        return "Fillet is not available on a combined body", None, None, 0.0, 0.0
     frame = sketch.frame()
     delta = (
         edge.end[0] - edge.start[0],
@@ -142,10 +147,10 @@ def _resolve_fillet(
         if segment_key is None:
             return "Edge is already filleted", None, None, 0.0, 0.0
         # The cap on the positive-normal side is the top face.
+        center = feature.start + feature.height * 0.5
         kind = (
             "top"
-            if (start_offset + end_offset) * 0.5
-            > feature.height * 0.5
+            if (start_offset + end_offset) * 0.5 > center
             else "bottom"
         )
     if radius <= 0.0:
@@ -673,15 +678,24 @@ class Application:
         profiles: Optional[List[List[int]]] = None,
         regions: Optional[List[List[List[int]]]] = None,
         cuts: Optional[List[List[int]]] = None,
-    ) -> None:
+        height: float = 20.0,
+        start: float = 0.0,
+        operation: str = "new_body",
+        taper: float = 0.0,
+    ) -> Optional[str]:
+        """Extrude the selected sketch regions, returning an error text."""
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
         if document is None or stack is None:
-            return
+            return "No active document"
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
-            return
+            return "Open a sketch to extrude"
+        if abs(height) <= 1e-9:
+            return "Enter a distance greater than zero"
+        if abs(taper) > 1e-9:
+            return "Taper is not supported yet"
         if profiles is None:
             profiles = []
         if regions is None:
@@ -707,16 +721,57 @@ class Application:
             if len(sketch.loop_points(cut)) >= 3
         ]
         if not valid and not valid_regions:
-            return
-        stack.execute(
-            AddExtrudeCommand(
-                document, sketch, profiles=valid, regions=valid_regions,
-                cuts=valid_cuts,
+            return "Select a profile to extrude"
+        if operation == "new_body":
+            stack.execute(
+                AddExtrudeCommand(
+                    document, sketch, height=height, profiles=valid,
+                    regions=valid_regions, cuts=valid_cuts,
+                    start=start, operation=operation,
+                )
             )
-        )
+        else:
+            error = self._boolean_extrude(
+                document, stack, sketch, valid, valid_regions,
+                valid_cuts, height, start, operation,
+            )
+            if error is not None:
+                return error
         # The sketch is now consumed by the feature; hide it until selected again.
         document.active_sketch_id = None
+        document.selected_edge = None
+        document.selected_face = None
         self.workspace.sketch_palette_window.close()
+        self.workspace.extrude_window.close()
+        return None
+
+    def _boolean_extrude(
+        self,
+        document: Document,
+        stack: CommandStack,
+        sketch: Sketch,
+        profiles: List[List[int]],
+        regions: List[List[List[int]]],
+        cuts: List[List[int]],
+        height: float,
+        start: float,
+        operation: str,
+    ) -> Optional[str]:
+        """Apply Join, Cut or Intersect to the body the tool touches."""
+        tool = build_tool_stack(
+            document, sketch, height, start, profiles, regions, cuts
+        )
+        target, slices, error = plan_boolean(
+            document, tool, sketch.frame(), operation
+        )
+        if error is not None:
+            return error
+        if target is None:
+            return "No body found"
+        stack.execute(
+            BooleanExtrudeCommand(document, target, slices, operation)
+        )
+        return None
 
     def add_fillet(self, radius: float) -> Optional[str]:
         """Round the selected solid edge, returning an error text."""
@@ -1024,11 +1079,13 @@ class Application:
         document = self.active_document()
         if document is None:
             return False
+        if self.workspace.extrude_window.visible:
+            return False
         if key == pygame.K_s:
             self.new_sketch()
             return True
         if key == pygame.K_e:
-            self.extrude_active()
+            self.workspace.open_extrude(document)
             return True
         if key == pygame.K_y:
             self.redo()

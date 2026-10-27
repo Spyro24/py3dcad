@@ -1,11 +1,12 @@
 """Pure 2D profile geometry for sketch loops and extruded solids."""
 
 import math
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 Point2 = Tuple[float, float]
 Loop = List[Point2]
 Segment = Tuple[Point2, Point2]
+Region = Tuple[Loop, List[Loop]]
 
 _EPS = 1e-9
 
@@ -238,6 +239,98 @@ def intersect_loops(
     return _trace_loops(boundary)
 
 
+def region_union(
+    first: Sequence[Region], second: Sequence[Region]
+) -> List[Region]:
+    """Return the area covered by either region set."""
+    return _combine_regions(first, second, lambda a, b: a or b)
+
+
+def region_difference(
+    first: Sequence[Region], second: Sequence[Region]
+) -> List[Region]:
+    """Return the area of ``first`` that ``second`` does not cover."""
+    return _combine_regions(first, second, lambda a, b: a and not b)
+
+
+def region_intersection(
+    first: Sequence[Region], second: Sequence[Region]
+) -> List[Region]:
+    """Return the area covered by both region sets."""
+    return _combine_regions(first, second, lambda a, b: a and b)
+
+
+def _combine_regions(
+    first: Sequence[Region],
+    second: Sequence[Region],
+    predicate: Callable[[bool, bool], bool],
+) -> List[Region]:
+    """Combine two hole-aware region sets with a membership predicate."""
+    regions_first = _regions_from_loops(_region_loops(first))
+    regions_second = _regions_from_loops(_region_loops(second))
+    if not regions_first and not regions_second:
+        return []
+    if not regions_first:
+        return (
+            regions_second
+            if predicate(False, True) else []
+        )
+    if not regions_second:
+        return (
+            regions_first
+            if predicate(True, False) else []
+        )
+    loops = [
+        loop
+        for region in regions_first + regions_second
+        for loop in (region[0], *region[1])
+    ]
+    segments = _split_segments(loops)
+    if not segments:
+        return []
+    all_points = [point for segment in segments for point in segment]
+    sample = max(1e-7, _diagonal(all_points) * 1e-6)
+    boundary: List[Segment] = []
+    for start, end in segments:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length <= _EPS:
+            continue
+        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+        normal = (-dy / length, dx / length)
+        left = (
+            middle[0] + normal[0] * sample,
+            middle[1] + normal[1] * sample,
+        )
+        right = (
+            middle[0] - normal[0] * sample,
+            middle[1] - normal[1] * sample,
+        )
+        inside_left = predicate(
+            _inside_regions(left, regions_first),
+            _inside_regions(left, regions_second),
+        )
+        inside_right = predicate(
+            _inside_regions(right, regions_first),
+            _inside_regions(right, regions_second),
+        )
+        if inside_left == inside_right:
+            continue
+        boundary.append((start, end) if inside_left else (end, start))
+    return _regions_from_loops(_trace_loops(boundary))
+
+
+def _region_loops(regions: Sequence[Region]) -> List[Loop]:
+    """Flatten hole-aware regions into their boundary loops."""
+    loops: List[Loop] = []
+    for outer, holes in regions:
+        if len(outer) >= 3:
+            loops.append(outer)
+        loops.extend(hole for hole in holes if len(hole) >= 3)
+    return loops
+
+
 def loop_intersects(
     first: Sequence[Sequence[float]],
     second: Sequence[Sequence[float]],
@@ -388,6 +481,40 @@ def _clean_loop(loop: Sequence[Sequence[float]]) -> Loop:
     if len(result) >= 2 and _same_point(result[0], result[-1]):
         result.pop()
     return _remove_collinear(result)
+
+
+def split_loop_at_points(
+    loop: Sequence[Sequence[float]],
+    points: Sequence[Sequence[float]],
+) -> Loop:
+    """Insert points that lie inside the edges of one closed loop.
+
+    Boolean results remove collinear vertices while walls may keep them.
+    Re-running this on both sides of a shared edge restores identical
+    subdivisions and keeps the rendered mesh closed.
+    """
+    result: Loop = []
+    count = len(loop)
+    for index, raw_start in enumerate(loop):
+        start = (float(raw_start[0]), float(raw_start[1]))
+        raw_end = loop[(index + 1) % count]
+        end = (float(raw_end[0]), float(raw_end[1]))
+        result.append(start)
+        inserted: List[Tuple[float, Point2]] = []
+        for raw in points:
+            point = (float(raw[0]), float(raw[1]))
+            if _same_point(point, start) or _same_point(point, end):
+                continue
+            if not _point_on_segment(point, start, end):
+                continue
+            inserted.append((_segment_parameter(point, start, end), point))
+        inserted.sort(key=lambda item: item[0])
+        for _, point in inserted:
+            if not _same_point(result[-1], point):
+                result.append(point)
+    if len(result) >= 2 and _same_point(result[0], result[-1]):
+        result.pop()
+    return result
 
 
 def _remove_collinear(loop: Loop) -> Loop:

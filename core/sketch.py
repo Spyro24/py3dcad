@@ -1765,6 +1765,64 @@ class Fillet:
 
 
 @dataclass
+class ExtrudeSlice:
+    """One constant cross-section interval of a combined solid body."""
+
+    z0: float
+    z1: float
+    # Each region is ``[outer, *holes]`` in the owning sketch's local XY.
+    regions: List[List[List[float]]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "z0": self.z0,
+            "z1": self.z1,
+            "regions": [
+                [
+                    [[float(x), float(y)] for x, y in loop]
+                    for loop in region
+                ]
+                for region in self.regions
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["ExtrudeSlice"]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            z0 = float(data.get("z0", 0.0))
+            z1 = float(data.get("z1", 0.0))
+        except (TypeError, ValueError):
+            return None
+        regions: List[List[List[float]]] = []
+        for raw_region in data.get("regions", []):
+            if not isinstance(raw_region, (list, tuple)):
+                continue
+            region: List[List[float]] = []
+            for raw_loop in raw_region:
+                loop: List[List[float]] = []
+                for point in raw_loop if isinstance(raw_loop, (list, tuple)) else []:
+                    if not isinstance(point, (list, tuple)) or len(point) < 2:
+                        loop = []
+                        break
+                    try:
+                        loop.append([float(point[0]), float(point[1])])
+                    except (TypeError, ValueError):
+                        loop = []
+                        break
+                if len(loop) >= 3:
+                    region.append(loop)
+            if region:
+                regions.append(region)
+        if not regions or abs(z1 - z0) <= 1e-9:
+            return None
+        if z1 < z0:
+            z0, z1 = z1, z0
+        return cls(z0, z1, regions)
+
+
+@dataclass
 class Extrude:
     """A prism created by extruding closed sketch faces along its normal."""
 
@@ -1780,6 +1838,12 @@ class Extrude:
     regions: List[List[List[int]]] = field(default_factory=list)
     # Rounded profile corners and cap edges.
     fillets: List[Fillet] = field(default_factory=list)
+    # Offset of the base cap from the sketch plane along the normal.
+    start: float = 0.0
+    # Boolean operation that created or last modified this body.
+    operation: str = "new_body"
+    # A combined body stores its finished z-slices instead of one prism.
+    slices: List[ExtrudeSlice] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1788,12 +1852,15 @@ class Extrude:
             "name": self.name,
             "sketch": self.sketch_id,
             "height": self.height,
+            "start": self.start,
+            "operation": self.operation,
             "profiles": [list(loop) for loop in self.profiles],
             "cuts": [list(loop) for loop in self.cuts],
             "regions": [
                 [list(loop) for loop in region] for region in self.regions
             ],
             "fillets": [fillet.to_dict() for fillet in self.fillets],
+            "slices": [entry.to_dict() for entry in self.slices],
         }
 
     @classmethod
@@ -1807,7 +1874,21 @@ class Extrude:
             cuts=cls._parse_loops(data.get("cuts", [])),
             regions=cls._parse_regions(data.get("regions", [])),
             fillets=cls._parse_fillets(data.get("fillets", [])),
+            start=float(data.get("start", 0.0)),
+            operation=str(data.get("operation", "new_body")),
+            slices=cls._parse_slices(data.get("slices", [])),
         )
+
+    @staticmethod
+    def _parse_slices(raw_slices: Any) -> List[ExtrudeSlice]:
+        slices: List[ExtrudeSlice] = []
+        if not isinstance(raw_slices, (list, tuple)):
+            return slices
+        for raw_slice in raw_slices:
+            entry = ExtrudeSlice.from_dict(raw_slice)
+            if entry is not None:
+                slices.append(entry)
+        return slices
 
     @staticmethod
     def _parse_fillets(raw_fillets: Any) -> List[Fillet]:
