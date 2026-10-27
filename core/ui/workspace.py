@@ -44,6 +44,34 @@ class HistoryEntry:
     timeline_visible: bool = True
 
 
+ARROW_SNAP_PIXELS = 3.0
+
+
+def _arrow_snap_step(world_per_pixel: float) -> float:
+    """Choose a round arrow step that stays aimable at the current zoom.
+
+    When the view is zoomed out one pixel covers a large distance, so a
+    continuous drag jumps through many values.  A coarser round step makes
+    the handle land on readable values instead.
+    """
+    target = max(world_per_pixel, 1e-6) * ARROW_SNAP_PIXELS
+    exponent = 10.0 ** math.floor(math.log10(target))
+    for factor in (1.0, 2.0, 5.0, 10.0):
+        step = factor * exponent
+        if step >= target:
+            return step
+    return 10.0 * exponent
+
+
+def _snap_to_step(value: float, step: float) -> float:
+    """Round a value to the nearest multiple of ``step``."""
+    if step <= 1e-9:
+        return value
+    return math.copysign(
+        math.floor(abs(value) / step + 0.5) * step, value
+    )
+
+
 @dataclass
 class _ExtrudeArrowDrag:
     """Screen and model anchors captured when an extrude drag starts."""
@@ -53,6 +81,7 @@ class _ExtrudeArrowDrag:
     base_half: float
     screen_axis: Tuple[float, float]
     symmetric: bool
+    snap_step: float
 
 
 @dataclass
@@ -4435,12 +4464,14 @@ class Workspace:
             screen_axis = (0.0, -projection_scale)
             if abs(screen_axis[1]) <= 1e-6:
                 return False
+        world_per_pixel = 1.0 / max(1e-6, math.hypot(*screen_axis))
         self._extrude_arrow_drag = _ExtrudeArrowDrag(
             start_pos=pos,
             base_height=preview.height,
             base_half=distance * 0.5,
             screen_axis=screen_axis,
             symmetric=self.extrude_window.is_symmetric(),
+            snap_step=_arrow_snap_step(world_per_pixel),
         )
         return True
 
@@ -4456,10 +4487,16 @@ class Workspace:
             return
         world = (dx * sx + dy * sy) / denominator
         if drag.symmetric:
-            half = max(0.05, drag.base_half + world)
-            self.extrude_window.set_distance_value(half * 2.0)
+            total = _snap_to_step(
+                drag.base_half * 2.0 + world * 2.0, drag.snap_step
+            )
+            self.extrude_window.set_distance_value(
+                max(drag.snap_step, total)
+            )
             return
-        signed = drag.base_height + world
+        signed = _snap_to_step(
+            drag.base_height + world, drag.snap_step
+        )
         self.extrude_window.set_distance_value(abs(signed))
         self.extrude_window.reverse = signed < 0.0
 
