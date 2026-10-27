@@ -694,8 +694,20 @@ class SceneRenderer:
             overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
             self._ghost_surface = overlay
         overlay.fill((0, 0, 0, 0))
+        view_dir = camera.view_direction()
+        # Only the outside of the removed volume belongs to the preview.  Its
+        # inner faces lie on the surviving body, so drawing them would paint
+        # the result red instead of showing the old, removed surface.
+        visible = [
+            face for face in faces
+            if (
+                face.normal[0] * view_dir[0]
+                + face.normal[1] * view_dir[1]
+                + face.normal[2] * view_dir[2]
+            ) > 0.0
+        ]
         ordered = sorted(
-            faces, key=lambda face: camera.depth(face.vertices)
+            visible, key=lambda face: camera.depth(face.vertices)
         )
         self._ghost_fills(overlay, ordered, rect, camera)
         self._ghost_outlines(overlay, ordered, rect, camera)

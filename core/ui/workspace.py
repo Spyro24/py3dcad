@@ -8,7 +8,7 @@ import pygame
 
 from ..document import Document
 from ..faces import Face
-from ..preview import ExtrudePreview
+from ..preview import ExtrudePreview, FilletPreview
 from ..profiles import (
     build_regions, intersect_loops, loop_cuts_selection, point_in_polygon,
     union_profiles,
@@ -81,6 +81,16 @@ class _ExtrudeArrowDrag:
     base_half: float
     screen_axis: Tuple[float, float]
     symmetric: bool
+    snap_step: float
+
+
+@dataclass
+class _FilletArrowDrag:
+    """Screen anchors captured when a fillet radius drag starts."""
+
+    start_pos: Tuple[int, int]
+    base_radius: float
+    screen_axis: Tuple[float, float]
     snap_step: float
 
 
@@ -327,6 +337,8 @@ class Workspace:
         self.extrude_window = ExtrudeWindow()
         self._extrude_preview: Optional[ExtrudePreview] = None
         self._extrude_arrow_drag: Optional[_ExtrudeArrowDrag] = None
+        self._fillet_preview: Optional[FilletPreview] = None
+        self._fillet_arrow_drag: Optional[_FilletArrowDrag] = None
         self._history_document: Optional[int] = None
         self._selection_sketch_id: Optional[int] = None
         self._mouse_pos: Tuple[int, int] = (0, 0)
@@ -640,12 +652,19 @@ class Workspace:
         preview_document: Optional[Document] = None,
         ghost_faces: Sequence[Face] = (),
         extrude_preview: Optional[ExtrudePreview] = None,
+        fillet_preview: Optional[FilletPreview] = None,
     ) -> None:
         self._init_fonts()
         self._sync_history_document(document)
         self._extrude_preview = extrude_preview
+        self._fillet_preview = fillet_preview
         self._draw_toolbar(surface, layout.toolbar, document)
         self._draw_tree(surface, layout.document_tree, document)
+        highlight: Tuple[int, ...] = ()
+        if extrude_preview is not None:
+            highlight = extrude_preview.highlight
+        elif fillet_preview is not None:
+            highlight = fillet_preview.highlight
         self.viewport.draw(
             surface,
             layout.viewport,
@@ -656,10 +675,7 @@ class Workspace:
             )),
             preview_document=preview_document,
             ghost_faces=ghost_faces,
-            highlight_features=(
-                extrude_preview.highlight
-                if extrude_preview is not None else ()
-            ),
+            highlight_features=highlight,
         )
         self._draw_sketch_loops(surface, layout.viewport, document)
         self._draw_line_preview(surface, layout.viewport, document)
@@ -667,6 +683,7 @@ class Workspace:
         self._draw_circle_preview(surface, layout.viewport, document)
         self._draw_sketch_selection(surface, layout.viewport, document)
         self._draw_extrude_arrow(surface, layout.viewport)
+        self._draw_fillet_arrow(surface, layout.viewport)
         if layout.command_bar.w > 0:
             self._draw_command_bar(
                 surface,
@@ -2359,7 +2376,26 @@ class Workspace:
         self, surface: pygame.Surface, region: Rect
     ) -> None:
         """Draw the distance handle at the end of a pending extrusion."""
-        points = self._extrude_arrow_points(region)
+        self._draw_handle_arrow(
+            surface, region, self._extrude_arrow_points(region)
+        )
+
+    def _draw_fillet_arrow(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        """Draw the radius handle that points into the pending fillet."""
+        self._draw_handle_arrow(
+            surface, region, self._fillet_arrow_points(region)
+        )
+
+    def _draw_handle_arrow(
+        self,
+        surface: pygame.Surface,
+        region: Rect,
+        points: Optional[
+            Tuple[Tuple[float, float], Tuple[float, float]]
+        ],
+    ) -> None:
         if points is None:
             return
         previous_clip = surface.get_clip()
@@ -2400,6 +2436,23 @@ class Workspace:
         Tuple[Tuple[float, float], Tuple[float, float]]
     ]:
         preview = self._extrude_preview
+        if (
+            preview is None
+            or preview.handle_start is None
+            or preview.handle_end is None
+        ):
+            return None
+        return (
+            self.viewport.project(preview.handle_start, region),
+            self.viewport.project(preview.handle_end, region),
+        )
+
+    def _fillet_arrow_points(
+        self, region: Rect
+    ) -> Optional[
+        Tuple[Tuple[float, float], Tuple[float, float]]
+    ]:
+        preview = self._fillet_preview
         if (
             preview is None
             or preview.handle_start is None
@@ -4417,10 +4470,13 @@ class Workspace:
             return self._begin_extrude_arrow_drag(event.pos, region)
         return False
 
-    def _extrude_arrow_hit(
-        self, pos: Tuple[int, int], region: Rect
+    def _arrow_hit(
+        self,
+        pos: Tuple[int, int],
+        points: Optional[
+            Tuple[Tuple[float, float], Tuple[float, float]]
+        ],
     ) -> bool:
-        points = self._extrude_arrow_points(region)
         if points is None:
             return False
         start, end = points
@@ -4430,26 +4486,24 @@ class Workspace:
             self._distance_to_segment(pos, start, end) <= self._s(7)
         )
 
-    def _begin_extrude_arrow_drag(
+    def _extrude_arrow_hit(
         self, pos: Tuple[int, int], region: Rect
     ) -> bool:
-        preview = self._extrude_preview
-        distance = self.extrude_window.distance_value()
-        if (
-            preview is None
-            or preview.handle_start is None
-            or preview.handle_end is None
-            or distance is None
-        ):
-            return False
-        start = preview.handle_start
-        end = preview.handle_end
+        return self._arrow_hit(pos, self._extrude_arrow_points(region))
+
+    def _arrow_screen_axis(
+        self,
+        start: Sequence[float],
+        end: Sequence[float],
+        region: Rect,
+    ) -> Optional[Tuple[float, float]]:
+        """Return the screen direction of a model-space arrow."""
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         dz = end[2] - start[2]
         length = math.sqrt(dx * dx + dy * dy + dz * dz)
         if length <= 1e-9:
-            return False
+            return None
         axis = (dx / length, dy / length, dz / length)
         anchor = self.viewport.project(start, region)
         unit = self.viewport.project(
@@ -4466,8 +4520,27 @@ class Workspace:
             # Viewed straight down the normal the projected arrow collapses to
             # a dot.  Fall back to a vertical drag so the handle stays usable.
             screen_axis = (0.0, -projection_scale)
-            if abs(screen_axis[1]) <= 1e-6:
-                return False
+        if math.hypot(*screen_axis) <= 1e-6:
+            return None
+        return screen_axis
+
+    def _begin_extrude_arrow_drag(
+        self, pos: Tuple[int, int], region: Rect
+    ) -> bool:
+        preview = self._extrude_preview
+        distance = self.extrude_window.distance_value()
+        if (
+            preview is None
+            or preview.handle_start is None
+            or preview.handle_end is None
+            or distance is None
+        ):
+            return False
+        screen_axis = self._arrow_screen_axis(
+            preview.handle_start, preview.handle_end, region
+        )
+        if screen_axis is None:
+            return False
         world_per_pixel = 1.0 / max(1e-6, math.hypot(*screen_axis))
         self._extrude_arrow_drag = _ExtrudeArrowDrag(
             start_pos=pos,
@@ -4478,6 +4551,72 @@ class Workspace:
             snap_step=_arrow_snap_step(world_per_pixel),
         )
         return True
+
+    def _handle_fillet_arrow_event(
+        self, event: pygame.event.Event, region: Rect
+    ) -> bool:
+        """Start or update a drag of the fillet radius handle."""
+        if self._fillet_arrow_drag is not None:
+            if event.type == pygame.MOUSEMOTION:
+                self._drag_fillet_arrow(event.pos)
+                return True
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._fillet_arrow_drag = None
+                return True
+            return False
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self.fillet_window.visible
+            and region.collidepoint(event.pos)
+            and self._arrow_hit(
+                event.pos, self._fillet_arrow_points(region)
+            )
+        ):
+            return self._begin_fillet_arrow_drag(event.pos, region)
+        return False
+
+    def _begin_fillet_arrow_drag(
+        self, pos: Tuple[int, int], region: Rect
+    ) -> bool:
+        preview = self._fillet_preview
+        radius = self.fillet_window.radius()
+        if (
+            preview is None
+            or preview.handle_start is None
+            or preview.handle_end is None
+            or radius is None
+        ):
+            return False
+        screen_axis = self._arrow_screen_axis(
+            preview.handle_start, preview.handle_end, region
+        )
+        if screen_axis is None:
+            return False
+        world_per_pixel = 1.0 / max(1e-6, math.hypot(*screen_axis))
+        self._fillet_arrow_drag = _FilletArrowDrag(
+            start_pos=pos,
+            base_radius=radius,
+            screen_axis=screen_axis,
+            snap_step=_arrow_snap_step(world_per_pixel),
+        )
+        return True
+
+    def _drag_fillet_arrow(self, pos: Tuple[int, int]) -> None:
+        drag = self._fillet_arrow_drag
+        if drag is None:
+            return
+        dx = pos[0] - drag.start_pos[0]
+        dy = pos[1] - drag.start_pos[1]
+        sx, sy = drag.screen_axis
+        denominator = sx * sx + sy * sy
+        if denominator <= 1e-9:
+            return
+        world = (dx * sx + dy * sy) / denominator
+        # Snap the change instead of the absolute radius so grabbing a small
+        # fillet at low zoom cannot jump it to an unrelated round value.
+        radius = drag.base_radius + _snap_to_step(world, drag.snap_step)
+        self.fillet_window.set_radius_value(max(0.05, radius))
 
     def _drag_extrude_arrow(self, pos: Tuple[int, int]) -> None:
         drag = self._extrude_arrow_drag
@@ -4525,6 +4664,13 @@ class Workspace:
             and self._handle_extrude_arrow_event(event, layout.viewport)
         ):
             return True
+        if not self.fillet_window.visible:
+            self._fillet_arrow_drag = None
+        if (
+            self._fillet_arrow_drag is not None
+            and self._handle_fillet_arrow_event(event, layout.viewport)
+        ):
+            return True
 
         # The extrude panel owns keyboard input while it is open, so typing a
         # distance never reaches the sketch tools or the application shortcuts.
@@ -4543,6 +4689,9 @@ class Workspace:
             self._extrude_arrow_drag = None
 
         if self._handle_extrude_arrow_event(event, layout.viewport):
+            return True
+
+        if self._handle_fillet_arrow_event(event, layout.viewport):
             return True
 
         if self._handle_measurement_edit_event(event, document):
@@ -4712,6 +4861,8 @@ class Workspace:
                     )
                 return True
             if fillet_action is not FilletWindowAction.NONE:
+                if not self.fillet_window.visible:
+                    self._fillet_arrow_drag = None
                 return True
 
         if event.type == pygame.MOUSEMOTION:

@@ -1,9 +1,7 @@
 """Application shell for PY3DCAD."""
 
-import copy
 import json
 import math
-from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -27,9 +25,7 @@ from .commands import (
     SetMeasurementPlacementCommand,
     SetMeasurementValueCommand,
 )
-from .booleans import (
-    build_tool_stack, fillet_slices_body, plan_boolean,
-)
+from .booleans import build_tool_stack, plan_boolean
 from .config import Config, format_opened
 from .document import Document
 from .faces import (
@@ -37,10 +33,12 @@ from .faces import (
     profile_segment_key, stack_cap_segment_key, stack_has_corner,
     vertical_edge_corner,
 )
-from .preview import ExtrudePreview, build_extrude_preview
+from .preview import (
+    ExtrudePreview, FilletPreview, build_extrude_preview,
+    build_fillet_preview,
+)
 from .sketch import (
     Extrude,
-    Fillet,
     Point,
     Sketch,
     normalize_measurement_placement,
@@ -824,12 +822,14 @@ class Application:
         document.selected_face = None
         return None
 
-    def fillet_preview(self, radius: float) -> Optional[Document]:
+    def fillet_preview(self, radius: float) -> Optional[FilletPreview]:
         """Return a throwaway document with the pending fillet applied.
 
         The real document stays untouched so the tree, history and undo
         stack keep describing the model the user actually has.  Only the
-        solid rendering is swapped for the preview.
+        solid rendering is swapped for the preview.  The removed wedge is
+        drawn as a red ghost so the sharp edge and the rounded surface are
+        visible at the same time.
         """
         document = self.active_document()
         if document is None:
@@ -859,33 +859,9 @@ class Application:
         error, feature, kind, u, v = _resolve_fillet(document, radius)
         if error is not None or feature is None or kind is None:
             return None
-        preview = copy.copy(document)
-        preview.features = [
-            replace(candidate, fillets=list(candidate.fillets))
-            for candidate in document.features
-        ]
-        target = next(
-            (
-                candidate
-                for candidate in preview.features
-                if candidate.id == feature.id
-            ),
-            None,
+        preview = build_fillet_preview(
+            document, feature, kind, u, v, radius
         )
-        if target is None:
-            return None
-        fillet = Fillet(kind, u, v, radius)
-        if target.slices:
-            rounded = fillet_slices_body(target.slices, fillet)
-            if rounded is None:
-                return None
-            target.slices = rounded
-        else:
-            target.fillets.append(fillet)
-        # The user is seeing the result, not the old edge, so no stale
-        # selection highlight may cover the preview.
-        preview.selected_edge = None
-        preview.selected_face = None
         self._fillet_preview_cache = (key, preview)
         return preview
 
@@ -1267,15 +1243,19 @@ class Application:
             ]
             radius = self.workspace.fillet_preview_radius()
             extrude_preview = self.extrude_preview(document)
+            fillet_preview = None
             if extrude_preview is not None:
                 preview = extrude_preview.document
                 ghost_faces = extrude_preview.ghost_faces
             else:
+                if radius is not None:
+                    fillet_preview = self.fillet_preview(radius)
                 preview = (
-                    self.fillet_preview(radius)
-                    if radius is not None else None
+                    fillet_preview.document if fillet_preview else None
                 )
-                ghost_faces = ()
+                ghost_faces = (
+                    fillet_preview.ghost_faces if fillet_preview else ()
+                )
             self.workspace.draw(
                 surface,
                 self.layout,
@@ -1287,6 +1267,7 @@ class Application:
                 preview_document=preview,
                 ghost_faces=ghost_faces,
                 extrude_preview=extrude_preview,
+                fillet_preview=fillet_preview,
             )
         else:
             self.start_page.draw(surface, self._content_region())

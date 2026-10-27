@@ -457,14 +457,23 @@ def _split_shared_boundaries(stack: Sequence[ExtrudeSlice]) -> None:
     same point set keeps every shared edge exactly coincident, so the
     rendered mesh has no T-junctions.
     """
-    points: Dict[Tuple[float, float], Point2] = {}
+    # Only the two caps of a slice can introduce vertices into its walls, so
+    # keep one point set per height instead of splitting every loop by every
+    # point in the whole stack.
+    points_at: Dict[float, Dict[Tuple[float, float], Point2]] = {}
+
+    def add(z: float, point: Sequence[float]) -> None:
+        bucket = points_at.setdefault(round(z, 7), {})
+        bucket[(round(point[0], 7), round(point[1], 7))] = (
+            float(point[0]), float(point[1])
+        )
+
     for entry in stack:
         for group in entry.regions:
             for loop in group:
                 for point in loop:
-                    points[(round(point[0], 7), round(point[1], 7))] = (
-                        float(point[0]), float(point[1])
-                    )
+                    add(entry.z0, point)
+                    add(entry.z1, point)
     for lower, upper in zip(stack, stack[1:]):
         if abs(lower.z1 - upper.z0) > TOLERANCE:
             continue
@@ -478,13 +487,16 @@ def _split_shared_boundaries(stack: Sequence[ExtrudeSlice]) -> None:
             for outer, holes in pairs:
                 for loop in (outer, *holes):
                     for point in loop:
-                        points[(round(point[0], 7), round(point[1], 7))] = (
-                            float(point[0]), float(point[1])
-                        )
-    if not points:
-        return
-    all_points = list(points.values())
+                        add(lower.z1, point)
+                        add(upper.z0, point)
     for entry in stack:
+        points = {
+            **points_at.get(round(entry.z0, 7), {}),
+            **points_at.get(round(entry.z1, 7), {}),
+        }
+        if not points:
+            continue
+        all_points = list(points.values())
         entry.regions = [
             [
                 split_loop_at_points(loop, all_points)

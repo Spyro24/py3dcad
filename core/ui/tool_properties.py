@@ -1220,6 +1220,11 @@ class FilletWindow:
             return None
         return value if value > 0.0 else None
 
+    def set_radius_value(self, value: float) -> None:
+        """Update the radius from the viewport drag handle."""
+        self.value = f"{max(0.01, value):.3f}".rstrip("0").rstrip(".")
+        self.error = ""
+
     def _s(self, value: float) -> int:
         return max(1, int(round(value * self.scale)))
 

@@ -3017,8 +3017,13 @@ def _cap_fillet_stack(
             continue
         # Sample the boundary nearer the cap so the cap face keeps its exact
         # cross-section instead of being undersized by half a step.
-        sample = z1 if fillet.kind == "top" else z0
-        base = _stack_regions_at(entries, sample)
+        top = fillet.kind == "top"
+        sample = z1 if top else z0
+        # A seam between two stored slices can describe the same height with
+        # slightly different points.  Take the cross-section from inside this
+        # new slice so unchanged slices are copied verbatim instead of
+        # leaving a hairline shell behind.
+        base = _stack_regions_at(entries, sample, prefer_start=not top)
         if not base:
             continue
         inset = _cap_fillet_inset(abs(cap_z - sample), radius)
@@ -3040,9 +3045,17 @@ def _cap_fillet_stack(
 
 
 def _stack_regions_at(
-    entries: Sequence[ExtrudeSlice], z: float
+    entries: Sequence[ExtrudeSlice], z: float, prefer_start: bool = True
 ) -> List[List[List[Point2]]]:
-    """Return the cross-section of the slice containing ``z``."""
+    """Return the cross-section of the slice containing ``z``.
+
+    At an internal seam two slices meet, so the caller chooses which side of
+    the seam describes the sampled slice.
+    """
+    edge = "z0" if prefer_start else "z1"
+    for entry in entries:
+        if abs(getattr(entry, edge) - z) <= 1e-9:
+            return entry.regions
     for entry in entries:
         if entry.z0 - 1e-9 <= z <= entry.z1 + 1e-9:
             return entry.regions
