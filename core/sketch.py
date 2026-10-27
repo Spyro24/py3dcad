@@ -1772,9 +1772,13 @@ class ExtrudeSlice:
     z1: float
     # Each region is ``[outer, *holes]`` in the owning sketch's local XY.
     regions: List[List[List[float]]] = field(default_factory=list)
+    # True where this slice continues a sampled curved surface instead of
+    # ending on a real cap.  The renderer keeps those interfaces seam-free.
+    smooth_z0: bool = False
+    smooth_z1: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "z0": self.z0,
             "z1": self.z1,
             "regions": [
@@ -1785,6 +1789,11 @@ class ExtrudeSlice:
                 for region in self.regions
             ],
         }
+        if self.smooth_z0:
+            data["smooth_z0"] = True
+        if self.smooth_z1:
+            data["smooth_z1"] = True
+        return data
 
     @classmethod
     def from_dict(cls, data: Any) -> Optional["ExtrudeSlice"]:
@@ -1819,7 +1828,11 @@ class ExtrudeSlice:
             return None
         if z1 < z0:
             z0, z1 = z1, z0
-        return cls(z0, z1, regions)
+        return cls(
+            z0, z1, regions,
+            bool(data.get("smooth_z0", False)),
+            bool(data.get("smooth_z1", False)),
+        )
 
 
 @dataclass

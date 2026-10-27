@@ -9,6 +9,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
+from .faces import fillet_slices
 from .profiles import (
     Region, build_regions, region_difference, region_intersection,
     region_union, split_loop_at_points,
@@ -104,8 +105,14 @@ def _map_stack(
     for entry in stack:
         z0, z1 = sorted((mapping.z(entry.z0), mapping.z(entry.z1)))
         regions = _map_groups(entry.regions, mapping)
-        if regions and z1 - z0 > TOLERANCE:
-            result.append(ExtrudeSlice(z0, z1, regions))
+        if not regions or z1 - z0 <= TOLERANCE:
+            continue
+        smooth_z0, smooth_z1 = entry.smooth_z0, entry.smooth_z1
+        if mapping.z_scale < 0.0:
+            smooth_z0, smooth_z1 = smooth_z1, smooth_z0
+        result.append(ExtrudeSlice(
+            z0, z1, regions, smooth_z0, smooth_z1,
+        ))
     return _normalize(result)
 
 
@@ -122,6 +129,12 @@ def feature_stack(
         return []
     if feature.slices:
         return _map_stack(feature.slices, source, target)
+    if feature.fillets:
+        # A rounded body is not one constant prism.  Turn it into slices so
+        # the boolean result keeps the fillet instead of rejecting the body.
+        sampled = fillet_slices(feature, sketch)
+        if sampled:
+            return _map_stack(sampled, source, target)
     profiles = feature.resolve_profiles(sketch)
     if not profiles:
         return []
@@ -233,8 +246,6 @@ def plan_boolean(
     if best is None:
         return None, [], f"No body found to {label}"
     target = best[1]
-    if target.fillets:
-        return None, [], f"{label} needs a body without fillets"
     sketch = document.sketch(target.sketch_id)
     if sketch is None:
         return None, [], f"No body found to {label}"
@@ -265,6 +276,11 @@ def combine_stacks(
         for entry in (*target, *tool)
         for value in (entry.z0, entry.z1)
     ])
+    tool_boundaries = {
+        round(value, 9)
+        for entry in tool
+        for value in (entry.z0, entry.z1)
+    }
     result: List[ExtrudeSlice] = []
     for z0, z1 in zip(boundaries, boundaries[1:]):
         if z1 - z0 <= TOLERANCE:
@@ -273,11 +289,34 @@ def combine_stacks(
         first = _regions_at(target, middle)
         second = _regions_at(tool, middle)
         regions = _apply(operation, first, second)
-        if regions:
-            result.append(ExtrudeSlice(z0, z1, regions))
+        if not regions:
+            continue
+        result.append(ExtrudeSlice(
+            z0, z1, regions,
+            smooth_z0=(
+                _surface_boundary(target, z0)
+                and round(z0, 9) not in tool_boundaries
+            ),
+            smooth_z1=(
+                _surface_boundary(target, z1)
+                and round(z1, 9) not in tool_boundaries
+            ),
+        ))
     merged = _merge_slices(result)
     _split_shared_boundaries(merged)
     return merged
+
+
+def _surface_boundary(
+    stack: Sequence[ExtrudeSlice], z: float
+) -> bool:
+    """Return whether ``z`` continues a curved surface of a stack."""
+    for entry in stack:
+        if abs(entry.z0 - z) <= TOLERANCE and entry.smooth_z0:
+            return True
+        if abs(entry.z1 - z) <= TOLERANCE and entry.smooth_z1:
+            return True
+    return False
 
 
 def _apply(
@@ -356,7 +395,9 @@ def _merge_slices(stack: Sequence[ExtrudeSlice]) -> List[ExtrudeSlice]:
             and _regions_key(merged[-1].regions) == _regions_key(entry.regions)
         ):
             merged[-1] = ExtrudeSlice(
-                merged[-1].z0, entry.z1, merged[-1].regions
+                merged[-1].z0, entry.z1, merged[-1].regions,
+                smooth_z0=merged[-1].smooth_z0,
+                smooth_z1=entry.smooth_z1,
             )
         else:
             merged.append(entry)
@@ -367,8 +408,10 @@ def _split_shared_boundaries(stack: Sequence[ExtrudeSlice]) -> None:
     """Add every cap vertex to the side loops that share it.
 
     Boolean caps can introduce vertices in the middle of a side-wall edge.
-    Splitting all slice loops by the same point set keeps every shared edge
-    exactly coincident, so the rendered mesh has no T-junctions.
+    A slice wall is one prism, so a vertex that belongs to any cap of that
+    slice also appears at both of its ends.  Splitting all slice loops by the
+    same point set keeps every shared edge exactly coincident, so the
+    rendered mesh has no T-junctions.
     """
     points: Dict[Tuple[float, float], Point2] = {}
     for entry in stack:

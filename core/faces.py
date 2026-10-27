@@ -5,12 +5,15 @@ application model can resolve a selected face without pulling in the UI.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
     Dict, Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING,
 )
 
-from .profiles import build_regions, region_difference, split_loop_at_points
+from .profiles import (
+    Region, build_regions, region_difference, simplify_loop,
+    split_loop_at_points,
+)
 from .sketch import ExtrudeSlice, PlaneFrame, PlaneLike, Point3, plane_frame
 
 Color = Tuple[int, int, int]
@@ -23,7 +26,7 @@ SMOOTH_ANGLE = math.radians(20.0)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .document import Document
-    from .sketch import Extrude, Fillet
+    from .sketch import Extrude, Fillet, Sketch
 
 
 @dataclass(frozen=True)
@@ -339,13 +342,17 @@ def stacked_faces(
             if not group:
                 continue
             _append_wall_faces(
-                faces, runs, group[0], group[1:], height, shifted
+                faces, runs, group[0], group[1:], height, shifted,
+                smooth_bottom=entry.smooth_z0,
+                smooth_top=entry.smooth_z1,
             )
-    for z, sign, groups in _stack_caps(entries):
+    for z, sign, groups, smooth in _stack_caps(entries):
         for group in groups:
             if not group:
                 continue
-            faces.append(_stack_cap_face(group[0], group[1:], z, sign, frame))
+            faces.append(_stack_cap_face(
+                group[0], group[1:], z, sign, frame, smooth
+            ))
             runs.append(1)
     return faces, runs
 
@@ -372,6 +379,8 @@ def _append_wall_faces(
     holes: Sequence[Sequence[Sequence[float]]],
     height: float,
     frame: PlaneFrame,
+    smooth_bottom: bool = False,
+    smooth_top: bool = False,
 ) -> None:
     loops = [(outer, False), *((hole, True) for hole in holes)]
     for loop, inward in loops:
@@ -379,17 +388,147 @@ def _append_wall_faces(
             continue
         base = _map_points(loop, frame)
         top = _offset_points(base, frame.normal, height)
-        side = _side_faces(loop, base, top, frame, inward=inward)
+        side = _straight_wall_faces(loop, base, top, frame, inward=inward)
+        if smooth_bottom or smooth_top:
+            side = [
+                _smooth_wall_face(
+                    face, frame, height, smooth_bottom, smooth_top
+                )
+                for face in side
+            ]
         if side:
             faces.extend(side)
             runs.append(len(side))
 
 
+def _wall_normals(
+    points: Sequence[Sequence[float]], frame: PlaneFrame, inward: bool
+) -> List[Point3]:
+    """Return one outward normal per profile segment."""
+    area = 0.0
+    for index, point in enumerate(points):
+        nxt = points[(index + 1) % len(points)]
+        area += (
+            float(point[0]) * float(nxt[1])
+            - float(nxt[0]) * float(point[1])
+        )
+    orientation = 1.0 if area >= 0.0 else -1.0
+    direction = -1.0 if inward else 1.0
+    normals: List[Point3] = []
+    for index in range(len(points)):
+        nxt = (index + 1) % len(points)
+        dx = float(points[nxt][0]) - float(points[index][0])
+        dy = float(points[nxt][1]) - float(points[index][1])
+        local_x, local_y = (dy, -dx) if orientation > 0 else (-dy, dx)
+        normals.append(_unit((
+            (frame.u[0] * local_x + frame.v[0] * local_y) * direction,
+            (frame.u[1] * local_x + frame.v[1] * local_y) * direction,
+            (frame.u[2] * local_x + frame.v[2] * local_y) * direction,
+        )))
+    return normals
+
+
+def _straight_wall_faces(
+    points: Sequence[Sequence[float]],
+    base: Sequence[Point3],
+    top: Sequence[Point3],
+    frame: PlaneFrame,
+    inward: bool = False,
+) -> List[Face]:
+    """Build one wall panel per straight edge of a slice profile.
+
+    A boolean slice loop carries every vertex its neighbouring slices need.
+    Most of those are collinear subdivisions of one straight edge, so one
+    panel per segment would add hundreds of coplanar faces without changing
+    the shape.  Panels with distinct normals stay separate, exactly as the
+    general prism builder keeps them.
+    """
+    count = len(base)
+    if count < 3:
+        return []
+    normals = _wall_normals(points, frame, inward)
+    corners = [
+        index for index in range(count)
+        if _angle_between(normals[index - 1], normals[index]) >= 1e-6
+    ]
+    if not corners:
+        return []
+    faces: List[Face] = []
+    for position, start in enumerate(corners):
+        end = corners[(position + 1) % len(corners)]
+        steps = (end - start) % count or count
+        chain = [(start + step) % count for step in range(steps + 1)]
+        poly = [base[index] for index in chain]
+        poly.extend(top[index] for index in reversed(chain))
+        flags = [True] * steps
+        flags.append(not _smooth_vertex(normals, end))
+        flags.extend([True] * steps)
+        flags.append(not _smooth_vertex(normals, start))
+        poly, flags = _wind_outward(poly, flags, normals[start])
+        faces.append(Face(
+            tuple(poly),
+            _side_color(points[start], points[(start + 1) % count]),
+            normals[start],
+            f"Side face {start + 1}",
+            flags,
+        ))
+    return faces
+
+
+def _smooth_vertex(normals: Sequence[Point3], index: int) -> bool:
+    """Return whether the wall panels meeting at a loop vertex are smooth."""
+    return (
+        _angle_between(normals[index - 1], normals[index]) < SMOOTH_ANGLE
+    )
+
+
+def _smooth_wall_face(
+    face: Face,
+    frame: PlaneFrame,
+    height: float,
+    smooth_bottom: bool,
+    smooth_top: bool,
+) -> Face:
+    """Hide the seam where a sampled curved surface crosses a slice."""
+    sharp = face.sharp_edges
+    if sharp is None:
+        return face
+    flags = list(sharp)
+    count = len(face.vertices)
+    for index in range(count):
+        start = face.vertices[index]
+        end = face.vertices[(index + 1) % count]
+        if (
+            smooth_bottom
+            and _on_plane(start, frame, 0.0)
+            and _on_plane(end, frame, 0.0)
+        ):
+            flags[index] = False
+        if (
+            smooth_top
+            and _on_plane(start, frame, height)
+            and _on_plane(end, frame, height)
+        ):
+            flags[index] = False
+    return replace(face, sharp_edges=tuple(flags))
+
+
+def _on_plane(
+    point: Sequence[float], frame: PlaneFrame, distance: float
+) -> bool:
+    offset = (
+        point[0] - frame.origin[0],
+        point[1] - frame.origin[1],
+        point[2] - frame.origin[2],
+    )
+    return abs(_dot(offset, frame.normal) - distance) <= 1e-6
+
+
 def _stack_caps(
     entries: Sequence[ExtrudeSlice],
-) -> List[Tuple[float, float, List[List[List[float]]]]]:
+) -> List[Tuple[float, float, List[List[List[float]]], bool]]:
     """Return bottom, interface and top caps with their outward z sign."""
-    caps: List[Tuple[float, float, List[List[List[float]]]]] = []
+    caps: List[Tuple[float, float, List[List[List[float]]], bool]] = []
     runs: List[List[ExtrudeSlice]] = []
     for entry in entries:
         if runs and abs(runs[-1][-1].z1 - entry.z0) <= 1e-6:
@@ -397,8 +536,8 @@ def _stack_caps(
         else:
             runs.append([entry])
     for run in runs:
-        caps.append((run[0].z0, -1.0, run[0].regions))
-        caps.append((run[-1].z1, 1.0, run[-1].regions))
+        caps.append((run[0].z0, -1.0, run[0].regions, False))
+        caps.append((run[-1].z1, 1.0, run[-1].regions, False))
         for lower, upper in zip(run, run[1:]):
             caps.extend(_interface_caps(lower, upper))
     return caps
@@ -406,8 +545,9 @@ def _stack_caps(
 
 def _interface_caps(
     lower: ExtrudeSlice, upper: ExtrudeSlice
-) -> List[Tuple[float, float, List[List[List[float]]]]]:
+) -> List[Tuple[float, float, List[List[List[float]]], bool]]:
     z = lower.z1
+    smooth = lower.smooth_z1 and upper.smooth_z0
     lower_pairs = _group_pairs(lower.regions)
     upper_pairs = _group_pairs(upper.regions)
     points = [
@@ -416,15 +556,40 @@ def _interface_caps(
         for loop in group
         for point in loop
     ]
-    caps: List[Tuple[float, float, List[List[List[float]]]]] = []
+    # Collinear wall subdivisions do not change a region.  Simplifying both
+    # profiles keeps the polygon difference small, then splitting the result
+    # by ``points`` restores the shared vertices the walls need.
+    low = _simplify_pairs(lower_pairs)
+    high = _simplify_pairs(upper_pairs)
+    caps: List[Tuple[float, float, List[List[List[float]]], bool]] = []
     for sign, pairs in (
-        (1.0, region_difference(lower_pairs, upper_pairs)),
-        (-1.0, region_difference(upper_pairs, lower_pairs)),
+        (1.0, region_difference(low, high)),
+        (-1.0, region_difference(high, low)),
     ):
         groups = _split_groups(_region_groups(pairs), points)
         if groups:
-            caps.append((z, sign, groups))
+            caps.append((z, sign, groups, smooth))
     return caps
+
+
+def _simplify_pairs(
+    pairs: Sequence[Tuple[Sequence[Sequence[float]], List[Sequence[Sequence[float]]]]],
+) -> List[Region]:
+    """Drop collinear vertices from every loop of a region pair."""
+    simplified: List[Region] = []
+    for outer, holes in pairs:
+        loop = simplify_loop(outer)
+        if len(loop) < 3:
+            continue
+        simplified.append((
+            loop,
+            [
+                current
+                for current in (simplify_loop(hole) for hole in holes)
+                if len(current) >= 3
+            ],
+        ))
+    return simplified
 
 
 def _group_pairs(
@@ -470,6 +635,7 @@ def _stack_cap_face(
     z: float,
     sign: float,
     frame: PlaneFrame,
+    smooth: bool = False,
 ) -> Face:
     """Build one horizontal cap, winding it to agree with its normal."""
     shifted = _offset_frame(frame, z)
@@ -482,6 +648,13 @@ def _stack_cap_face(
         frame.normal if sign > 0.0
         else _scale(frame.normal, -1.0)
     )
+    if smooth:
+        # A sampling step inside a rounded surface is not a real cap: shade
+        # it like the adjacent wall and draw no seams across it.
+        return Face(
+            outer_points, (155, 155, 163), normal, "Blend face",
+            (False,) * len(outer_points), holes=hole_points,
+        )
     color = (190, 190, 198) if sign > 0.0 else (105, 105, 114)
     label = "Top face" if sign > 0.0 else "Bottom face"
     return Face(outer_points, color, normal, label, holes=hole_points)
@@ -1761,25 +1934,8 @@ def _side_faces(
     ``bottom_offsets`` and ``top_offsets`` trim each panel inwards along the
     extrusion axis where a cap-edge fillet replaces the sharp rim.
     """
-    area = 0.0
-    for index, point in enumerate(points):
-        nxt = points[(index + 1) % len(points)]
-        area += float(point[0]) * float(nxt[1]) - float(nxt[0]) * float(point[1])
-    orientation = 1.0 if area >= 0.0 else -1.0
-    direction = -1.0 if inward else 1.0
-
     count = len(base)
-    normals: List[Point3] = []
-    for index in range(count):
-        nxt = (index + 1) % count
-        dx = float(points[nxt][0]) - float(points[index][0])
-        dy = float(points[nxt][1]) - float(points[index][1])
-        local_x, local_y = (dy, -dx) if orientation > 0 else (-dy, dx)
-        normals.append(_unit((
-            (frame.u[0] * local_x + frame.v[0] * local_y) * direction,
-            (frame.u[1] * local_x + frame.v[1] * local_y) * direction,
-            (frame.u[2] * local_x + frame.v[2] * local_y) * direction,
-        )))
+    normals = _wall_normals(points, frame, inward)
 
     axis = (0.0, 0.0, 0.0)
     if base and top:
@@ -2489,6 +2645,223 @@ def _loop_area(points: Sequence[Point2]) -> float:
     return area * 0.5
 
 
+def _fillet_profile(
+    outer: Sequence[Point2],
+    holes: Sequence[Sequence[Point2]],
+    fillets: Sequence["Fillet"],
+    height: float,
+) -> Tuple[
+    List[Point2],
+    List[List[Point2]],
+    List[List[float]],
+    List[List[float]],
+]:
+    """Round one profile group and clamp the radii carried by every segment.
+
+    Returns the rounded outer loop, its holes and one radius per segment for
+    the base and extruded end, ready for :func:`_prism_faces_with_runs`.
+    """
+    inner = [hole for hole in holes if len(hole) >= 3]
+    original_loops = [outer, *inner]
+    rounded_outer, rounded_holes = _apply_fillets(
+        outer, inner, fillets
+    )
+    rounded_loops = [rounded_outer, *rounded_holes]
+    # The cap at the base is "bottom" for a positive extrusion and "top"
+    # for a negative one; the extruded end is the opposite.
+    base_kind = "bottom" if height >= 0 else "top"
+    end_kind = "top" if height >= 0 else "bottom"
+    base_radii: List[List[float]] = []
+    end_radii: List[List[float]] = []
+    for original, rounded in zip(original_loops, rounded_loops):
+        sources = _rounded_segment_sources(original, rounded)
+        base = rim_fillet_radii(original, fillets, base_kind)
+        end = rim_fillet_radii(original, fillets, end_kind)
+        # Clamp against the original profile so tiny tessellation segments
+        # of a rounded vertical corner do not shrink it.
+        base, end = _clamp_rim_radii(original, base, end, height)
+        limits = _vertical_radius_limits(original, fillets)
+        base = [
+            min(value, limit)
+            for value, limit in zip(base, limits)
+        ]
+        end = [
+            min(value, limit)
+            for value, limit in zip(end, limits)
+        ]
+        rounded_limits = _rounded_vertical_limits(
+            original, sources, fillets
+        )
+        base_radii.append(_limit_rim_radii(
+            _expand_rim_radii(base, sources, rounded),
+            rounded_limits,
+        ))
+        end_radii.append(_limit_rim_radii(
+            _expand_rim_radii(end, sources, rounded),
+            rounded_limits,
+        ))
+    return rounded_outer, rounded_holes, base_radii, end_radii
+
+
+# Number of z-samples across each cap fillet.  A quarter round becomes a
+# stack of constant cross-sections so boolean operations can reason about it.
+FILLET_SAMPLE_STEPS = 12
+
+
+def _cap_fillet_inset(distance: float, radius: float) -> float:
+    """Return how far a cap fillet's wall is inset at one distance from it."""
+    if radius <= 1e-9:
+        return 0.0
+    if distance <= 0.0:
+        return radius
+    if distance >= radius:
+        return 0.0
+    return radius - math.sqrt(
+        max(0.0, radius * radius - (radius - distance) ** 2)
+    )
+
+
+def _fillet_levels(
+    groups: Sequence[
+        Tuple[List[List[Point2]], List[List[float]], List[List[float]]]
+    ],
+    height: float,
+) -> List[float]:
+    """Return the z-samples that resolve every cap fillet transition."""
+    levels = {0.0, height}
+    for _, base_radii, end_radii in groups:
+        for radii, at_end in (
+            (base_radii, False), (end_radii, True)
+        ):
+            for loop in radii:
+                for radius in loop:
+                    if radius <= 1e-9:
+                        continue
+                    for step in range(1, FILLET_SAMPLE_STEPS + 1):
+                        distance = radius * step / FILLET_SAMPLE_STEPS
+                        levels.add(
+                            height - distance if at_end else distance
+                        )
+    return sorted(
+        value for value in levels if -1e-9 <= value <= height + 1e-9
+    )
+
+
+def _fillet_level_smooth(
+    groups: Sequence[
+        Tuple[List[List[Point2]], List[List[float]], List[List[float]]]
+    ],
+    height: float,
+    distance: float,
+) -> bool:
+    """Return whether a z-level lies inside a cap fillet transition."""
+    if distance <= 1e-9 or distance >= height - 1e-9:
+        return False
+    for _, base_radii, end_radii in groups:
+        for radii in base_radii:
+            if any(
+                radius > 1e-9 and distance <= radius + 1e-9
+                for radius in radii
+            ):
+                return True
+        for radii in end_radii:
+            if any(
+                radius > 1e-9 and height - distance <= radius + 1e-9
+                for radius in radii
+            ):
+                return True
+    return False
+
+
+def _fillet_loops_at(
+    loops: Sequence[Sequence[Point2]],
+    base_radii: Sequence[Sequence[float]],
+    end_radii: Sequence[Sequence[float]],
+    distance: float,
+    height: float,
+) -> List[List[Point2]]:
+    """Return one filleted cross-section at ``distance`` from the base."""
+    sampled: List[List[Point2]] = []
+    for index, loop in enumerate(loops):
+        base = base_radii[index] if index < len(base_radii) else []
+        end = end_radii[index] if index < len(end_radii) else []
+        offsets: List[float] = []
+        for segment in range(len(loop)):
+            start_radius = base[segment] if segment < len(base) else 0.0
+            end_radius = end[segment] if segment < len(end) else 0.0
+            offsets.append(max(
+                _cap_fillet_inset(distance, start_radius),
+                _cap_fillet_inset(height - distance, end_radius),
+            ))
+        inset = _cap_loop(loop, offsets, index > 0)
+        if len(inset) < 3:
+            return []
+        sampled.append(inset)
+    return sampled
+
+
+def fillet_slices(
+    feature: "Extrude", sketch: "Sketch"
+) -> List[ExtrudeSlice]:
+    """Sample a filleted prism into constant-cross-section z-slices.
+
+    Boolean operations work on flat slices, so a rounded cap has to be
+    represented by its cross-sections instead of being dropped.  Sampling
+    the exact fillet offsets keeps the rounding in the result and lets a cut
+    pass through a filleted body.
+    """
+    height = float(feature.height)
+    if abs(height) <= 1e-9 or not feature.fillets:
+        return []
+    profiles = feature.resolve_profiles(sketch)
+    if not profiles:
+        return []
+    groups: List[
+        Tuple[List[List[Point2]], List[List[float]], List[List[float]]]
+    ] = []
+    for outer, holes in build_regions(
+        profiles, feature.resolve_cuts(sketch)
+    ):
+        rounded_outer, rounded_holes, base_radii, end_radii = (
+            _fillet_profile(outer, holes, feature.fillets, height)
+        )
+        groups.append((
+            [rounded_outer, *rounded_holes], base_radii, end_radii
+        ))
+    if not groups:
+        return []
+    levels = _fillet_levels(groups, abs(height))
+    slices: List[ExtrudeSlice] = []
+    for start, end in zip(levels, levels[1:]):
+        if end - start <= 1e-9:
+            continue
+        # Use the lower boundary for the lower half and the upper boundary for
+        # the upper half.  The first and last slices then carry the exact cap
+        # cross-section, so the rounded cap is not undersized.
+        sample = start if start < abs(height) * 0.5 else end
+        regions: List[List[List[Point2]]] = []
+        for loops, base_radii, end_radii in groups:
+            sampled = _fillet_loops_at(
+                loops, base_radii, end_radii, sample, abs(height)
+            )
+            if sampled:
+                regions.append(sampled)
+        if not regions:
+            continue
+        z0 = feature.start + (start if height >= 0 else -start)
+        z1 = feature.start + (end if height >= 0 else -end)
+        slices.append(ExtrudeSlice(
+            min(z0, z1), max(z0, z1), regions,
+            smooth_z0=_fillet_level_smooth(
+                groups, abs(height), start
+            ),
+            smooth_z1=_fillet_level_smooth(
+                groups, abs(height), end
+            ),
+        ))
+    return slices
+
+
 def iter_solid_faces(
     document: "Document",
 ) -> Iterator[Tuple[int, int, Face]]:
@@ -2515,53 +2888,11 @@ def iter_solid_faces(
         cuts = feature.resolve_cuts(sketch)
         frame = _offset_frame(sketch.frame(), feature.start)
         for outer, holes in build_regions(profiles, cuts):
-            inner = [hole for hole in holes if len(hole) >= 3]
-            original_loops = [outer, *inner]
-            rounded_outer, rounded_holes = _apply_fillets(
-                outer, inner, feature.fillets
+            rounded_outer, rounded_holes, base_radii, end_radii = (
+                _fillet_profile(
+                    outer, holes, feature.fillets, feature.height
+                )
             )
-            rounded_loops = [rounded_outer, *rounded_holes]
-            # The cap at the base is "bottom" for a positive extrusion and
-            # "top" for a negative one; the extruded end is the opposite.
-            base_kind = "bottom" if feature.height >= 0 else "top"
-            end_kind = "top" if feature.height >= 0 else "bottom"
-            base_radii: List[List[float]] = []
-            end_radii: List[List[float]] = []
-            for original, rounded in zip(original_loops, rounded_loops):
-                sources = _rounded_segment_sources(original, rounded)
-                base = rim_fillet_radii(
-                    original, feature.fillets, base_kind
-                )
-                end = rim_fillet_radii(
-                    original, feature.fillets, end_kind
-                )
-                # Clamp against the original profile so tiny tessellation
-                # segments of a rounded vertical corner do not shrink it.
-                base, end = _clamp_rim_radii(
-                    original, base, end, feature.height
-                )
-                limits = _vertical_radius_limits(
-                    original, feature.fillets
-                )
-                base = [
-                    min(value, limit)
-                    for value, limit in zip(base, limits)
-                ]
-                end = [
-                    min(value, limit)
-                    for value, limit in zip(end, limits)
-                ]
-                rounded_limits = _rounded_vertical_limits(
-                    original, sources, feature.fillets
-                )
-                base_radii.append(_limit_rim_radii(
-                    _expand_rim_radii(base, sources, rounded),
-                    rounded_limits,
-                ))
-                end_radii.append(_limit_rim_radii(
-                    _expand_rim_radii(end, sources, rounded),
-                    rounded_limits,
-                ))
             faces, runs = _prism_faces_with_runs(
                 rounded_outer,
                 feature.height,

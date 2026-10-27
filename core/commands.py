@@ -1072,6 +1072,8 @@ class BooleanExtrudeCommand(Command):
                     ]
                     for group in entry.regions
                 ],
+                smooth_z0=entry.smooth_z0,
+                smooth_z1=entry.smooth_z1,
             )
             for entry in slices
         ]

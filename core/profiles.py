@@ -483,6 +483,11 @@ def _clean_loop(loop: Sequence[Sequence[float]]) -> Loop:
     return _remove_collinear(result)
 
 
+def simplify_loop(loop: Sequence[Sequence[float]]) -> Loop:
+    """Return a loop without duplicate or collinear vertices."""
+    return _clean_loop(loop)
+
+
 def split_loop_at_points(
     loop: Sequence[Sequence[float]],
     points: Sequence[Sequence[float]],
