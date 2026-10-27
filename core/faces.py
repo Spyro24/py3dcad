@@ -2573,6 +2573,247 @@ def profile_segment_key(
     return None
 
 
+def max_fillet_radius(
+    document: "Document",
+    feature: "Extrude",
+    kind: str,
+    u: float,
+    v: float,
+) -> Optional[float]:
+    """Return the largest radius the selected edge can carry.
+
+    The solid builders quietly shrink an oversized round so the body stays
+    valid.  The preview must use the same bound or its arrow and value would
+    keep growing past the material while the geometry stops at the edge.
+    """
+    point = (u, v)
+    if feature.slices:
+        entries = [
+            entry for entry in feature.slices
+            if entry.regions and entry.z1 - entry.z0 > 1e-9
+        ]
+        if not entries:
+            return None
+        if kind == "vertical":
+            return _vertical_radius_limit(_stack_loops(entries), point)
+        return _cap_stack_radius_limit(entries, kind, point)
+    loops = _feature_loops(document, feature)
+    if loops is None:
+        return None
+    if kind == "vertical":
+        return _vertical_radius_limit(loops, point)
+    return _loops_cap_radius_limit(
+        loops, point, feature.height, feature.fillets
+    )
+
+
+def _stack_loops(
+    entries: Sequence[ExtrudeSlice],
+) -> List[Sequence[Point2]]:
+    """Return every cross-section loop of a sliced body."""
+    return [
+        loop
+        for entry in entries
+        for group in entry.regions
+        for loop in group
+    ]
+
+
+def _feature_loops(
+    document: "Document", feature: "Extrude",
+) -> Optional[List[Sequence[Point2]]]:
+    """Return the original profile loops of an unsliced feature."""
+    sketch = document.sketch(feature.sketch_id)
+    if sketch is None:
+        return None
+    profiles = feature.resolve_profiles(sketch)
+    if not profiles:
+        return None
+    return [
+        loop
+        for outer, holes in build_regions(
+            profiles, feature.resolve_cuts(sketch)
+        )
+        for loop in (outer, *holes)
+    ]
+
+
+def _loops_cap_radius_limit(
+    loops: Sequence[Sequence[Point2]],
+    point: Point2,
+    height: float,
+    fillets: Sequence["Fillet"],
+) -> Optional[float]:
+    """Return the tightest cap-fillet limit across several profile loops."""
+    limits = [
+        limit for limit in (
+            _cap_loop_radius_limit(loop, point, height, fillets)
+            for loop in loops
+        )
+        if limit is not None
+    ]
+    return min(limits) if limits else None
+
+
+def _corner_radius_limit(
+    points: Sequence[Point2], index: int
+) -> float:
+    """Return the largest radius one convex loop corner can carry."""
+    count = len(points)
+    previous = points[(index - 1) % count]
+    corner = points[index]
+    following = points[(index + 1) % count]
+    incoming = (corner[0] - previous[0], corner[1] - previous[1])
+    outgoing = (following[0] - corner[0], following[1] - corner[1])
+    incoming_length = math.hypot(*incoming)
+    outgoing_length = math.hypot(*outgoing)
+    if incoming_length < 1e-9 or outgoing_length < 1e-9:
+        return 0.0
+    u = (incoming[0] / incoming_length, incoming[1] / incoming_length)
+    v = (outgoing[0] / outgoing_length, outgoing[1] / outgoing_length)
+    cross = u[0] * v[1] - u[1] * v[0]
+    orientation = 1.0 if _loop_area(points) >= 0.0 else -1.0
+    if cross * orientation <= 1e-9:
+        return 0.0
+    dot = max(-1.0, min(1.0, -(u[0] * v[0] + u[1] * v[1])))
+    angle = math.acos(dot)
+    if angle <= 1e-6 or angle >= math.pi - 1e-6:
+        return 0.0
+    # ``_corner_arc`` caps the tangent length at half the shorter neighbour.
+    return (
+        0.5 * min(incoming_length, outgoing_length)
+        * math.tan(angle * 0.5)
+    )
+
+
+def _vertical_radius_limit(
+    loops: Sequence[Sequence[Point2]],
+    point: Point2,
+    tolerance: float = 1e-4,
+) -> Optional[float]:
+    """Return the smallest corner limit across every loop with the corner."""
+    limits: List[float] = []
+    for loop in loops:
+        for index, (x, y) in enumerate(loop):
+            if (
+                abs(x - point[0]) <= tolerance
+                and abs(y - point[1]) <= tolerance
+            ):
+                limit = _corner_radius_limit(loop, index)
+                if limit > 1e-9:
+                    limits.append(limit)
+                break
+    return min(limits) if limits else None
+
+
+def _loop_segment_lengths(loop: Sequence[Point2]) -> List[float]:
+    """Return the length of every segment around a closed loop."""
+    count = len(loop)
+    return [
+        math.hypot(
+            loop[(index + 1) % count][0] - loop[index][0],
+            loop[(index + 1) % count][1] - loop[index][1],
+        )
+        for index in range(count)
+    ]
+
+
+def _run_end_segments(
+    segments: Sequence[int], count: int,
+) -> Optional[Tuple[int, int]]:
+    """Return the first and last segment of a contiguous loop run."""
+    starts = [
+        index for index in segments
+        if (index - 1) % count not in segments
+    ]
+    if not starts:
+        return None
+    start = starts[0]
+    last = start
+    index = start
+    while index in segments:
+        last = index
+        index = (index + 1) % count
+        if index == start:
+            break
+    return start, last
+
+
+def _cap_run_radius_limit(
+    loop: Sequence[Point2],
+    segments: Sequence[int],
+    height: float,
+) -> float:
+    """Return the largest radius a straight cap run can carry.
+
+    A run is a chain of collinear segments, so it behaves like one long edge:
+    only its two end miters and the neighbouring segments consume room.
+    """
+    count = len(loop)
+    ends = _run_end_segments(segments, count)
+    if ends is None:
+        return 0.0
+    start, last = ends
+    lengths = _loop_segment_lengths(loop)
+    run_length = sum(lengths[index] for index in segments)
+    start_turn = _turn_angle(loop, start)
+    end_turn = _turn_angle(loop, (last + 1) % count)
+    spread = (
+        math.tan(min(start_turn, math.pi * 0.5) * 0.5)
+        + math.tan(min(end_turn, math.pi * 0.5) * 0.5)
+    )
+    limit = (
+        0.9 * run_length / spread
+        if spread > 1e-9 else 0.45 * run_length
+    )
+    limit = min(limit, 0.45 * abs(height))
+    for neighbour in ((start - 1) % count, (last + 1) % count):
+        limit = min(limit, _offset_radius_limit(loop, lengths, neighbour))
+    return max(0.0, limit)
+
+
+def _cap_loop_radius_limit(
+    loop: Sequence[Point2],
+    point: Point2,
+    height: float,
+    fillets: Sequence["Fillet"] = (),
+) -> Optional[float]:
+    """Return the cap-fillet limit for the run under ``point``."""
+    segments = _fillet_run_segments(loop, point)
+    if not segments:
+        return None
+    limit = _cap_run_radius_limit(loop, segments, height)
+    if fillets:
+        vertical = _vertical_radius_limits(loop, fillets)
+        for segment in segments:
+            limit = min(limit, vertical[segment])
+    return limit
+
+
+def _cap_stack_radius_limit(
+    entries: Sequence[ExtrudeSlice], kind: str, point: Point2,
+) -> Optional[float]:
+    """Return the cap-fillet limit for every loop at the stack's cap."""
+    zmin = min(entry.z0 for entry in entries)
+    zmax = max(entry.z1 for entry in entries)
+    cap_z = zmax if kind == "top" else zmin
+    limits: List[float] = []
+    for entry in entries:
+        if (
+            abs(entry.z0 - cap_z) > 1e-6
+            and abs(entry.z1 - cap_z) > 1e-6
+        ):
+            continue
+        for group in entry.regions:
+            for loop in group:
+                limit = _cap_loop_radius_limit(
+                    loop, point, zmax - zmin
+                )
+                if limit is not None:
+                    limits.append(limit)
+    return min(limits) if limits else None
+
+
 def _point_segment_distance(
     point: Point2, start: Point2, end: Point2
 ) -> float:
@@ -3001,6 +3242,11 @@ def _cap_fillet_stack(
     if _cap_fillet_segment(entries, cap_z, point) is None:
         return None
     radius = fillet.radius
+    limit = _cap_stack_radius_limit(entries, fillet.kind, point)
+    if limit is not None:
+        radius = min(radius, limit)
+    if radius <= 1e-9:
+        return None
     levels = {zmin, zmax}
     for step in range(steps + 1):
         levels.add(max(

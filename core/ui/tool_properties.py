@@ -1161,6 +1161,7 @@ class FilletWindow:
         self.visible = False
         self.scale = 1.0
         self.value = "2"
+        self.radius_limit: Optional[float] = None
         self.error = ""
         self.edge_label = "No edge selected"
         self.focused = False
@@ -1194,6 +1195,7 @@ class FilletWindow:
     def open(self, radius: float, edge_label: str) -> None:
         self.visible = True
         self.value = f"{radius:g}"
+        self.radius_limit = None
         self.error = ""
         self.edge_label = edge_label
         self.focused = True
@@ -1203,11 +1205,27 @@ class FilletWindow:
     def close(self) -> None:
         self.visible = False
         self.focused = False
+        self.radius_limit = None
         self._hover_apply = False
         self._hover_cancel = False
 
     def set_edge_label(self, label: str) -> None:
         self.edge_label = label
+
+    def set_radius_limit(self, limit: Optional[float]) -> None:
+        """Store the largest radius the selected edge can carry."""
+        self.radius_limit = (
+            float(limit) if limit is not None and limit > 1e-9 else None
+        )
+        if self.focused or self.radius_limit is None:
+            return
+        try:
+            value = float(self.value)
+        except ValueError:
+            return
+        if value > self.radius_limit:
+            # Keep the visible field in step with the clamped handle.
+            self.set_radius_value(self.radius_limit)
 
     def set_error(self, message: str) -> None:
         self.error = message
@@ -1218,6 +1236,8 @@ class FilletWindow:
             value = float(self.value)
         except ValueError:
             return None
+        if self.radius_limit is not None:
+            value = min(value, self.radius_limit)
         return value if value > 0.0 else None
 
     def set_radius_value(self, value: float) -> None:
@@ -1352,9 +1372,13 @@ class FilletWindow:
         return FilletWindowAction.NONE
 
     def _submit(self) -> FilletWindowAction:
-        if self.radius() is None:
+        radius = self.radius()
+        if radius is None:
             self.error = "Enter a radius greater than zero"
             return FilletWindowAction.CONSUMED
+        if self.radius_limit is not None:
+            # Show the clamped value so the field agrees with the body.
+            self.set_radius_value(radius)
         self.error = ""
         return FilletWindowAction.APPLY
 

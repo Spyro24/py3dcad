@@ -29,7 +29,7 @@ from .booleans import build_tool_stack, plan_boolean
 from .config import Config, format_opened
 from .document import Document
 from .faces import (
-    edge_for_ref, face_for_ref, profile_has_corner,
+    edge_for_ref, face_for_ref, max_fillet_radius, profile_has_corner,
     profile_segment_key, stack_cap_segment_key, stack_has_corner,
     vertical_edge_corner,
 )
@@ -813,6 +813,11 @@ class Application:
         error, feature, kind, u, v = _resolve_fillet(document, radius)
         if error is not None or feature is None or kind is None:
             return error or "Select a solid edge first"
+        limit = max_fillet_radius(document, feature, kind, u, v)
+        if limit is not None:
+            radius = min(radius, limit)
+        if radius <= 1e-9:
+            return "Edge is already filleted"
         stack.execute(
             AddFilletCommand(
                 document, feature, kind, u, v, radius

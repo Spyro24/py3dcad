@@ -10,7 +10,9 @@ from .booleans import (
     plan_boolean,
 )
 from .document import Document
-from .faces import Edge, Face, edge_for_ref, stacked_faces
+from .faces import (
+    Edge, Face, edge_for_ref, max_fillet_radius, stacked_faces,
+)
 from .sketch import (
     Extrude, ExtrudeSlice, Fillet, Point3, Sketch, point_on_plane,
 )
@@ -129,6 +131,9 @@ class FilletPreview:
     handle_end: Optional[Point3] = None
     normal: Point3 = (0.0, 0.0, 1.0)
     radius: float = 0.0
+    # Largest radius the selected edge can carry; the UI stops the handle
+    # and the entered value here instead of pointing past the body.
+    max_radius: Optional[float] = None
 
 
 def build_fillet_preview(
@@ -160,6 +165,11 @@ def build_fillet_preview(
     )
     if target is None:
         return None
+    limit = max_fillet_radius(document, feature, kind, u, v)
+    if limit is not None:
+        radius = min(radius, limit)
+    if radius <= 1e-9:
+        return None
     fillet = Fillet(kind, u, v, radius)
     if target.slices:
         rounded = fillet_slices_body(target.slices, fillet)
@@ -189,7 +199,7 @@ def build_fillet_preview(
         None, None, frame.normal,
     )
     return FilletPreview(
-        preview, ghost_faces, start, end, normal, radius,
+        preview, ghost_faces, start, end, normal, radius, limit,
     )
 
 

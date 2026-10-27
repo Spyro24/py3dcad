@@ -658,6 +658,9 @@ class Workspace:
         self._sync_history_document(document)
         self._extrude_preview = extrude_preview
         self._fillet_preview = fillet_preview
+        self.fillet_window.set_radius_limit(
+            fillet_preview.max_radius if fillet_preview else None
+        )
         self._draw_toolbar(surface, layout.toolbar, document)
         self._draw_tree(surface, layout.document_tree, document)
         highlight: Tuple[int, ...] = ()
@@ -4614,6 +4617,9 @@ class Workspace:
         # Snap the change instead of the absolute radius so grabbing a small
         # fillet at low zoom cannot jump it to an unrelated round value.
         radius = drag.base_radius + _snap_to_step(world, drag.snap_step)
+        limit = self.fillet_window.radius_limit
+        if limit is not None:
+            radius = min(radius, limit)
         self.fillet_window.set_radius_value(max(0.05, radius))
 
     def _drag_extrude_arrow(self, pos: Tuple[int, int]) -> None:
