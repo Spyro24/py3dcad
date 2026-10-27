@@ -126,6 +126,7 @@ class Viewport:
         selected_profiles: int = 0,
         preview_document: Optional[Document] = None,
         ghost_faces: Sequence[Face] = (),
+        highlight_features: Sequence[int] = (),
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -139,6 +140,7 @@ class Viewport:
             surface, region.rect, document, self.camera,
             preview_document=preview_document,
             ghost_faces=ghost_faces,
+            highlight_features=highlight_features,
         )
         if self.show_orientation_cube:
             self.renderer.draw_orientation_cube(

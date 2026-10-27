@@ -75,6 +75,7 @@ class ScenePalette:
     text_muted: Color = (125, 125, 136)
     edge: Color = (55, 55, 65)
     edge_selected: Color = (255, 193, 110)
+    preview_selected: Color = (255, 193, 110)
     ghost_fill: Color = (225, 64, 64)
     ghost_edge: Color = (255, 120, 120)
     cube_top: Color = (145, 145, 155)
@@ -146,6 +147,7 @@ class SceneRenderer:
         camera: OrbitCamera,
         preview_document: Optional[Document] = None,
         ghost_faces: Sequence[Face] = (),
+        highlight_features: Sequence[int] = (),
     ) -> None:
         self._init_fonts()
         active = document.sketch(document.active_sketch_id)
@@ -162,7 +164,8 @@ class SceneRenderer:
             self._draw_origin_marker(surface, rect, camera)
         self._draw_sketch_lines(surface, rect, document, camera)
         self._draw_solids(
-            surface, rect, preview_document or document, camera
+            surface, rect, preview_document or document, camera,
+            highlight_features,
         )
         if ghost_faces:
             self._draw_ghost_solids(
@@ -518,15 +521,26 @@ class SceneRenderer:
             max(1, self._s(1)),
         )
 
+    def _preview_color(self, color: Color) -> Color:
+        """Blend a body colour toward the active extrusion highlight."""
+        base = self.palette.preview_selected
+        return (
+            round(color[0] * 0.3 + base[0] * 0.7),
+            round(color[1] * 0.3 + base[1] * 0.7),
+            round(color[2] * 0.3 + base[2] * 0.7),
+        )
+
     def _draw_solids(
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
         document: Document,
         camera: OrbitCamera,
+        highlight_features: Sequence[int] = (),
     ) -> None:
         center = rect.center
         view_dir = camera.view_direction()
+        highlighted = set(highlight_features)
         faces: List[
             Tuple[
                 float, int, int, List[Point2], List[List[Point2]], Color,
@@ -569,13 +583,17 @@ class SceneRenderer:
                 [camera.project(vertex, center) for vertex in hole]
                 for hole in face.holes
             ]
+            color = (
+                self._preview_color(face.color)
+                if feature_id in highlighted else face.color
+            )
             faces.append((
                 depth,
                 feature_id,
                 face_index,
                 polygon,
                 holes,
-                face.color,
+                color,
                 face.sharp_edges,
             ))
             sharp = face.sharp_edges
@@ -591,7 +609,7 @@ class SceneRenderer:
                     continue
                 seams.setdefault(entry[0], []).append((
                     depth,
-                    face.color,
+                    color,
                     polygon[index],
                     polygon[(index + 1) % count],
                 ))

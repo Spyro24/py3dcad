@@ -656,6 +656,10 @@ class Workspace:
             )),
             preview_document=preview_document,
             ghost_faces=ghost_faces,
+            highlight_features=(
+                extrude_preview.highlight
+                if extrude_preview is not None else ()
+            ),
         )
         self._draw_sketch_loops(surface, layout.viewport, document)
         self._draw_line_preview(surface, layout.viewport, document)

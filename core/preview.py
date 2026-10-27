@@ -32,6 +32,9 @@ class ExtrudePreview:
     handle_end: Optional[Point3] = None
     normal: Point3 = (0.0, 0.0, 1.0)
     height: float = 0.0
+    # Bodies that the extrusion is creating or modifying, highlighted while
+    # the tool is open.
+    highlight: Tuple[int, ...] = ()
 
 
 def build_extrude_preview(
@@ -74,7 +77,8 @@ def build_extrude_preview(
             slices=tool,
         ))
         return ExtrudePreview(
-            preview, (), handle_start, handle_end, frame.normal, height
+            preview, (), handle_start, handle_end, frame.normal, height,
+            highlight=(feature_id,),
         )
     target, result, error = plan_boolean(
         document, tool, frame, operation
@@ -104,6 +108,7 @@ def build_extrude_preview(
     return ExtrudePreview(
         preview, ghost_faces, handle_start, handle_end,
         frame.normal, height,
+        highlight=() if operation == "cut" else (target.id,),
     )
 
 
