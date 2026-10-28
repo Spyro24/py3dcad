@@ -17,6 +17,7 @@ PY3DCAD: sketches and features driven by named parameters. UI in pygame-ce only.
 - Save format: JSON with `"format": 1`.
 - The objects are Volumetric objects, the rendered mesh of them has to be water thight
 - calculations have to be effiecient
+- use semantic commits
 
 ## Workflow
 - Run: `python main.py`

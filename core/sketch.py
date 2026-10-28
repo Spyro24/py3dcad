@@ -86,6 +86,25 @@ def bulge_arc_points(
     return points
 
 
+def _first_positions(order: Sequence[int]) -> Dict[int, int]:
+    """Map each index to the position of its first occurrence in ``order``."""
+    positions: Dict[int, int] = {}
+    for position, index in enumerate(order):
+        positions.setdefault(index, position)
+    return positions
+
+
+def _pick_anchor(
+    members: Sequence[int], *rankings: Dict[int, int]
+) -> int:
+    """Return the member earliest in the first ranking that contains any."""
+    for rank in rankings:
+        hits = [member for member in members if member in rank]
+        if hits:
+            return min(hits, key=rank.__getitem__)
+    return members[0]
+
+
 def _strip_loop_spikes(loop: List[int]) -> List[int]:
     """Remove zero-area detours from a face traversal."""
     cleaned: List[int] = []
@@ -686,12 +705,18 @@ class Sketch:
         """
         bound: List[Circle] = []
         used: set = set()
+        by_identity: Dict[int, List[int]] = {}
+        for candidate, existing in enumerate(self.points):
+            by_identity.setdefault(id(existing), []).append(candidate)
         for circle in circles:
-            index: Optional[int] = None
-            for candidate, existing in enumerate(self.points):
-                if candidate not in used and existing is circle.midPoint:
-                    index = candidate
-                    break
+            index: Optional[int] = next(
+                (
+                    candidate
+                    for candidate in by_identity.get(id(circle.midPoint), ())
+                    if candidate not in used
+                ),
+                None,
+            )
             if index is None:
                 for candidate, existing in enumerate(self.points):
                     if candidate not in used and existing == circle.midPoint:
@@ -1035,10 +1060,15 @@ class Sketch:
             for _ in range(max(1, iterations)):
                 projected = False
                 before_projection = list(points)
+                # If no measurement moves a point in this pass, every residual
+                # was taken from the unchanged points, so ``worst`` is exact.
+                worst = 0.0
                 for measurement in self.measurements:
                     residual = self.measurement_residual(
                         measurement, points
                     )
+                    if residual is not None:
+                        worst = max(worst, abs(residual))
                     if residual is None or abs(residual) <= tolerance:
                         continue
                     if measurement.kind == "distance":
@@ -1052,10 +1082,7 @@ class Sketch:
                         )
                         projected = projected or changed
                 if not projected:
-                    return (
-                        self.measurement_max_error(points)
-                        <= tolerance
-                    )
+                    return worst <= tolerance
                 # A projection may move only part of an axis-constrained
                 # edge.  Snap the other endpoints by translating the whole
                 # group by the correction instead of anchoring it to an
@@ -1410,23 +1437,15 @@ class Sketch:
             elif constraint == "vertical":
                 join(vertical, first, second)
 
+        locked_rank = _first_positions(locked_order)
+        changed_rank = _first_positions(changed_order)
         for parent, axis in ((horizontal, 1), (vertical, 0)):
             groups: Dict[int, List[int]] = {}
             for index in range(count):
                 groups.setdefault(root(parent, index), []).append(index)
             for members in groups.values():
-                member_set = set(members)
                 target: Optional[float] = None
-                anchor = members[0]
-                for index in locked_order:
-                    if index in member_set:
-                        anchor = index
-                        break
-                else:
-                    for index in changed_order:
-                        if index in member_set:
-                            anchor = index
-                            break
+                anchor = _pick_anchor(members, locked_rank, changed_rank)
                 if previous is not None and len(previous) == count:
                     shifts = [
                         points[index][axis] - previous[index][axis]
@@ -1474,10 +1493,15 @@ class Sketch:
 
     def _circle_loops(self) -> List[List[int]]:
         loops: List[List[int]] = []
+        by_identity: Dict[int, int] = {}
+        for index, existing in enumerate(self.points):
+            by_identity.setdefault(id(existing), index)
         for circle in self.circles:
             if circle.diameter <= 0.0:
                 continue
-            index = self.point_index(circle.midPoint)
+            index = by_identity.get(id(circle.midPoint))
+            if index is None:
+                index = self.point_index(circle.midPoint)
             if index is not None:
                 loops.append([index])
         return loops
@@ -1615,11 +1639,12 @@ class Sketch:
         if any(not 0 <= index < len(self.points) for index in loop):
             return []
         points: List[Point] = []
+        bulges = self._bulge_lookup()
         for offset, index in enumerate(loop):
             following = loop[(offset + 1) % len(loop)]
             start = self.points[index]
             points.append(start)
-            bulge = self.edge_bulge_between(index, following)
+            bulge = bulges.get((index, following))
             if bulge is not None:
                 samples = bulge_arc_points(
                     start, self.points[following], bulge
@@ -1673,16 +1698,40 @@ class Sketch:
         if any(not 0 <= index < len(self.points) for index in loop):
             return 0.0
         area = polygon_area([self.points[index] for index in loop])
+        bulges = self._bulge_lookup()
         for offset, index in enumerate(loop):
             following = loop[(offset + 1) % len(loop)]
-            area += self._segment_area(index, following)
+            bulge = bulges.get((index, following))
+            if bulge is not None:
+                area += self._circular_segment_area(index, following, bulge)
         return abs(area)
+
+    def _bulge_lookup(self) -> Dict[Tuple[int, int], float]:
+        """Map each directed edge to its signed bulge.
+
+        Same answers as :meth:`edge_bulge_between`: a reversed edge yields
+        the negated bulge, and the first edge in order wins for each pair.
+        """
+        lookup: Dict[Tuple[int, int], float] = {}
+        for index, (start, end) in enumerate(self.edges):
+            bulge = self.edge_bulge(index)
+            if bulge is None:
+                continue
+            lookup.setdefault((start, end), bulge)
+            lookup.setdefault((end, start), -bulge)
+        return lookup
 
     def _segment_area(self, first: int, second: int) -> float:
         """Return the signed circular segment area of a bulged edge."""
         bulge = self.edge_bulge_between(first, second)
         if bulge is None:
             return 0.0
+        return self._circular_segment_area(first, second, bulge)
+
+    def _circular_segment_area(
+        self, first: int, second: int, bulge: float
+    ) -> float:
+        """Return the signed circular segment area for a known bulge."""
         start = self.points[first]
         end = self.points[second]
         chord = math.hypot(
@@ -2190,8 +2239,15 @@ class Sketch:
         pairs = list(zip(profile, profile[1:]))
         if len(profile) >= 3:
             pairs.append((profile[-1], profile[0]))
+        # Same rules as _add_edge, with one set of known edges instead of a
+        # full scan of ``edges`` for every new pair.
+        known = {(min(a, b), max(a, b)) for a, b in edges}
         for start, end in pairs:
-            cls._add_edge(edges, start, end)
+            key = (min(start, end), max(start, end))
+            if start == end or key in known:
+                continue
+            known.add(key)
+            edges.append((start, end))
 
     @staticmethod
     def _add_edge(

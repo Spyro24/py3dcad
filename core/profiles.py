@@ -11,19 +11,39 @@ Region = Tuple[Loop, List[Loop]]
 _EPS = 1e-9
 
 
+def _floats(polygon: Sequence[Sequence[float]]) -> List[Point2]:
+    """Return a polygon as float tuples, converting each vertex once."""
+    return [(float(point[0]), float(point[1])) for point in polygon]
+
+
 def polygon_area(points: Sequence[Sequence[float]]) -> float:
     """Return the signed area of a closed polygon."""
-    count = len(points)
-    if count < 3:
+    if len(points) < 3:
         return 0.0
+    vertices = _floats(points)
     area = 0.0
-    for index in range(count):
-        x1, y1 = float(points[index][0]), float(points[index][1])
-        x2, y2 = float(points[(index + 1) % count][0]), float(
-            points[(index + 1) % count][1]
-        )
+    # Same edge order as indexing (i, i + 1 mod n), so the sum is unchanged.
+    for (x1, y1), (x2, y2) in zip(vertices, vertices[1:] + vertices[:1]):
         area += x1 * y2 - x2 * y1
     return area / 2.0
+
+
+def _inside_polygon(point: Point2, polygon: Sequence[Point2]) -> bool:
+    """Inside-or-on test for a polygon whose vertices are already numbers."""
+    if len(polygon) < 3:
+        return False
+    x, y = point
+    inside = False
+    x1, y1 = polygon[-1]
+    for x2, y2 in polygon:
+        if _point_on_segment((x, y), (x1, y1), (x2, y2)):
+            return True
+        if (y1 > y) != (y2 > y):
+            crossing = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < crossing:
+                inside = not inside
+        x1, y1 = x2, y2
+    return inside
 
 
 def point_in_polygon(
@@ -32,20 +52,9 @@ def point_in_polygon(
     """Return whether a point lies inside or on a polygon."""
     if len(polygon) < 3:
         return False
-    x, y = float(point[0]), float(point[1])
-    inside = False
-    for index in range(len(polygon)):
-        x1, y1 = float(polygon[index][0]), float(polygon[index][1])
-        x2, y2 = float(polygon[(index + 1) % len(polygon)][0]), float(
-            polygon[(index + 1) % len(polygon)][1]
-        )
-        if _point_on_segment((x, y), (x1, y1), (x2, y2)):
-            return True
-        if (y1 > y) != (y2 > y):
-            crossing = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-            if x < crossing:
-                inside = not inside
-    return inside
+    return _inside_polygon(
+        (float(point[0]), float(point[1])), _floats(polygon)
+    )
 
 
 def build_regions(
@@ -96,11 +105,8 @@ def _regions_from_loops(cleaned: Sequence[Loop]) -> List[Tuple[Loop, List[Loop]]
     # Nesting depth follows the smallest enclosing loop, not a raw count:
     # overlapping outer loops must not make a nested profile look like an
     # island just because several loops contain it.
-    order = sorted(
-        range(len(cleaned)),
-        key=lambda index: abs(polygon_area(cleaned[index])),
-        reverse=True,
-    )
+    areas = [abs(polygon_area(loop)) for loop in cleaned]
+    order = sorted(range(len(cleaned)), key=areas.__getitem__, reverse=True)
     depths = [0] * len(cleaned)
     for position, index in enumerate(order):
         parents = [
@@ -110,10 +116,7 @@ def _regions_from_loops(cleaned: Sequence[Loop]) -> List[Tuple[Loop, List[Loop]]
         ]
         if not parents:
             continue
-        parent = min(
-            parents,
-            key=lambda other_index: abs(polygon_area(cleaned[other_index])),
-        )
+        parent = min(parents, key=areas.__getitem__)
         depths[index] = depths[parent] + 1
 
     outers = _union_components([
@@ -148,12 +151,33 @@ def _difference_loops(
 ) -> List[Loop]:
     """Return the boundary of ``selected`` material minus ``cutters``."""
     segments = _split_segments(list(selected) + list(cutters))
+    boundary: List[Segment] = []
+    for start, end, left, right in _edge_samples(segments):
+        inside_left = _inside_regions(left, regions) and not _inside_union(
+            left, cutters
+        )
+        inside_right = _inside_regions(right, regions) and not _inside_union(
+            right, cutters
+        )
+        if inside_left == inside_right:
+            continue
+        boundary.append((start, end) if inside_left else (end, start))
+    return _trace_loops(boundary)
+
+
+def _edge_samples(
+    segments: Sequence[Segment],
+) -> List[Tuple[Point2, Point2, Point2, Point2]]:
+    """Return ``(start, end, left, right)`` with points just off each edge.
+
+    The sample distance scales with the drawing, and degenerate edges are
+    dropped.  Every boolean routine classifies edges with these samples.
+    """
     if not segments:
         return []
     all_points = [point for segment in segments for point in segment]
-    diagonal = _diagonal(all_points)
-    sample = max(1e-7, diagonal * 1e-6)
-    boundary: List[Segment] = []
+    sample = max(1e-7, _diagonal(all_points) * 1e-6)
+    samples = []
     for start, end in segments:
         dx = end[0] - start[0]
         dy = end[1] - start[1]
@@ -167,25 +191,17 @@ def _difference_loops(
             middle[0] - normal[0] * sample,
             middle[1] - normal[1] * sample,
         )
-        inside_left = _inside_regions(left, regions) and not _inside_union(
-            left, cutters
-        )
-        inside_right = _inside_regions(right, regions) and not _inside_union(
-            right, cutters
-        )
-        if inside_left == inside_right:
-            continue
-        boundary.append((start, end) if inside_left else (end, start))
-    return _trace_loops(boundary)
+        samples.append((start, end, left, right))
+    return samples
 
 
 def _inside_regions(
     point: Point2, regions: Sequence[Tuple[Loop, List[Loop]]]
 ) -> bool:
     for outer, holes in regions:
-        if not point_in_polygon(point, outer):
+        if not _inside_polygon(point, outer):
             continue
-        if any(point_in_polygon(point, hole) for hole in holes):
+        if any(_inside_polygon(point, hole) for hole in holes):
             continue
         return True
     return False
@@ -205,34 +221,10 @@ def intersect_loops(
     if len(cleaned) == 1:
         return [cleaned[0]]
     segments = _split_segments(cleaned)
-    if not segments:
-        return []
-    all_points = [point for segment in segments for point in segment]
-    diagonal = _diagonal(all_points)
-    sample = max(1e-7, diagonal * 1e-6)
     boundary: List[Segment] = []
-    for start, end in segments:
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.hypot(dx, dy)
-        if length <= _EPS:
-            continue
-        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
-        normal = (-dy / length, dx / length)
-        left = (
-            middle[0] + normal[0] * sample,
-            middle[1] + normal[1] * sample,
-        )
-        right = (
-            middle[0] - normal[0] * sample,
-            middle[1] - normal[1] * sample,
-        )
-        inside_left = all(
-            point_in_polygon(left, loop) for loop in cleaned
-        )
-        inside_right = all(
-            point_in_polygon(right, loop) for loop in cleaned
-        )
+    for start, end, left, right in _edge_samples(segments):
+        inside_left = all(_inside_polygon(left, loop) for loop in cleaned)
+        inside_right = all(_inside_polygon(right, loop) for loop in cleaned)
         if inside_left == inside_right:
             continue
         boundary.append((start, end) if inside_left else (end, start))
@@ -286,27 +278,8 @@ def _combine_regions(
         for loop in (region[0], *region[1])
     ]
     segments = _split_segments(loops)
-    if not segments:
-        return []
-    all_points = [point for segment in segments for point in segment]
-    sample = max(1e-7, _diagonal(all_points) * 1e-6)
     boundary: List[Segment] = []
-    for start, end in segments:
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.hypot(dx, dy)
-        if length <= _EPS:
-            continue
-        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
-        normal = (-dy / length, dx / length)
-        left = (
-            middle[0] + normal[0] * sample,
-            middle[1] + normal[1] * sample,
-        )
-        right = (
-            middle[0] - normal[0] * sample,
-            middle[1] - normal[1] * sample,
-        )
+    for start, end, left, right in _edge_samples(segments):
         inside_left = predicate(
             _inside_regions(left, regions_first),
             _inside_regions(left, regions_second),
@@ -336,14 +309,16 @@ def loop_intersects(
     second: Sequence[Sequence[float]],
 ) -> bool:
     """Return whether two loops overlap or touch along their boundaries."""
-    if any(point_in_polygon(point, second) for point in first):
+    first_pts = _floats(first)
+    second_pts = _floats(second)
+    if any(_inside_polygon(point, second_pts) for point in first_pts):
         return True
-    if any(point_in_polygon(point, first) for point in second):
+    if any(_inside_polygon(point, first_pts) for point in second_pts):
         return True
-    for index, start in enumerate(first):
-        end = first[(index + 1) % len(first)]
-        for other_index, other_start in enumerate(second):
-            other_end = second[(other_index + 1) % len(second)]
+    first_edges = list(zip(first_pts, first_pts[1:] + first_pts[:1]))
+    second_edges = list(zip(second_pts, second_pts[1:] + second_pts[:1]))
+    for start, end in first_edges:
+        for other_start, other_end in second_edges:
             if _segment_intersection(
                 start, end, other_start, other_end
             ) is not None:
@@ -381,18 +356,17 @@ def loop_inside(
     """
     if len(inner) < 3 or len(outer) < 3:
         return False
-    for index, point in enumerate(inner):
-        following = inner[(index + 1) % len(inner)]
-        samples = (
-            (float(point[0]), float(point[1])),
-            (
-                (float(point[0]) + float(following[0])) / 2.0,
-                (float(point[1]) + float(following[1])) / 2.0,
-            ),
+    inner_pts = _floats(inner)
+    outer_pts = _floats(outer)
+    for point, following in zip(inner_pts, inner_pts[1:] + inner_pts[:1]):
+        midpoint = (
+            (point[0] + following[0]) / 2.0,
+            (point[1] + following[1]) / 2.0,
         )
-        for sample in samples:
-            if not point_in_polygon(sample, outer):
-                return False
+        if not _inside_polygon(point, outer_pts):
+            return False
+        if not _inside_polygon(midpoint, outer_pts):
+            return False
     return True
 
 
@@ -555,21 +529,51 @@ def _split_segments(loops: Sequence[Loop]) -> List[Segment]:
             raw.append((point, loop[(index + 1) % len(loop)]))
             vertices.append(point)
 
-    unique: Dict[Tuple[Tuple[int, int], Tuple[int, int]], Segment] = {}
+    # Boxes padded by the same tolerance the point and crossing tests accept
+    # (about 1e-7 of the segment length, plus an absolute floor), so skipping
+    # a pair or vertex whose box misses can never drop a hit.
+    boxes = []
+    for start, end in raw:
+        margin = 1e-6 + 1e-6 * _distance(start, end)
+        boxes.append((
+            min(start[0], end[0]) - margin, min(start[1], end[1]) - margin,
+            max(start[0], end[0]) + margin, max(start[1], end[1]) + margin,
+        ))
+    params: List[List[float]] = [[0.0, 1.0] for _ in raw]
+
     for index, (start, end) in enumerate(raw):
-        params = [0.0, 1.0]
+        min_x, min_y, max_x, max_y = boxes[index]
         for vertex in vertices:
-            if _point_on_segment(vertex, start, end):
-                params.append(_segment_parameter(vertex, start, end))
-        for other_index, (other_start, other_end) in enumerate(raw):
-            if other_index == index:
+            if not (min_x <= vertex[0] <= max_x and min_y <= vertex[1] <= max_y):
                 continue
+            if _point_on_segment(vertex, start, end):
+                params[index].append(_segment_parameter(vertex, start, end))
+
+    # Each unordered pair is intersected once; the crossing is recorded on
+    # both segments.
+    for index, (start, end) in enumerate(raw):
+        a_min_x, a_min_y, a_max_x, a_max_y = boxes[index]
+        for other in range(index + 1, len(raw)):
+            b_min_x, b_min_y, b_max_x, b_max_y = boxes[other]
+            if (
+                b_min_x > a_max_x or b_max_x < a_min_x
+                or b_min_y > a_max_y or b_max_y < a_min_y
+            ):
+                continue
+            other_start, other_end = raw[other]
             crossing = _segment_intersection(
                 start, end, other_start, other_end
             )
-            if crossing is not None:
-                params.append(_segment_parameter(crossing, start, end))
-        parameters = _unique_parameters(params)
+            if crossing is None:
+                continue
+            params[index].append(_segment_parameter(crossing, start, end))
+            params[other].append(
+                _segment_parameter(crossing, other_start, other_end)
+            )
+
+    unique: Dict[Tuple[Tuple[int, int], Tuple[int, int]], Segment] = {}
+    for index, (start, end) in enumerate(raw):
+        parameters = _unique_parameters(params[index])
         for lower, upper in zip(parameters, parameters[1:]):
             first = _lerp(start, end, lower)
             second = _lerp(start, end, upper)
@@ -593,23 +597,8 @@ def _boundary_edges(
     segments: Sequence[Segment], loops: Sequence[Loop]
 ) -> List[Segment]:
     """Keep edges with union material on one side and empty space on the other."""
-    all_points = [point for segment in segments for point in segment]
-    diagonal = _diagonal(all_points)
-    sample = max(1e-7, diagonal * 1e-6)
     boundary: List[Segment] = []
-    for start, end in segments:
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.hypot(dx, dy)
-        if length <= _EPS:
-            continue
-        middle = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
-        normal = (-dy / length, dx / length)
-        left = (middle[0] + normal[0] * sample, middle[1] + normal[1] * sample)
-        right = (
-            middle[0] - normal[0] * sample,
-            middle[1] - normal[1] * sample,
-        )
+    for start, end, left, right in _edge_samples(segments):
         inside_left = _inside_union(left, loops)
         inside_right = _inside_union(right, loops)
         if inside_left == inside_right:
@@ -619,7 +608,7 @@ def _boundary_edges(
 
 
 def _inside_union(point: Point2, loops: Sequence[Loop]) -> bool:
-    return any(point_in_polygon(point, loop) for loop in loops)
+    return any(_inside_polygon(point, loop) for loop in loops)
 
 
 def _trace_loops(edges: Sequence[Segment]) -> List[Loop]:

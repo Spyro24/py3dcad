@@ -244,6 +244,10 @@ def refresh_sketch(document: "Document", sketch: Sketch) -> None:
         if world is None:
             continue
         sketch.points[link.point].set_pos(project_to_sketch(sketch, world))
+    center_indices: dict = {}
+    if sketch.projected_circles:
+        for index, point in enumerate(sketch.points):
+            center_indices.setdefault(id(point), index)
     for link in sketch.projected_circles:
         if not 0 <= link.circle < len(sketch.circles):
             continue
@@ -252,13 +256,7 @@ def refresh_sketch(document: "Document", sketch: Sketch) -> None:
             continue
         circle = sketch.circles[link.circle]
         center = project_to_sketch(sketch, world)
-        center_index = next(
-            (
-                index for index, point in enumerate(sketch.points)
-                if point is circle.midPoint
-            ),
-            None,
-        )
+        center_index = center_indices.get(id(circle.midPoint))
         if center_index is not None:
             sketch.points[center_index].set_pos(center)
         circle.diameter = 2.0 * _circle_radius(
@@ -317,15 +315,15 @@ def projected_shape(
     plan = ProjectionPlan()
     if len(chain) < 2:
         return plan
-    unique: List[Tuple[Tuple[float, float, float], Point2]] = []
+    unique: List[Tuple[Point3, Point2]] = []
     for world in chain:
-        local = project_to_sketch(sketch, world)
-        if unique and _distance(local, unique[-1][1]) <= 1e-9:
+        current = tuple(map(float, world))
+        if unique and _distance3(current, unique[-1][0]) <= 1e-9:
             continue
-        unique.append((tuple(map(float, world)), local))
+        unique.append((current, project_to_sketch(sketch, current)))
     if len(unique) < 2:
         return plan
-    closed = _distance(unique[0][1], unique[-1][1]) <= 1e-9
+    closed = _distance3(unique[0][0], unique[-1][0]) <= 1e-9
     loop = unique[:-1] if closed else unique
     if len(loop) < 2:
         return plan
@@ -333,8 +331,12 @@ def projected_shape(
         _plan_circle(document, sketch, feature_id, loop, plan)
         if plan.circles:
             return plan
-    primitives = _split_primitives([local for _, local in loop])
-    picked = _picked_segment(unique, edge_start, edge_end)
+    # Recognise straight and circular runs in 3D: an obliquely projected
+    # arc is an ellipse, so splitting the projected polyline would mistake
+    # its segments for short lines.
+    world_loop = [world for world, _ in loop]
+    primitives = _split_primitives(world_loop)
+    picked = _picked_segment(world_loop, edge_start, edge_end)
     if picked is None:
         picked = 0
     primitive = _primitive_at(primitives, picked)
@@ -393,18 +395,78 @@ def _plan_primitive(
     second = projection_source(document, feature_id, loop[end][0])
     if first is None or second is None or first.key() == second.key():
         return
-    if _distance(loop[start][1], loop[end][1]) <= 1e-9:
+    start_local = project_to_sketch(sketch, loop[start][0])
+    end_local = project_to_sketch(sketch, loop[end][0])
+    if _distance(start_local, end_local) <= 1e-9:
         return
     bulge = None
     if kind == "arc":
-        fit = _fit_circle([local for _, local in loop[start:end + 1]])
-        if fit is not None:
-            bulge = _sweep_bulge(
-                [local for _, local in loop[start:end + 1]], fit[0]
-            )
-    plan.points.append((first, loop[start][1]))
-    plan.points.append((second, loop[end][1]))
+        bulge = _projected_bulge(sketch, loop[start:end + 1])
+    plan.points.append((first, start_local))
+    plan.points.append((second, end_local))
     plan.segments.append((first, second, bulge))
+
+
+def _projected_bulge(
+    sketch: Sketch, run: Sequence[Tuple[Point3, Point2]]
+) -> Optional[float]:
+    """Define an arc from its projected start, midpoint and end.
+
+    The midpoint is the geometric middle of the 3D run, not a tessellation
+    index.  Only those three points are projected; a circle through them
+    gives the sketch bulge even when the true projection is an ellipse.
+    """
+    midpoint = _arc_midpoint(run)
+    if midpoint is None:
+        return None
+    first = project_to_sketch(sketch, run[0][0])
+    middle = project_to_sketch(sketch, midpoint)
+    last = project_to_sketch(sketch, run[-1][0])
+    circle = _circle_through(first, middle, last)
+    if circle is None:
+        return None
+    return _sweep_bulge([first, middle, last], circle[0])
+
+
+def _arc_midpoint(
+    run: Sequence[Tuple[Point3, Point2]]
+) -> Optional[Point3]:
+    """Return the point halfway along a 3D arc run, snapped to its circle."""
+    if len(run) < 3:
+        return None
+    circle = _circle_through(run[0][0], run[1][0], run[2][0])
+    if circle is None:
+        return None
+    center, radius, _ = circle
+    lengths = [0.0]
+    for first, second in zip(run, run[1:]):
+        lengths.append(lengths[-1] + _distance3(first[0], second[0]))
+    total = lengths[-1]
+    if total <= 1e-12:
+        return None
+    half = total * 0.5
+    point = run[0][0]
+    for index in range(len(run) - 1):
+        if lengths[index] <= half <= lengths[index + 1]:
+            span = lengths[index + 1] - lengths[index]
+            t = 0.0 if span <= 1e-12 else (
+                half - lengths[index]
+            ) / span
+            first = run[index][0]
+            second = run[index + 1][0]
+            point = tuple(
+                first[axis] + (second[axis] - first[axis]) * t
+                for axis in range(3)
+            )
+            break
+    offset = _subtract3(point, center)
+    length = math.sqrt(_dot(offset, offset))
+    if length <= 1e-12:
+        return None
+    return tuple(
+        center[axis] + offset[axis] * radius / length
+        for axis in range(3)
+    )
 
 
 def _world_on_plane(
@@ -498,9 +560,13 @@ def _picked_segment(
     """Locate the picked body edge inside its smooth chain."""
     first = tuple(round(float(value), 6) for value in edge_start)
     second = tuple(round(float(value), 6) for value in edge_end)
-    for index in range(len(unique) - 1):
-        current = tuple(round(value, 6) for value in unique[index][0])
-        following = tuple(round(value, 6) for value in unique[index + 1][0])
+    rounded = [
+        tuple(round(value, 6) for value in world)
+        for world, _ in unique
+    ]
+    for index in range(len(rounded) - 1):
+        current = rounded[index]
+        following = rounded[index + 1]
         if (current == first and following == second) or (
             current == second and following == first
         ):
@@ -514,11 +580,21 @@ def _consistent_circle_binding(
     loop: Sequence[Tuple[Point3, Point2]],
 ) -> int:
     """Return the source sketch circle a full round edge came from."""
+    feature = find_feature(document, feature_id)
+    sketch = (
+        document.sketch(feature.sketch_id) if feature is not None else None
+    )
+    if feature is None or sketch is None:
+        return -1
     counts: dict = {}
+    # Stored slices are baked, so only unsliced features bind to circles.
+    if feature.slices:
+        return -1
     for world, _ in loop:
-        source = projection_source(document, feature_id, world)
-        if source is not None and source.bind == "circle":
-            counts[source.index] = counts.get(source.index, 0) + 1
+        u, v, _ = frame_coordinates(sketch, world)
+        bind, index, _ = _source_binding(sketch, u, v)
+        if bind == "circle":
+            counts[index] = counts.get(index, 0) + 1
     if not counts:
         return -1
     index, count = max(counts.items(), key=lambda item: item[1])
@@ -566,18 +642,17 @@ def _fit_circle(
     if len(points) < 3:
         return None
     count = len(points)
-    sx = sum(point[0] for point in points)
-    sy = sum(point[1] for point in points)
-    sxx = sum(point[0] * point[0] for point in points)
-    syy = sum(point[1] * point[1] for point in points)
-    sxy = sum(point[0] * point[1] for point in points)
-    sz = sum(point[0] ** 2 + point[1] ** 2 for point in points)
-    sxz = sum(
-        point[0] * (point[0] ** 2 + point[1] ** 2) for point in points
-    )
-    syz = sum(
-        point[1] * (point[0] ** 2 + point[1] ** 2) for point in points
-    )
+    sx = sy = sxx = syy = sxy = sz = sxz = syz = 0.0
+    for x, y in points:
+        z = x * x + y * y
+        sx += x
+        sy += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+        sz += z
+        sxz += x * z
+        syz += y * z
     determinant = (
         sxx * (syy * count - sy * sy)
         - sxy * (sxy * count - sy * sx)
@@ -655,3 +730,19 @@ def _dot(first: Sequence[float], second: Sequence[float]) -> float:
 
 def _distance(first: Point2, second: Sequence[float]) -> float:
     return math.hypot(first[0] - second[0], first[1] - second[1])
+
+
+def _distance3(first: Sequence[float], second: Sequence[float]) -> float:
+    return math.sqrt(
+        (first[0] - second[0]) ** 2
+        + (first[1] - second[1]) ** 2
+        + (first[2] - second[2]) ** 2
+    )
+
+
+def _subtract3(first: Sequence[float], second: Sequence[float]) -> Point3:
+    return (
+        first[0] - second[0],
+        first[1] - second[1],
+        first[2] - second[2],
+    )

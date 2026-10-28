@@ -438,6 +438,16 @@ class Application:
             for command in stack.history()
         ]
 
+    def _timeline(
+        self, stack: Optional[CommandStack]
+    ) -> Tuple[List[HistoryEntry], List[HistoryEntry]]:
+        """Return ``(full_history, timeline_visible_history)`` for a stack."""
+        full_history = self._history_entries(stack)
+        filtered_history = [
+            entry for entry in full_history if entry.timeline_visible
+        ]
+        return full_history, filtered_history
+
     def _sync_active_sketch(self, document: Document) -> None:
         if (
             document.active_sketch_id is not None
@@ -1154,7 +1164,8 @@ class Application:
         if document is None or stack is None:
             self._playing = False
             return
-        total = len(stack.history())
+        history = stack.history()
+        total = len(history)
         if total == 0 or stack.position >= total:
             self._playing = False
             return
@@ -1162,7 +1173,6 @@ class Application:
         if self._play_accumulator < 0.35:
             return
         self._play_accumulator = 0.0
-        history = stack.history()
         target = min(stack.position + 1, total)
         while (
             target < total
@@ -1263,8 +1273,10 @@ class Application:
             return
         if event.type == pygame.KEYDOWN:
             if event.mod & pygame.KMOD_CTRL:
-                if self._handle_ctrl_key(event.key, bool(event.mod & pygame.KMOD_SHIFT)):
-                    return
+                # Ctrl shortcuts are consumed whether or not they matched.
+                self._handle_ctrl_key(
+                    event.key, bool(event.mod & pygame.KMOD_SHIFT)
+                )
                 return
             if self.documents and self._handle_edit_key(event.key):
                 return
@@ -1276,12 +1288,7 @@ class Application:
             document = self.active_document()
             if document is not None:
                 stack = self._active_stack()
-                full_history = self._history_entries(stack)
-                filtered_history = [
-                    entry
-                    for entry in full_history
-                    if entry.timeline_visible
-                ]
+                full_history, filtered_history = self._timeline(stack)
                 self.workspace.handle_event(
                     event,
                     self.layout,
@@ -1327,7 +1334,10 @@ class Application:
             self.open_settings()
             return True
         if key == pygame.K_z:
-            self.redo() if shift else self.undo()
+            if shift:
+                self.redo()
+            else:
+                self.undo()
             return True
         if key == pygame.K_y:
             self.redo()
@@ -1352,12 +1362,7 @@ class Application:
         if document is not None:
             document.refresh_projections()
             stack = self._active_stack()
-            full_history = self._history_entries(stack)
-            filtered_history = [
-                entry
-                for entry in full_history
-                if entry.timeline_visible
-            ]
+            full_history, filtered_history = self._timeline(stack)
             radius = self.workspace.fillet_preview_radius()
             extrude_preview = self.extrude_preview(document)
             fillet_preview = None

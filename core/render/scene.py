@@ -96,9 +96,7 @@ class SceneRenderer:
         self.show_origin = True
         self.orientation_cube = OrientationCube()
         self._font_small: Optional[pygame.font.Font] = None
-        self._plane_surface: Optional[pygame.Surface] = None
-        self._face_surface: Optional[pygame.Surface] = None
-        self._hole_surface: Optional[pygame.Surface] = None
+        self._label_cache: Dict[Tuple[str, Color], pygame.Surface] = {}
         self._ghost_surface: Optional[pygame.Surface] = None
         self._edge_key_cache: Dict[
             int, Tuple[Face, List[FaceEdgeEntry]]
@@ -109,10 +107,42 @@ class SceneRenderer:
             return
         self.ui_scale = scale
         self._font_small = None
+        self._label_cache.clear()
         self.orientation_cube.set_scale(scale)
 
     def _s(self, value: float) -> int:
         return max(1, int(round(value * self.ui_scale)))
+
+    @staticmethod
+    def _layer_bounds(
+        rect: pygame.Rect,
+        groups: Sequence[Sequence[Point2]],
+        pad: int = 0,
+    ) -> Optional[pygame.Rect]:
+        """Return the part of the viewport that the given polygons touch."""
+        xs = [point[0] for group in groups for point in group]
+        ys = [point[1] for group in groups for point in group]
+        if not xs:
+            return None
+        left = math.floor(min(xs)) - pad
+        top = math.floor(min(ys)) - pad
+        right = math.ceil(max(xs)) + pad
+        bottom = math.ceil(max(ys)) + pad
+        bounds = pygame.Rect(left, top, right - left, bottom - top).clip(rect)
+        if bounds.width <= 0 or bounds.height <= 0:
+            return None
+        return bounds
+
+    @staticmethod
+    def _local(points: Sequence[Point2], origin: Tuple[int, int]) -> List[Point2]:
+        """Shift screen points into the coordinate space of a layer."""
+        ox, oy = origin
+        return [(x - ox, y - oy) for x, y in points]
+
+    def _gizmo_factor(self, camera: OrbitCamera) -> float:
+        reference = ORIGIN_GIZMO_SCALE * self.ui_scale
+        current = PROJECTION_SCALE * camera.zoom
+        return reference / current if current else 1.0
 
     def _project_origin_gizmo(
         self,
@@ -120,14 +150,14 @@ class SceneRenderer:
         center: Point2,
         point: Tuple[float, float, float],
         origin: Optional[Point2] = None,
+        factor: Optional[float] = None,
     ) -> Point2:
         """Project origin-gizmo geometry at a fixed screen size."""
         if origin is None:
             origin = camera.project((0.0, 0.0, 0.0), center)
         projected = camera.project(point, center)
-        reference = ORIGIN_GIZMO_SCALE * self.ui_scale
-        current = PROJECTION_SCALE * camera.zoom
-        factor = reference / current if current else 1.0
+        if factor is None:
+            factor = self._gizmo_factor(camera)
         return (
             origin[0] + (projected[0] - origin[0]) * factor,
             origin[1] + (projected[1] - origin[1]) * factor,
@@ -293,10 +323,13 @@ class SceneRenderer:
         """Project the three selectable origin planes to screen space."""
         center = rect.center
         origin = camera.project((0.0, 0.0, 0.0), center)
+        factor = self._gizmo_factor(camera)
         items: List[Tuple[str, float, List[Point2]]] = []
         for name, vertices in ORIGIN_PLANE_GEOMETRY:
             polygon = [
-                self._project_origin_gizmo(camera, center, vertex, origin)
+                self._project_origin_gizmo(
+                    camera, center, vertex, origin, factor
+                )
                 for vertex in vertices
             ]
             items.append((name, camera.depth(vertices), polygon))
@@ -315,8 +348,8 @@ class SceneRenderer:
         ]
         if not hits:
             return None
-        hits.sort(key=lambda item: item[1])
-        return hits[-1][0]
+        # reversed() keeps the original tie-break: the last equal hit wins.
+        return max(reversed(hits), key=lambda item: item[1])[0]
 
     def pick_face(
         self,
@@ -352,8 +385,10 @@ class SceneRenderer:
             ))
         if not hits:
             return None
-        hits.sort(key=lambda item: item[0])
-        _, feature_id, face_index, face = hits[-1]
+        # reversed() keeps the original tie-break: the last equal hit wins.
+        _, feature_id, face_index, face = max(
+            reversed(hits), key=lambda item: item[0]
+        )
         return feature_id, face_index, face
 
     def pick_edge(
@@ -385,8 +420,9 @@ class SceneRenderer:
             ))
         if not hits:
             return None
-        hits.sort(key=lambda item: (item[0], item[1]))
-        _, _, feature_id, edge_index, edge = hits[0]
+        _, _, feature_id, edge_index, edge = min(
+            hits, key=lambda item: (item[0], item[1])
+        )
         return feature_id, edge_index, edge
 
     @staticmethod
@@ -427,32 +463,28 @@ class SceneRenderer:
         camera: OrbitCamera,
         selected_plane: Optional[str] = None,
     ) -> None:
-        overlay = self._plane_surface
-        if overlay is None or overlay.get_size() != rect.size:
-            overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
-            self._plane_surface = overlay
-
         items = self._project_origin_planes(rect, camera)
         items.sort(key=lambda item: item[1])
+        width = max(1, self._s(2))
         for name, _, polygon in items:
-            local_polygon = [
-                (point[0] - rect.x, point[1] - rect.y)
-                for point in polygon
-            ]
             selected = name == selected_plane
             color = (
                 self.palette.origin_plane_selected
                 if selected else self.palette.origin_plane
             )
             fill = (*color, 210 if selected else 175)
-            overlay.fill((0, 0, 0, 0))
-            pygame.draw.polygon(overlay, fill, local_polygon)
+            bounds = self._layer_bounds(rect, [polygon], pad=width)
+            if bounds is None:
+                continue
+            layer = pygame.Surface(bounds.size, pygame.SRCALPHA)
+            local_polygon = self._local(polygon, bounds.topleft)
+            pygame.draw.polygon(layer, fill, local_polygon)
             if selected:
                 pygame.draw.polygon(
-                    overlay, (*self.palette.active, 235),
-                    local_polygon, max(1, self._s(2)),
+                    layer, (*self.palette.active, 235),
+                    local_polygon, width,
                 )
-            surface.blit(overlay, rect.topleft)
+            surface.blit(layer, bounds.topleft)
 
     def _draw_axes(
         self, surface: pygame.Surface, rect: pygame.Rect, camera: OrbitCamera
@@ -476,7 +508,11 @@ class SceneRenderer:
                 origin,
             )
             self._draw_dashed_line(surface, color, origin, end)
-            text = self._font_small.render(label, True, color)
+            key = (label, color)
+            text = self._label_cache.get(key)
+            if text is None:
+                text = self._font_small.render(label, True, color)
+                self._label_cache[key] = text
             surface.blit(text, (end[0] + 4, end[1] - 6))
 
     def _draw_dashed_line(
@@ -568,8 +604,13 @@ class SceneRenderer:
             front = (face.normal[0] * view_dir[0] +
                      face.normal[1] * view_dir[1] +
                      face.normal[2] * view_dir[2]) > 0
+            is_side = face.label.startswith("Side face")
+            # Depth is only needed for drawn panels and for side panels, which
+            # feed the silhouette pass even when they face away.
+            if not front and not is_side:
+                continue
             depth = camera.depth(face.vertices)
-            if face.label.startswith("Side face"):
+            if is_side:
                 self._collect_edge_sides(
                     face, front, depth, sides, smooth
                 )
@@ -712,50 +753,45 @@ class SceneRenderer:
         ordered = sorted(
             visible, key=lambda face: camera.depth(face.vertices)
         )
-        self._ghost_fills(overlay, ordered, rect, camera)
-        self._ghost_outlines(overlay, ordered, rect, camera)
+        projected = [
+            (
+                self._ghost_polygon(face.vertices, rect, camera),
+                [self._ghost_polygon(hole, rect, camera) for hole in face.holes],
+            )
+            for face in ordered
+        ]
+        self._ghost_fills(overlay, projected)
+        self._ghost_outlines(overlay, projected)
         surface.blit(overlay, rect.topleft)
 
     def _ghost_fills(
         self,
         overlay: pygame.Surface,
-        faces: Sequence[Face],
-        rect: pygame.Rect,
-        camera: OrbitCamera,
+        projected: Sequence[Tuple[List[Point2], List[List[Point2]]]],
     ) -> None:
         fill = (*self.palette.ghost_fill, 78)
-        for face in faces:
-            polygon = self._ghost_polygon(face.vertices, rect, camera)
+        for polygon, holes in projected:
             if len(polygon) < 3:
                 continue
             pygame.draw.polygon(overlay, fill, polygon)
-            for hole in face.holes:
-                hole_polygon = self._ghost_polygon(hole, rect, camera)
+            for hole_polygon in holes:
                 if len(hole_polygon) >= 3:
-                    pygame.draw.polygon(
-                        overlay, (0, 0, 0, 0), hole_polygon
-                    )
+                    pygame.draw.polygon(overlay, (0, 0, 0, 0), hole_polygon)
 
     def _ghost_outlines(
         self,
         overlay: pygame.Surface,
-        faces: Sequence[Face],
-        rect: pygame.Rect,
-        camera: OrbitCamera,
+        projected: Sequence[Tuple[List[Point2], List[List[Point2]]]],
     ) -> None:
         edge = (*self.palette.ghost_edge, 190)
         width = max(1, self._s(1))
-        for face in faces:
-            polygon = self._ghost_polygon(face.vertices, rect, camera)
+        for polygon, holes in projected:
             if len(polygon) < 3:
                 continue
             pygame.draw.lines(overlay, edge, True, polygon, width)
-            for hole in face.holes:
-                hole_polygon = self._ghost_polygon(hole, rect, camera)
+            for hole_polygon in holes:
                 if len(hole_polygon) >= 3:
-                    pygame.draw.lines(
-                        overlay, edge, True, hole_polygon, width
-                    )
+                    pygame.draw.lines(overlay, edge, True, hole_polygon, width)
 
     @staticmethod
     def _ghost_polygon(
@@ -892,21 +928,16 @@ class SceneRenderer:
         color: Color,
     ) -> None:
         """Fill a cap face with transparent holes cut out of it."""
-        overlay = self._hole_surface
-        if overlay is None or overlay.get_size() != rect.size:
-            overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
-            self._hole_surface = overlay
-        overlay.fill((0, 0, 0, 0))
-        local = [
-            (point[0] - rect.x, point[1] - rect.y) for point in polygon
-        ]
-        pygame.draw.polygon(overlay, color, local)
+        bounds = self._layer_bounds(rect, [polygon])
+        if bounds is None:
+            return
+        layer = pygame.Surface(bounds.size, pygame.SRCALPHA)
+        pygame.draw.polygon(layer, color, self._local(polygon, bounds.topleft))
         for hole in holes:
-            local_hole = [
-                (point[0] - rect.x, point[1] - rect.y) for point in hole
-            ]
-            pygame.draw.polygon(overlay, (0, 0, 0, 0), local_hole)
-        surface.blit(overlay, rect.topleft)
+            pygame.draw.polygon(
+                layer, (0, 0, 0, 0), self._local(hole, bounds.topleft)
+            )
+        surface.blit(layer, bounds.topleft)
 
     def _draw_face_outline(
         self,
@@ -943,29 +974,31 @@ class SceneRenderer:
         rect: pygame.Rect,
         faces: List[Tuple[List[Point2], List[List[Point2]]]],
     ) -> None:
-        overlay = self._face_surface
-        if overlay is None or overlay.get_size() != rect.size:
-            overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
-            self._face_surface = overlay
-        overlay.fill((0, 0, 0, 0))
-        local_faces = [([(point[0] - rect.x, point[1] - rect.y) for point in polygon], [[(point[0] - rect.x, point[1] - rect.y) for point in hole] for hole in holes]) for polygon, holes in faces]
-        for local_polygon, _ in local_faces:
-            pygame.draw.polygon(overlay, (*self.palette.active, 62), local_polygon)
-        for _, local_holes in local_faces:
-            for local_hole in local_holes:
-                pygame.draw.polygon(overlay, (0, 0, 0, 0), local_hole)
-        for loop in union_profiles([polygon for polygon, _ in local_faces]):
-            pygame.draw.polygon(
-                overlay, (*self.palette.active, 245), loop,
-                max(1, self._s(2)),
-            )
-        for _, local_holes in local_faces:
-            for local_hole in local_holes:
+        width = max(1, self._s(2))
+        groups = [polygon for polygon, _ in faces]
+        groups.extend(hole for _, holes in faces for hole in holes)
+        bounds = self._layer_bounds(rect, groups, pad=width)
+        if bounds is None:
+            return
+        origin = bounds.topleft
+        layer = pygame.Surface(bounds.size, pygame.SRCALPHA)
+        local_polygons = [self._local(polygon, origin) for polygon, _ in faces]
+        local_holes = [
+            [self._local(hole, origin) for hole in holes] for _, holes in faces
+        ]
+        for local_polygon in local_polygons:
+            pygame.draw.polygon(layer, (*self.palette.active, 62), local_polygon)
+        for holes in local_holes:
+            for local_hole in holes:
+                pygame.draw.polygon(layer, (0, 0, 0, 0), local_hole)
+        for loop in union_profiles(local_polygons):
+            pygame.draw.polygon(layer, (*self.palette.active, 245), loop, width)
+        for holes in local_holes:
+            for local_hole in holes:
                 pygame.draw.polygon(
-                    overlay, (*self.palette.active, 245), local_hole,
-                    max(1, self._s(2)),
+                    layer, (*self.palette.active, 245), local_hole, width
                 )
-        surface.blit(overlay, rect.topleft)
+        surface.blit(layer, origin)
 
     def _draw_sketch_lines(
         self,
