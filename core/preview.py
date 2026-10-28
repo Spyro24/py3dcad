@@ -192,7 +192,6 @@ def _fits_fillets(
 def common_fillet_radius(
     document: Document,
     targets: Sequence[FilletTarget],
-    radius: float,
 ) -> Optional[float]:
     """Return the largest radius every selected edge can share.
 
@@ -201,7 +200,7 @@ def common_fillet_radius(
     run between them twice.  Applying the fillets in sequence and shrinking
     the shared radius until they all fit keeps the result watertight.
     """
-    if not targets or radius <= 0.0:
+    if not targets:
         return None
     limits = [
         max_fillet_radius(
@@ -210,8 +209,9 @@ def common_fillet_radius(
         for target in targets
     ]
     known = [limit for limit in limits if limit is not None]
-    if known:
-        radius = min([radius, *known])
+    if not known:
+        return None
+    radius = min(known)
     # Cap fillets each consume a band of the wall height, so their shared
     # limit follows directly from the available height.  That avoids the much
     # slower sequential build-and-bisect search for cap-only selections.
@@ -256,12 +256,14 @@ def build_fillet_preview(
     document: Document,
     targets: Sequence[FilletTarget],
     radius: float,
+    limit: Optional[float] = None,
 ) -> Optional[FilletPreview]:
     """Return the rounded body and the material the fillet would remove."""
-    limit = common_fillet_radius(document, targets, radius)
     if limit is None:
+        limit = common_fillet_radius(document, targets)
+    if limit is None or radius <= 1e-9:
         return None
-    radius = limit
+    radius = min(radius, limit)
     preview = _clone_preview(document)
     if not _apply_fillets(preview, targets, radius):
         return None

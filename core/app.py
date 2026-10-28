@@ -286,6 +286,7 @@ class Application:
         self._playing = False
         self._play_accumulator = 0.0
         self._fillet_preview_cache = None
+        self._fillet_limit_cache = None
         self._extrude_preview_cache = None
 
         self._scale_index = self._nearest_scale_index(self.config.ui_scale)
@@ -847,10 +848,10 @@ class Application:
         error, targets = _resolve_fillets(document, radius)
         if error is not None or not targets:
             return error or "Select a solid edge first"
-        limit = common_fillet_radius(document, targets, radius)
+        limit = common_fillet_radius(document, targets)
         if limit is None:
             return "Edge is already filleted"
-        radius = limit
+        radius = min(radius, limit)
         commands = [
             AddFilletCommand(
                 document, target.feature, target.kind,
@@ -881,24 +882,25 @@ class Application:
         document = self.active_document()
         if document is None:
             return None
-        key = (
+        snapshot = tuple(
+            (
+                candidate.id,
+                candidate.sketch_id,
+                candidate.height,
+                len(candidate.fillets),
+                tuple(
+                    (entry.z0, entry.z1, len(entry.regions))
+                    for entry in candidate.slices
+                ),
+            )
+            for candidate in document.features
+        )
+        selection_key = (
             document.id,
             tuple(document.selected_edges),
-            radius,
-            tuple(
-                (
-                    candidate.id,
-                    candidate.sketch_id,
-                    candidate.height,
-                    len(candidate.fillets),
-                    tuple(
-                        (entry.z0, entry.z1, len(entry.regions))
-                        for entry in candidate.slices
-                    ),
-                )
-                for candidate in document.features
-            ),
+            snapshot,
         )
+        key = (*selection_key, radius)
         cached = self._fillet_preview_cache
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -906,7 +908,13 @@ class Application:
         error, targets = _resolve_fillets(document, radius)
         if error is not None or not targets:
             return None
-        preview = build_fillet_preview(document, targets, radius)
+        cached_limit = self._fillet_limit_cache
+        if cached_limit is not None and cached_limit[0] == selection_key:
+            limit = cached_limit[1]
+        else:
+            limit = common_fillet_radius(document, targets)
+            self._fillet_limit_cache = (selection_key, limit)
+        preview = build_fillet_preview(document, targets, radius, limit)
         self._fillet_preview_cache = (key, preview)
         return preview
 
