@@ -3141,6 +3141,27 @@ def _cap_stack_radius_limit(
     return min(limits) if limits else None
 
 
+def stack_cap_common_radius_limit(
+    slices: Sequence[ExtrudeSlice], kind: str, points: Sequence[Point2],
+) -> Optional[float]:
+    """Return the largest radius several selected cap segments can share.
+
+    Each applied cap fillet consumes a band as tall as its radius at the same
+    cap, and a later fillet sees the remainder.  Sharing one radius across
+    ``n`` selected segments therefore leaves ``available / n``.
+    """
+    entries = [
+        entry for entry in slices
+        if entry.regions and entry.z1 - entry.z0 > 1e-9
+    ]
+    if not entries or not points:
+        return None
+    available = _cap_stack_available(entries, kind)
+    if available <= 1e-9:
+        return 0.0
+    return available / len(points)
+
+
 def _point_segment_distance(
     point: Point2, start: Point2, end: Point2
 ) -> float:

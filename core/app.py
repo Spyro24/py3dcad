@@ -18,6 +18,7 @@ from .commands import (
     AddSketchCommand,
     BooleanExtrudeCommand,
     CommandStack,
+    CompositeCommand,
     DeleteSketchEntitiesCommand,
     MoveEdgeCommand,
     MovePointCommand,
@@ -34,8 +35,8 @@ from .faces import (
     vertical_edge_corner,
 )
 from .preview import (
-    ExtrudePreview, FilletPreview, build_extrude_preview,
-    build_fillet_preview,
+    ExtrudePreview, FilletPreview, FilletTarget, build_extrude_preview,
+    build_fillet_preview, common_fillet_radius,
 )
 from .sketch import (
     Extrude,
@@ -85,18 +86,16 @@ def _stack_cap_side(
     return None, offset
 
 
-def _resolve_fillet(
-    document: Document, radius: float
-) -> Tuple[Optional[str], Optional[Extrude], Optional[str], float, float]:
-    """Turn the document's selected edge into a fillet without editing it.
+def _resolve_fillet_ref(
+    document: Document, reference: Optional[Tuple[int, int]], radius: float
+) -> Tuple[Optional[str], Optional[FilletTarget]]:
+    """Turn one selected edge reference into a fillet without editing it.
 
-    Returns ``(error, feature, kind, u, v)``.  Both applying a fillet and the
-    live preview use this so they can never disagree about what edge is about
-    to change.
+    Returns ``(error, target)``.  Applying a fillet and the live preview both
+    use this so they can never disagree about what edge is about to change.
     """
-    reference = document.selected_edge
     if reference is None:
-        return "Select a solid edge first", None, None, 0.0, 0.0
+        return "Select a solid edge first", None
     feature = next(
         (
             candidate
@@ -111,7 +110,7 @@ def _resolve_fillet(
         if feature is not None else None
     )
     if feature is None or edge is None or sketch is None:
-        return "Select a solid edge first", None, None, 0.0, 0.0
+        return "Select a solid edge first", None
     frame = sketch.frame()
     delta = (
         edge.end[0] - edge.start[0],
@@ -120,7 +119,7 @@ def _resolve_fillet(
     )
     length = math.hypot(*delta)
     if length < 1e-9:
-        return "Select a solid edge first", None, None, 0.0, 0.0
+        return "Select a solid edge first", None
     along_axis = abs(
         (delta[0] * frame.normal[0]
          + delta[1] * frame.normal[1]
@@ -137,7 +136,7 @@ def _resolve_fillet(
             )
         )
         if not has_corner or corner is None:
-            return "Edge is already filleted", None, None, 0.0, 0.0
+            return "Edge is already filleted", None
         kind = "vertical"
         segment_key = None
         u, v = corner
@@ -145,7 +144,7 @@ def _resolve_fillet(
         start_offset = _plane_offset(edge.start, frame)
         end_offset = _plane_offset(edge.end, frame)
         if abs(start_offset - end_offset) > 1e-4:
-            return "Fillet needs a solid edge", None, None, 0.0, 0.0
+            return "Fillet needs a solid edge", None
         midpoint = edge.midpoint
         offset = (
             midpoint[0] - frame.origin[0],
@@ -165,7 +164,7 @@ def _resolve_fillet(
         if feature.slices:
             kind, cap_z = _stack_cap_side(feature, start_offset)
             if kind is None:
-                return "Fillet needs a solid edge", None, None, 0.0, 0.0
+                return "Fillet needs a solid edge", None
             segment_key = stack_cap_segment_key(
                 feature.slices, cap_z, (u, v)
             )
@@ -174,7 +173,7 @@ def _resolve_fillet(
                 document, feature, (u, v)
             )
         if segment_key is None:
-            return "Edge is already filleted", None, None, 0.0, 0.0
+            return "Edge is already filleted", None
         if not feature.slices:
             # The cap on the positive-normal side is the top face.
             center = feature.start + feature.height * 0.5
@@ -184,7 +183,7 @@ def _resolve_fillet(
                 else "bottom"
             )
     if radius <= 0.0:
-        return "Enter a radius greater than zero", None, None, 0.0, 0.0
+        return "Enter a radius greater than zero", None
     if feature.slices:
         duplicate = False
     elif kind == "vertical":
@@ -203,8 +202,40 @@ def _resolve_fillet(
             for fillet in feature.fillets
         )
     if duplicate:
-        return "Edge is already filleted", None, None, 0.0, 0.0
-    return None, feature, kind, u, v
+        return "Edge is already filleted", None
+    return None, FilletTarget(feature, kind, u, v)
+
+
+def _resolve_fillets(
+    document: Document, radius: float
+) -> Tuple[Optional[str], List[FilletTarget]]:
+    """Resolve every selected edge, skipping duplicates and dead references."""
+    if not document.selected_edges:
+        return "Select a solid edge first", []
+    targets: List[FilletTarget] = []
+    seen = set()
+    error: Optional[str] = None
+    for reference in document.selected_edges:
+        ref_error, target = _resolve_fillet_ref(document, reference, radius)
+        if target is None:
+            error = error or ref_error
+            continue
+        if max_fillet_radius(
+            document, target.feature, target.kind, target.u, target.v
+        ) is None:
+            error = error or "Edge cannot be filleted"
+            continue
+        key = (
+            target.feature.id, target.kind,
+            round(target.u, 4), round(target.v, 4),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(target)
+    if not targets:
+        return error or "Select a solid edge first", []
+    return None, targets
 
 
 class Application:
@@ -409,16 +440,16 @@ class Application:
         ):
             document.active_sketch_id = None
             self.workspace.sketch_palette_window.close()
-        if (
-            document.selected_face is not None
-            and face_for_ref(document, document.selected_face) is None
-        ):
-            document.selected_face = None
-        if (
-            document.selected_edge is not None
-            and edge_for_ref(document, document.selected_edge) is None
-        ):
-            document.selected_edge = None
+        if document.selected_faces:
+            document.selected_faces = [
+                reference for reference in document.selected_faces
+                if face_for_ref(document, reference) is not None
+            ]
+        if document.selected_edges:
+            document.selected_edges = [
+                reference for reference in document.selected_edges
+                if edge_for_ref(document, reference) is not None
+            ]
 
     def _activate_editable_sketch(self, document: Document) -> None:
         """After rolling back, resume the latest sketch that is not consumed."""
@@ -807,27 +838,35 @@ class Application:
         return None
 
     def add_fillet(self, radius: float) -> Optional[str]:
-        """Round the selected solid edge, returning an error text."""
+        """Round every selected solid edge, returning an error text."""
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
         if document is None or stack is None:
             return "No active document"
-        error, feature, kind, u, v = _resolve_fillet(document, radius)
-        if error is not None or feature is None or kind is None:
+        error, targets = _resolve_fillets(document, radius)
+        if error is not None or not targets:
             return error or "Select a solid edge first"
-        limit = max_fillet_radius(document, feature, kind, u, v)
-        if limit is not None:
-            radius = min(radius, limit)
-        if radius <= 1e-9:
+        limit = common_fillet_radius(document, targets, radius)
+        if limit is None:
             return "Edge is already filleted"
-        stack.execute(
+        radius = limit
+        commands = [
             AddFilletCommand(
-                document, feature, kind, u, v, radius
+                document, target.feature, target.kind,
+                target.u, target.v, radius,
             )
-        )
-        document.selected_edge = None
-        document.selected_face = None
+            for target in targets
+        ]
+        if len(commands) == 1:
+            command = commands[0]
+        else:
+            command = CompositeCommand(
+                commands,
+                f"Fillet {radius:g} mm on {len(commands)} edges",
+            )
+        stack.execute(command)
+        document.clear_selection()
         return None
 
     def fillet_preview(self, radius: float) -> Optional[FilletPreview]:
@@ -844,7 +883,7 @@ class Application:
             return None
         key = (
             document.id,
-            document.selected_edge,
+            tuple(document.selected_edges),
             radius,
             tuple(
                 (
@@ -864,12 +903,10 @@ class Application:
         if cached is not None and cached[0] == key:
             return cached[1]
         self._fillet_preview_cache = (key, None)
-        error, feature, kind, u, v = _resolve_fillet(document, radius)
-        if error is not None or feature is None or kind is None:
+        error, targets = _resolve_fillets(document, radius)
+        if error is not None or not targets:
             return None
-        preview = build_fillet_preview(
-            document, feature, kind, u, v, radius
-        )
+        preview = build_fillet_preview(document, targets, radius)
         self._fillet_preview_cache = (key, preview)
         return preview
 

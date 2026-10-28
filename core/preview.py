@@ -12,6 +12,7 @@ from .booleans import (
 from .document import Document
 from .faces import (
     Edge, Face, edge_for_ref, max_fillet_radius, stacked_faces,
+    stack_cap_common_radius_limit,
 )
 from .sketch import (
     Extrude, ExtrudeSlice, Fillet, Point3, Sketch, point_on_plane,
@@ -116,6 +117,16 @@ def build_extrude_preview(
     )
 
 
+@dataclass(frozen=True)
+class FilletTarget:
+    """One resolved edge that a fillet can round."""
+
+    feature: Extrude
+    kind: str
+    u: float
+    v: float
+
+
 @dataclass
 class FilletPreview:
     """A throwaway filleted document and the material the fillet removes.
@@ -136,70 +147,177 @@ class FilletPreview:
     max_radius: Optional[float] = None
 
 
-def build_fillet_preview(
-    document: Document,
-    feature: Extrude,
-    kind: str,
-    u: float,
-    v: float,
-    radius: float,
-) -> Optional[FilletPreview]:
-    """Return the rounded body and the material the fillet would remove."""
-    sketch = document.sketch(feature.sketch_id)
-    if sketch is None:
-        return None
-    frame = sketch.frame()
-    before = feature_stack(document, feature, frame)
+def _clone_preview(document: Document) -> Document:
+    """Copy a document so fillets can be applied without touching the model."""
     preview = copy.copy(document)
     preview.features = [
         replace(candidate, fillets=list(candidate.fillets))
         for candidate in document.features
     ]
-    target = next(
-        (
-            candidate
-            for candidate in preview.features
-            if candidate.id == feature.id
-        ),
-        None,
-    )
-    if target is None:
+    return preview
+
+
+def _apply_fillets(
+    preview: Document, targets: Sequence[FilletTarget], radius: float
+) -> bool:
+    """Round every target in ``preview``; return False if any edge refuses."""
+    copies = {candidate.id: candidate for candidate in preview.features}
+    for target in targets:
+        copy_feature = copies.get(target.feature.id)
+        if copy_feature is None:
+            return False
+        limit = max_fillet_radius(
+            preview, copy_feature, target.kind, target.u, target.v
+        )
+        if limit is not None and limit + 1e-9 < radius:
+            return False
+        fillet = Fillet(target.kind, target.u, target.v, radius)
+        if copy_feature.slices:
+            rounded = fillet_slices_body(copy_feature.slices, fillet)
+            if rounded is None:
+                return False
+            copy_feature.slices = rounded
+        else:
+            copy_feature.fillets.append(fillet)
+    return True
+
+
+def _fits_fillets(
+    document: Document, targets: Sequence[FilletTarget], radius: float
+) -> bool:
+    """Return whether all targets accept the same radius on a scratch copy."""
+    return _apply_fillets(_clone_preview(document), targets, radius)
+
+
+def common_fillet_radius(
+    document: Document,
+    targets: Sequence[FilletTarget],
+    radius: float,
+) -> Optional[float]:
+    """Return the largest radius every selected edge can share.
+
+    A single edge only has its own limit, but several edges on one body share
+    material: two full rounds on adjacent corners would consume the straight
+    run between them twice.  Applying the fillets in sequence and shrinking
+    the shared radius until they all fit keeps the result watertight.
+    """
+    if not targets or radius <= 0.0:
         return None
-    limit = max_fillet_radius(document, feature, kind, u, v)
-    if limit is not None:
-        radius = min(radius, limit)
+    limits = [
+        max_fillet_radius(
+            document, target.feature, target.kind, target.u, target.v
+        )
+        for target in targets
+    ]
+    known = [limit for limit in limits if limit is not None]
+    if known:
+        radius = min([radius, *known])
+    # Cap fillets each consume a band of the wall height, so their shared
+    # limit follows directly from the available height.  That avoids the much
+    # slower sequential build-and-bisect search for cap-only selections.
+    cap_groups: dict[Tuple[int, str], list[FilletTarget]] = {}
+    for target in targets:
+        if target.kind in ("top", "bottom") and target.feature.slices:
+            cap_groups.setdefault(
+                (target.feature.id, target.kind), []
+            ).append(target)
+    for (feature_id, kind), group in cap_groups.items():
+        feature = next(
+            candidate for candidate in document.features
+            if candidate.id == feature_id
+        )
+        cap_limit = stack_cap_common_radius_limit(
+            feature.slices, kind,
+            [(target.u, target.v) for target in group],
+        )
+        if cap_limit is not None:
+            radius = min(radius, cap_limit)
     if radius <= 1e-9:
         return None
-    fillet = Fillet(kind, u, v, radius)
-    if target.slices:
-        rounded = fillet_slices_body(target.slices, fillet)
-        if rounded is None:
-            return None
-        target.slices = rounded
-    else:
-        target.fillets.append(fillet)
-    after = feature_stack(preview, target, frame)
-    removed = (
-        combine_stacks(before, after, "cut") if before and after else []
-    )
-    ghost_faces = (
-        tuple(stacked_faces(removed, frame)[0]) if removed else ()
+    # A single cap group is fully described by the band limit above.
+    if len(cap_groups) == 1 and all(
+        target.kind in ("top", "bottom") and target.feature.slices
+        for target in targets
+    ):
+        return radius
+    if _fits_fillets(document, targets, radius):
+        return radius
+    low, high = 0.0, radius
+    for _ in range(24):
+        middle = (low + high) * 0.5
+        if _fits_fillets(document, targets, middle):
+            low = middle
+        else:
+            high = middle
+    return low if low > 1e-6 else None
+
+
+def build_fillet_preview(
+    document: Document,
+    targets: Sequence[FilletTarget],
+    radius: float,
+) -> Optional[FilletPreview]:
+    """Return the rounded body and the material the fillet would remove."""
+    limit = common_fillet_radius(document, targets, radius)
+    if limit is None:
+        return None
+    radius = limit
+    preview = _clone_preview(document)
+    if not _apply_fillets(preview, targets, radius):
+        return None
+    before = {}
+    frames = {}
+    # Resolve every feature before touching the preview so the ghost is the
+    # difference between the untouched body and all fillets at once.
+    for target in targets:
+        if target.feature.id in before:
+            continue
+        sketch = document.sketch(target.feature.sketch_id)
+        if sketch is None:
+            continue
+        frame = sketch.frame()
+        frames[target.feature.id] = frame
+        before[target.feature.id] = feature_stack(
+            document, target.feature, frame
+        )
+    ghost: list[Face] = []
+    for feature_id, before_stack in before.items():
+        copy_feature = next(
+            candidate for candidate in preview.features
+            if candidate.id == feature_id
+        )
+        after_stack = feature_stack(
+            preview, copy_feature, frames[feature_id]
+        )
+        removed = (
+            combine_stacks(before_stack, after_stack, "cut")
+            if before_stack and after_stack else []
+        )
+        if removed:
+            ghost.extend(stacked_faces(removed, frames[feature_id])[0])
+    # Selected edges keep their order, so the last target is the primary one
+    # the radius arrow points at.
+    primary = targets[-1]
+    primary_frame = document.sketch(primary.feature.sketch_id)
+    normal = (
+        primary_frame.frame().normal if primary_frame is not None
+        else (0.0, 0.0, 1.0)
     )
     handle = _fillet_handle(
         edge_for_ref(document, document.selected_edge),
-        kind,
-        frame.normal,
+        primary.kind,
+        normal,
         radius,
     )
     # The user is seeing the result, not the old edge, so no stale selection
     # highlight may cover the preview.
-    preview.selected_edge = None
-    preview.selected_face = None
-    start, end, normal = handle if handle is not None else (
-        None, None, frame.normal,
+    preview.selected_edges = []
+    preview.selected_faces = []
+    start, end, direction = handle if handle is not None else (
+        None, None, normal,
     )
     return FilletPreview(
-        preview, ghost_faces, start, end, normal, radius, limit,
+        preview, tuple(ghost), start, end, direction, radius, limit,
     )
 
 

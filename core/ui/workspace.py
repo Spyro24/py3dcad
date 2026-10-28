@@ -407,6 +407,16 @@ class Workspace:
             return None
         return self.fillet_window.radius()
 
+    @staticmethod
+    def _fillet_label(document: Document) -> str:
+        """Describe how many edges the fillet panel will act on."""
+        count = len(document.selected_edges)
+        if count == 0:
+            return "No edge selected"
+        if count == 1:
+            return "Edge selected"
+        return f"{count} edges selected"
+
     def open_extrude(self, document: Document) -> bool:
         """Open the extrude property panel for the current sketch selection."""
         sketch = document.sketch(document.active_sketch_id)
@@ -709,9 +719,7 @@ class Workspace:
                 self.extrude_window.close()
             self.create_sketch_window.draw(surface, layout.viewport)
             self.fillet_window.set_edge_label(
-                "Edge selected"
-                if document.selected_edge is not None
-                else "No edge selected"
+                self._fillet_label(document)
             )
             self.fillet_window.draw(surface, layout.viewport)
         self._draw_line_menu(surface, layout.toolbar, document)
@@ -5430,9 +5438,7 @@ class Workspace:
             self.create_sketch_window.close()
             self.fillet_window.open(
                 self.FILLET_RADIUS,
-                "Edge selected"
-                if document.selected_edge is not None
-                else "No edge selected",
+                self._fillet_label(document),
             )
         elif action == "measure":
             self._activate_measure_tool("auto", document)

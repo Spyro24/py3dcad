@@ -2,7 +2,7 @@
 
 import copy
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from .booleans import OPERATION_LABELS, fillet_slices_body
 from .document import Document
@@ -1151,6 +1151,47 @@ class AddFilletCommand(Command):
             if entry is not self.fillet
         ]
         self.document.dirty = True
+
+
+class CompositeCommand(Command):
+    """Run several edits as a single undoable action."""
+
+    def __init__(
+        self,
+        commands: Sequence[Command],
+        label: Optional[str] = None,
+    ) -> None:
+        self.commands = list(commands)
+        self._label = label
+
+    @property
+    def kind(self) -> str:
+        return self.commands[0].kind if self.commands else "action"
+
+    @property
+    def label(self) -> str:
+        if self._label is not None:
+            return self._label
+        if len(self.commands) == 1:
+            return self.commands[0].label
+        return f"{self.kind.title()} ({len(self.commands)} changes)"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        ids = {command.sketch_id for command in self.commands}
+        return ids.pop() if len(ids) == 1 else None
+
+    @property
+    def timeline_visible(self) -> bool:
+        return any(command.timeline_visible for command in self.commands)
+
+    def do(self) -> None:
+        for command in self.commands:
+            command.do()
+
+    def undo(self) -> None:
+        for command in reversed(self.commands):
+            command.undo()
 
 
 class CommandStack:

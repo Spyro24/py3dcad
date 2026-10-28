@@ -621,6 +621,7 @@ class SceneRenderer:
             active is not None and active.is_custom_plane
         )
         selected: List[Tuple[List[Point2], List[List[Point2]]]] = []
+        selected_faces = set(document.selected_faces)
         # Silhouette edges travel with the front panel they belong to.  A face
         # nearer to the camera is painted afterwards, so it hides a silhouette
         # that lies behind it, such as the wall of a concave notch covered by
@@ -670,16 +671,17 @@ class SceneRenderer:
             )
             if (
                 show_highlight
-                and (feature_id, face_index) == document.selected_face
+                and (feature_id, face_index) in selected_faces
             ):
                 selected.append((polygon, holes))
 
         if selected:
             self._draw_face_selection(surface, rect, selected)
         if show_highlight:
-            edge = edge_for_ref(document, document.selected_edge)
-            if edge is not None:
-                self._draw_edge_selection(surface, rect, camera, edge)
+            for reference in document.selected_edges:
+                edge = edge_for_ref(document, reference)
+                if edge is not None:
+                    self._draw_edge_selection(surface, rect, camera, edge)
 
     def _draw_ghost_solids(
         self,

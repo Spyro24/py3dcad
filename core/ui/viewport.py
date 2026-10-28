@@ -221,18 +221,33 @@ class Viewport:
                 )
         else:
             status = document.name
-            if document.selected_edge is not None:
+            edge_count = len(document.selected_edges)
+            face_count = len(document.selected_faces)
+            if edge_count > 1:
+                hint = (
+                    f"{edge_count} edges selected"
+                    "  ·  Ctrl+click to add or remove"
+                )
+            elif document.selected_edge is not None:
                 edge = edge_for_ref(document, document.selected_edge)
                 label = edge.label if edge is not None else "Edge"
                 hint = (
                     f"{label} selected"
+                    "  ·  Ctrl+click to add more"
                     "  ·  click empty space to deselect"
+                )
+            elif face_count > 1:
+                hint = (
+                    f"{face_count} faces selected"
+                    "  ·  Ctrl+click to add or remove"
+                    "  ·  S to sketch on the last face"
                 )
             elif document.selected_face is not None:
                 face = face_for_ref(document, document.selected_face)
                 label = face.label if face is not None else "Face"
                 hint = (
                     f"{label} selected"
+                    "  ·  Ctrl+click to add more"
                     "  ·  S to sketch  ·  click empty space to deselect"
                 )
             elif document.selected_plane is None:
@@ -268,6 +283,15 @@ class Viewport:
             return True
         return bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
 
+    @staticmethod
+    def _additive_held(event: pygame.event.Event) -> bool:
+        """Return whether a click should add to the current selection."""
+        modifiers = getattr(event, "mod", 0) | pygame.key.get_mods()
+        return bool(
+            modifiers
+            & (pygame.KMOD_CTRL | pygame.KMOD_META | pygame.KMOD_SHIFT)
+        )
+
     def handle_event(
         self,
         event: pygame.event.Event,
@@ -300,25 +324,24 @@ class Viewport:
                             (round(world[0]), round(world[1]))
                         )
                     return True
+                additive = self._additive_held(event)
                 edge_hit = self.renderer.pick_edge(
                     event.pos, region.rect, document, self.camera
                 )
                 if edge_hit is not None:
                     feature_id, edge_index, _ = edge_hit
-                    document.selected_edge = (feature_id, edge_index)
-                    document.selected_face = None
-                    document.selected_plane = None
-                    document.active_sketch_id = None
+                    document.select_edge(
+                        (feature_id, edge_index), additive
+                    )
                     return True
                 face_hit = self.renderer.pick_face(
                     event.pos, region.rect, document, self.camera
                 )
                 if face_hit is not None:
                     feature_id, face_index, _ = face_hit
-                    document.selected_face = (feature_id, face_index)
-                    document.selected_edge = None
-                    document.selected_plane = None
-                    document.active_sketch_id = None
+                    document.select_face(
+                        (feature_id, face_index), additive
+                    )
                     return True
                 plane = None
                 if self.show_origin:
@@ -326,14 +349,11 @@ class Viewport:
                         event.pos, region.rect, self.camera
                     )
                 if plane is not None:
-                    document.selected_face = None
-                    document.selected_edge = None
+                    document.clear_selection()
                     document.selected_plane = plane
                     document.active_sketch_id = None
                     return True
-                document.selected_face = None
-                document.selected_edge = None
-                document.selected_plane = None
+                document.clear_selection()
                 return False
 
         if event.type == pygame.MOUSEBUTTONUP and event.button == 2:

@@ -8,6 +8,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from .sketch import Extrude, Sketch, normalize_plane
 
 
+def _update_refs(
+    references: List[Tuple[int, int]],
+    reference: Tuple[int, int],
+    additive: bool,
+) -> List[Tuple[int, int]]:
+    """Return the selection after a click, toggling when it is additive."""
+    if not additive:
+        return [reference]
+    if reference in references:
+        return [item for item in references if item != reference]
+    return [*references, reference]
+
+
 @dataclass
 class Document:
     """An editable in-memory document; saving is optional and never required."""
@@ -21,12 +34,60 @@ class Document:
     next_id: int = 1
     active_sketch_id: Optional[int] = None
     selected_plane: Optional[str] = None
-    selected_face: Optional[Tuple[int, int]] = None
-    selected_edge: Optional[Tuple[int, int]] = None
+    # The full multi-selection.  ``selected_face``/``selected_edge`` expose
+    # the primary (most recently added) reference for single-target tools.
+    selected_faces: List[Tuple[int, int]] = field(default_factory=list)
+    selected_edges: List[Tuple[int, int]] = field(default_factory=list)
 
     @property
     def saved(self) -> bool:
         return self.path is not None
+
+    @property
+    def selected_face(self) -> Optional[Tuple[int, int]]:
+        """Return the most recently selected face, if any."""
+        return self.selected_faces[-1] if self.selected_faces else None
+
+    @selected_face.setter
+    def selected_face(self, reference: Optional[Tuple[int, int]]) -> None:
+        self.selected_faces = [] if reference is None else [reference]
+
+    @property
+    def selected_edge(self) -> Optional[Tuple[int, int]]:
+        """Return the most recently selected edge, if any."""
+        return self.selected_edges[-1] if self.selected_edges else None
+
+    @selected_edge.setter
+    def selected_edge(self, reference: Optional[Tuple[int, int]]) -> None:
+        self.selected_edges = [] if reference is None else [reference]
+
+    def select_face(
+        self, reference: Tuple[int, int], additive: bool = False
+    ) -> None:
+        """Select a solid face, optionally adding to the current selection."""
+        self.selected_faces = _update_refs(
+            self.selected_faces, reference, additive
+        )
+        self.selected_edges = []
+        self.selected_plane = None
+        self.active_sketch_id = None
+
+    def select_edge(
+        self, reference: Tuple[int, int], additive: bool = False
+    ) -> None:
+        """Select a solid edge, optionally adding to the current selection."""
+        self.selected_edges = _update_refs(
+            self.selected_edges, reference, additive
+        )
+        self.selected_faces = []
+        self.selected_plane = None
+        self.active_sketch_id = None
+
+    def clear_selection(self) -> None:
+        """Drop every viewport selection."""
+        self.selected_faces = []
+        self.selected_edges = []
+        self.selected_plane = None
 
     def new_id(self) -> int:
         value = self.next_id
