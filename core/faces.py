@@ -3850,6 +3850,9 @@ def iter_solid_faces(
         face_index = 0
         if feature.slices:
             faces, runs = _stacked_feature_faces(feature, sketch.frame())
+            faces = _contact_marked_faces(
+                feature, faces, sketch.frame().normal
+            )
             groups = _face_groups(faces, runs)
             for face, group in zip(faces, groups):
                 yield feature.id, face_index + group, face
@@ -3859,6 +3862,7 @@ def iter_solid_faces(
             continue
         cuts = feature.resolve_cuts(sketch)
         frame = _offset_frame(sketch.frame(), feature.start)
+        pending: List[Tuple[int, Face]] = []
         for outer, holes in build_regions(profiles, cuts):
             rounded_outer, rounded_holes, base_radii, end_radii = (
                 _fillet_profile(
@@ -3873,9 +3877,40 @@ def iter_solid_faces(
                 (base_radii, end_radii),
             )
             groups = _face_groups(faces, runs)
-            for face, group in zip(faces, groups):
-                yield feature.id, face_index + group, face
+            pending.extend(
+                (face_index + group, face)
+                for face, group in zip(faces, groups)
+            )
             face_index += max(groups, default=-1) + 1
+        marked = _contact_marked_faces(
+            feature, [face for _, face in pending], sketch.frame().normal
+        )
+        for (group, _), face in zip(pending, marked):
+            yield feature.id, group, face
+
+
+def _contact_marked_faces(
+    feature: "Extrude", faces: Sequence[Face], axis: Point3
+) -> List[Face]:
+    """Return cached faces with tangent contact seams marked sharp."""
+    cached = getattr(feature, "_contact_face_cache", None)
+    if cached is not None:
+        source, signature, marked = cached
+        if source is faces:
+            return marked
+        if signature == _face_signature(faces):
+            return marked
+    marked = _mark_contact_seams(faces, axis)
+    feature._contact_face_cache = (faces, _face_signature(faces), marked)
+    return marked
+
+
+def _face_signature(faces: Sequence[Face]) -> Tuple[object, ...]:
+    """Return a hashable snapshot used to validate the seam cache."""
+    return tuple(
+        (face.vertices, face.normal, face.sharp_edges, face.holes)
+        for face in faces
+    )
 
 
 def _face_groups(
@@ -4056,6 +4091,7 @@ def iter_solid_edges(
 
     Coincident edges shared by adjacent faces are merged.  Smooth
     tessellation seams are skipped so curved surfaces offer no fake edges.
+    Tangent contact seams are already marked sharp while the faces are built.
     """
     feature_id: Optional[int] = None
     collected: Dict[
@@ -4108,6 +4144,185 @@ def _collect_face_edges(
                 hole[(index + 1) % hole_count],
                 face.normal,
             )
+
+
+def _collect_smooth_face_edges(
+    face: Face,
+    smooth: Dict[
+        Tuple[Tuple[float, ...], Tuple[float, ...]],
+        Tuple[Point3, Point3, Set[int]],
+    ],
+    owner: int,
+) -> None:
+    """Collect one face's non-sharp edges as seam candidates."""
+    sharp = face.sharp_edges
+    if sharp is None:
+        return
+    count = len(face.vertices)
+    for index in range(count):
+        if index >= len(sharp) or sharp[index]:
+            continue
+        start = face.vertices[index]
+        end = face.vertices[(index + 1) % count]
+        key = _edge_key(start, end)
+        entry = smooth.get(key)
+        if entry is None:
+            smooth[key] = (start, end, {owner})
+        else:
+            entry[2].add(owner)
+
+
+def _mark_contact_seams(
+    faces: Sequence[Face], axis: Point3
+) -> List[Face]:
+    """Return faces with tangent contact seams marked as sharp edges.
+
+    Two solids can touch tangentially: their surfaces are continuous, so the
+    shared line is neither a sharp crease nor a plain tessellation seam.  It
+    still bounds both bodies, so it must render, select and project as a real
+    edge.  A smooth seam qualifies when it runs along the extrusion axis and
+    its midpoint lies inside another face that does not own the seam.
+    """
+    contacts = _contact_seam_keys(faces, axis)
+    if not contacts:
+        return list(faces)
+    return _mark_sharp_edges(faces, contacts)
+
+
+def _contact_seam_keys(
+    faces: Sequence[Face], axis: Point3
+) -> Set[Tuple[Tuple[float, ...], Tuple[float, ...]]]:
+    """Return the keys of smooth seams that are tangent contact edges."""
+    if len(faces) < 2:
+        return set()
+    smooth: Dict[
+        Tuple[Tuple[float, ...], Tuple[float, ...]],
+        Tuple[Point3, Point3, Set[int]],
+    ] = {}
+    for owner, face in enumerate(faces):
+        _collect_smooth_face_edges(face, smooth, owner)
+    if not smooth:
+        return set()
+    axis = _unit(axis)
+    planes = [_face_plane(face) for face in faces]
+    bounds = [_face_bounds(face) for face in faces]
+    contacts: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]] = set()
+    for key, (start, end, owners) in smooth.items():
+        direction = _unit(_subtract(end, start))
+        if abs(_dot(direction, axis)) < 0.999:
+            continue
+        midpoint = (
+            (start[0] + end[0]) * 0.5,
+            (start[1] + end[1]) * 0.5,
+            (start[2] + end[2]) * 0.5,
+        )
+        for index, (face, (normal, offset), box) in enumerate(
+            zip(faces, planes, bounds)
+        ):
+            if index in owners:
+                continue
+            if not _point_in_bounds(midpoint, box):
+                continue
+            if abs(_dot(normal, midpoint) - offset) > 1e-5:
+                continue
+            if _point_in_face(midpoint, face):
+                contacts.add(key)
+                break
+    return contacts
+
+
+def _mark_sharp_edges(
+    faces: Sequence[Face],
+    contacts: Set[Tuple[Tuple[float, ...], Tuple[float, ...]]],
+) -> List[Face]:
+    """Return faces with the given seam keys flagged as sharp edges."""
+    marked: List[Face] = []
+    for face in faces:
+        sharp = face.sharp_edges
+        if sharp is None:
+            marked.append(face)
+            continue
+        flags = list(sharp)
+        count = len(face.vertices)
+        changed = False
+        for index in range(count):
+            if index < len(flags) and flags[index]:
+                continue
+            key = _edge_key(
+                face.vertices[index],
+                face.vertices[(index + 1) % count],
+            )
+            if key in contacts:
+                flags[index] = True
+                changed = True
+        marked.append(
+            replace(face, sharp_edges=tuple(flags)) if changed else face
+        )
+    return marked
+
+
+def _face_plane(face: Face) -> Tuple[Point3, float]:
+    """Return a face's unit normal and plane offset."""
+    normal = _unit(face.normal)
+    if _length(normal) < 0.5:
+        normal = _unit(_polygon_normal(face.vertices))
+    return normal, _dot(normal, face.vertices[0])
+
+
+def _face_bounds(face: Face) -> Tuple[float, ...]:
+    """Return the axis-aligned bounding box of a face."""
+    xs = [vertex[0] for vertex in face.vertices]
+    ys = [vertex[1] for vertex in face.vertices]
+    zs = [vertex[2] for vertex in face.vertices]
+    return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+
+
+def _point_in_bounds(point: Point3, box: Tuple[float, ...]) -> bool:
+    """Return whether a point is inside an axis-aligned bounding box."""
+    tolerance = 1e-5
+    return (
+        box[0] - tolerance <= point[0] <= box[3] + tolerance
+        and box[1] - tolerance <= point[1] <= box[4] + tolerance
+        and box[2] - tolerance <= point[2] <= box[5] + tolerance
+    )
+
+
+def _point_in_face(point: Point3, face: Face) -> bool:
+    """Return whether a point lies on a face, outside any hole."""
+    frame = face.to_plane_frame()
+    local = _face_local(point, frame)
+    outer = [_face_local(vertex, frame) for vertex in face.vertices]
+    if not _point_in_polygon(local, outer):
+        return False
+    return not any(
+        _point_in_polygon(
+            local, [_face_local(vertex, frame) for vertex in hole]
+        )
+        for hole in face.holes
+    )
+
+
+def _face_local(point: Point3, frame: PlaneFrame) -> Point2:
+    """Return a world point in the face's local plane coordinates."""
+    offset = _subtract(point, frame.origin)
+    return (_dot(offset, frame.u), _dot(offset, frame.v))
+
+
+def _point_in_polygon(
+    point: Point2, polygon: Sequence[Point2]
+) -> bool:
+    """Return whether a 2D point lies inside a polygon (ray casting)."""
+    x, y = point
+    inside = False
+    count = len(polygon)
+    for index in range(count):
+        x1, y1 = polygon[index]
+        x2, y2 = polygon[(index + 1) % count]
+        if (y1 > y) != (y2 > y):
+            crossing = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+            if x < crossing:
+                inside = not inside
+    return inside
 
 
 def _add_edge(
