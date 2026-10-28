@@ -97,6 +97,12 @@ class Document:
     def sketch(self, sketch_id: Optional[int]) -> Optional[Sketch]:
         return next((s for s in self.sketches if s.id == sketch_id), None)
 
+    def refresh_projections(self) -> None:
+        """Move projected sketch geometry to its current solid sources."""
+        from .projection import refresh_document_projections
+
+        refresh_document_projections(self)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
@@ -110,6 +116,7 @@ class Document:
 
     def save(self, path: str) -> None:
         """Write the document as versioned JSON and adopt the file's name."""
+        self.refresh_projections()
         target = Path(path).expanduser()
         if target.suffix.lower() != ".py3dcad":
             target = target.with_suffix(".py3dcad")

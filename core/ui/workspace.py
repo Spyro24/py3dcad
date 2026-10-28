@@ -125,6 +125,7 @@ class Workspace:
         "rectangle": "Rectangle",
         "circle": "Circle",
         "point": "Point",
+        "project": "Project",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
         "fillet": "Fillet",
@@ -139,7 +140,8 @@ class Workspace:
     FILLET_RADIUS = 2.0
     SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
     SKETCH_INTERACTIVE_ACTIONS = (
-        "line", "rectangle", "circle", "point", *SKETCH_CONSTRAINT_ACTIONS
+        "line", "rectangle", "circle", "point", "project",
+        *SKETCH_CONSTRAINT_ACTIONS
     )
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
     ACTIVE_MODE = "SOLID"
@@ -158,6 +160,7 @@ class Workspace:
             ("polygon", "Polygon", True),
             ("spline", "Spline", True),
             ("point", "Point", False),
+            ("project", "Project", False),
         )),
         ("MODIFY", (
             ("fillet", None, False),
@@ -186,7 +189,7 @@ class Workspace:
         )),
     )
     ACTIVE_SKETCH_TOOLS = (
-        "line", "rectangle", "point", "measure", "finish_sketch"
+        "line", "rectangle", "point", "project", "measure", "finish_sketch"
     )
     LINE_MENU_ITEMS = (
         ("normal", "Line"),
@@ -242,6 +245,12 @@ class Workspace:
         on_delete_sketch: Optional[
             Callable[[Optional[Tuple[str, int]], List[List[int]]], bool]
         ] = None,
+        on_project_point: Optional[
+            Callable[[int, Tuple[float, float, float]], None]
+        ] = None,
+        on_project_edge: Optional[
+            Callable[[int, int], None]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -264,6 +273,8 @@ class Workspace:
         self.on_set_measurement_value = on_set_measurement_value
         self.on_fillet = on_fillet
         self.on_delete_sketch = on_delete_sketch
+        self.on_project_point = on_project_point
+        self.on_project_edge = on_project_edge
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -1446,7 +1457,7 @@ class Workspace:
                         return True
                     continue
                 if item.action not in (
-                    "line", "rectangle", "circle", "point"
+                    "line", "rectangle", "circle", "point", "project"
                 ):
                     continue
                 if item.action == "line":
@@ -4999,6 +5010,11 @@ class Workspace:
         ):
             sketch = document.sketch(document.active_sketch_id)
             if sketch is not None:
+                if self._selected_tool == "project":
+                    self._project_at(
+                        event.pos, layout.viewport, document
+                    )
+                    return True
                 if self._selected_tool == "rectangle":
                     point = self._rectangle_corner(
                         event.pos, layout.viewport, sketch
@@ -5095,9 +5111,10 @@ class Workspace:
                             if not mods:
                                 mods = pygame.key.get_mods()
                             self._select_sketch_region(region_hit, mods)
-                            self._drag_point_index = index
-                            self._drag_point_origin = sketch.points[index]
-                            self._drag_point_current = sketch.points[index]
+                            if not sketch.is_projected_point(index):
+                                self._drag_point_index = index
+                                self._drag_point_origin = sketch.points[index]
+                                self._drag_point_current = sketch.points[index]
                             return True
                         self._clear_sketch_selection()
                         self._selected_sketch_entity = hit
@@ -5110,10 +5127,11 @@ class Workspace:
                             self._apply_constraint_tool(document)
                             return True
                         if kind == "point":
-                            self._drag_point_index = index
-                            self._drag_point_origin = sketch.points[index]
-                            self._drag_point_current = sketch.points[index]
-                        else:
+                            if not sketch.is_projected_point(index):
+                                self._drag_point_index = index
+                                self._drag_point_origin = sketch.points[index]
+                                self._drag_point_current = sketch.points[index]
+                        elif not sketch.is_projected_edge(index):
                             self._start_edge_drag(
                                 index, sketch, event.pos, layout.viewport
                             )
@@ -5428,6 +5446,25 @@ class Workspace:
         if sketch.points[index] == current:
             return
         self.on_move_point(index, current)
+
+    def _project_at(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> None:
+        """Project a solid vertex or edge under the cursor into the sketch."""
+        renderer = self.viewport.renderer
+        vertex = renderer.pick_vertex(
+            pos, region.rect, document, self.viewport.camera
+        )
+        if vertex is not None and self.on_project_point is not None:
+            self._clear_sketch_selection()
+            self.on_project_point(vertex[0], vertex[1])
+            return
+        edge = renderer.pick_edge(
+            pos, region.rect, document, self.viewport.camera
+        )
+        if edge is not None and self.on_project_edge is not None:
+            self._clear_sketch_selection()
+            self.on_project_edge(edge[0], edge[1])
 
     def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":

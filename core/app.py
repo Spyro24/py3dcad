@@ -14,6 +14,7 @@ from .commands import (
     AddLineCommand,
     AddMeasurementCommand,
     AddPointCommand,
+    AddProjectionCommand,
     AddRectangleCommand,
     AddSketchCommand,
     BooleanExtrudeCommand,
@@ -262,6 +263,8 @@ class Application:
             on_add_line=self.add_line,
             on_add_circle=self.add_circle,
             on_add_rectangle=self.add_rectangle,
+            on_project_point=self.project_point,
+            on_project_edge=self.project_edge,
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
@@ -549,6 +552,45 @@ class Application:
             AddRectangleCommand(document, sketch, first, opposite)
         )
 
+    def project_point(
+        self, feature_id: int, point: Tuple[float, float, float]
+    ) -> None:
+        """Project one solid vertex into the active sketch."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        document.refresh_projections()
+        command = AddProjectionCommand(
+            document, sketch, feature_id, points=[point]
+        )
+        if command.has_targets:
+            stack.execute(command)
+
+    def project_edge(self, feature_id: int, edge_index: int) -> None:
+        """Project one solid edge (including smooth runs) into the sketch."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        edge = edge_for_ref(document, (feature_id, edge_index))
+        if edge is None:
+            return
+        document.refresh_projections()
+        command = AddProjectionCommand(
+            document, sketch, feature_id, chains=[edge.chain]
+        )
+        if command.has_targets:
+            stack.execute(command)
+
     def add_circle(self, center: Point, diameter: float) -> None:
         self._playing = False
         document = self.active_document()
@@ -593,6 +635,8 @@ class Application:
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or not 0 <= index < len(sketch.points):
             return
+        if sketch.is_projected_point(index):
+            return
         if sketch.points[index] == point:
             return
         stack.execute(MovePointCommand(document, sketch, index, point))
@@ -607,6 +651,8 @@ class Application:
             return
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or not 0 <= index < len(sketch.edges):
+            return
+        if sketch.is_projected_edge(index):
             return
         first, second = sketch.edges[index]
         if (
@@ -633,6 +679,8 @@ class Application:
             return
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or not 0 <= index < len(sketch.edges):
+            return
+        if sketch.is_projected_edge(index):
             return
         if constraint not in ("horizontal", "vertical"):
             return
@@ -676,8 +724,12 @@ class Application:
             if entity_kind == "point":
                 if not 0 <= index < len(sketch.points):
                     return
+                if sketch.is_projected_point(index):
+                    return
             elif entity_kind == "line":
                 if not 0 <= index < len(sketch.edges):
+                    return
+                if sketch.is_projected_edge(index):
                     return
             else:
                 return
@@ -757,6 +809,7 @@ class Application:
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
             return "Open a sketch to extrude"
+        document.refresh_projections()
         if abs(height) <= 1e-9:
             return "Enter a distance greater than zero"
         if abs(taper) > 1e-9:
@@ -1287,6 +1340,7 @@ class Application:
 
         document = self.active_document()
         if document is not None:
+            document.refresh_projections()
             stack = self._active_stack()
             full_history = self._history_entries(stack)
             filtered_history = [

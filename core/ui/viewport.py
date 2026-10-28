@@ -170,6 +170,10 @@ class Viewport:
                     "circle" if len(active.circles) == 1 else "circles"
                 )
                 status += f"  ·  {len(active.circles)} {circle_word}"
+            if active.projected_points:
+                status += (
+                    f"  ·  {len(active.projected_points)} projected"
+                )
             profile_count = len(active.closed_loops())
             if active_tool == "extrude":
                 hint = (
@@ -187,6 +191,11 @@ class Viewport:
                 hint = (
                     "Click the centre, then a point on the circle"
                     "  ·  Esc to deselect"
+                )
+            elif active_tool == "project":
+                hint = (
+                    "Click a solid edge or vertex to project it into the"
+                    " sketch  ·  Esc to deselect"
                 )
             elif active_tool != "point":
                 if profile_count == 0:

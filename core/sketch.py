@@ -283,6 +283,137 @@ class Measurement:
         )
 
 
+@dataclass(frozen=True)
+class ProjectionSource:
+    """Where a projected sketch entity comes from on the solid.
+
+    The source keeps the feature, the position in that feature's sketch
+    frame (``u``/``v``), and how far along the body height it sits
+    (``z_fraction``).  When the feature's sketch or height changes, the
+    projected entity is rebuilt from these values.  ``bind`` optionally ties
+    a coordinate to a live sketch point, edge or circle so moving the source
+    profile moves the projection with it.
+    """
+
+    feature_id: int
+    u: float
+    v: float
+    z_fraction: float
+    bind: str = "world"
+    index: int = -1
+    t: float = 0.0
+
+    def key(self) -> Tuple[object, ...]:
+        """Return a stable identity for sharing endpoints between edges."""
+        return (
+            self.feature_id,
+            round(self.u, 6),
+            round(self.v, 6),
+            round(self.z_fraction, 6),
+            self.bind,
+            self.index,
+            round(self.t, 6),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "feature": self.feature_id,
+            "u": self.u,
+            "v": self.v,
+            "z": self.z_fraction,
+            "bind": self.bind,
+            "index": self.index,
+            "t": self.t,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["ProjectionSource"]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            feature_id = int(data.get("feature", -1))
+            u = float(data.get("u", 0.0))
+            v = float(data.get("v", 0.0))
+            z_fraction = float(data.get("z", 0.0))
+            index = int(data.get("index", -1))
+            t = float(data.get("t", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if not all(
+            math.isfinite(value) for value in (u, v, z_fraction, t)
+        ):
+            return None
+        bind = str(data.get("bind", "world"))
+        if bind not in ("world", "point", "edge", "circle"):
+            bind = "world"
+        return cls(
+            feature_id,
+            u,
+            v,
+            min(1.0, max(0.0, z_fraction)),
+            bind,
+            index,
+            t,
+        )
+
+
+@dataclass(frozen=True)
+class ProjectedPoint:
+    """A sketch point whose position follows one solid vertex."""
+
+    point: int
+    source: ProjectionSource
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"point": self.point, "source": self.source.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["ProjectedPoint"]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            point = int(data.get("point", -1))
+        except (TypeError, ValueError):
+            return None
+        source = ProjectionSource.from_dict(data.get("source"))
+        if point < 0 or source is None:
+            return None
+        return cls(point, source)
+
+
+@dataclass(frozen=True)
+class ProjectedEdge:
+    """A sketch edge whose endpoints follow a solid edge."""
+
+    edge: int
+    feature_id: int
+    start: ProjectionSource
+    end: ProjectionSource
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "edge": self.edge,
+            "feature": self.feature_id,
+            "start": self.start.to_dict(),
+            "end": self.end.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["ProjectedEdge"]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            edge = int(data.get("edge", -1))
+            feature_id = int(data.get("feature", -1))
+        except (TypeError, ValueError):
+            return None
+        start = ProjectionSource.from_dict(data.get("start"))
+        end = ProjectionSource.from_dict(data.get("end"))
+        if edge < 0 or feature_id < 0 or start is None or end is None:
+            return None
+        return cls(edge, feature_id, start, end)
+
+
 @dataclass
 class Sketch:
     """A named set of points on a plane, in millimetres.
@@ -306,6 +437,11 @@ class Sketch:
     edge_constraints: List[Optional[str]] = field(default_factory=list)
     circles: List[Circle] = field(default_factory=list)
     measurements: List[Measurement] = field(default_factory=list)
+    # Projected entities are ordinary points and edges that also remember
+    # the solid vertex/edge they came from.  ``refresh_projections`` moves
+    # them whenever the source geometry changes.
+    projected_points: List[ProjectedPoint] = field(default_factory=list)
+    projected_edges: List[ProjectedEdge] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.points = [point2d(point) for point in self.points]
@@ -396,6 +532,24 @@ class Sketch:
         # Bind circles first so their midpoints exist as regular points
         # before measurement enforcement runs on the point list.
         self.circles = self._bind_circles(circles)
+        self.projected_points = [
+            link
+            for link in (
+                item if isinstance(item, ProjectedPoint)
+                else ProjectedPoint.from_dict(item)
+                for item in self.projected_points
+            )
+            if link is not None and 0 <= link.point < len(self.points)
+        ]
+        self.projected_edges = [
+            link
+            for link in (
+                item if isinstance(item, ProjectedEdge)
+                else ProjectedEdge.from_dict(item)
+                for item in self.projected_edges
+            )
+            if link is not None and 0 <= link.edge < len(self.edges)
+        ]
         # A loaded sketch may predate dimension enforcement.  Make its
         # stored values authoritative immediately, without a command.
         self.enforce_measurements(self.points)
@@ -1399,6 +1553,7 @@ class Sketch:
                     )
                 )
         self.measurements = measurements
+        self._remap_projected_points(index, edge_map)
 
     def remove_edge(self, index: int) -> None:
         """Remove one edge and any measurement that depends on it."""
@@ -1426,6 +1581,52 @@ class Sketch:
                     )
                 )
         self.measurements = measurements
+        self._shift_projected_edges(index)
+
+    def _remap_projected_points(
+        self, removed_point: int, edge_map: Dict[int, int]
+    ) -> None:
+        """Keep projection links valid after a point is removed."""
+        links: List[ProjectedPoint] = []
+        for link in self.projected_points:
+            if link.point == removed_point:
+                continue
+            index = link.point - 1 if link.point > removed_point else link.point
+            links.append(ProjectedPoint(index, link.source))
+        self.projected_points = links
+        self._remap_projected_edges(edge_map)
+
+    def _remap_projected_edges(
+        self, edge_map: Dict[int, int]
+    ) -> None:
+        edges: List[ProjectedEdge] = []
+        for link in self.projected_edges:
+            mapped = edge_map.get(link.edge)
+            if mapped is not None:
+                edges.append(ProjectedEdge(
+                    mapped, link.feature_id, link.start, link.end
+                ))
+        self.projected_edges = edges
+
+    def _shift_projected_edges(self, removed: int) -> None:
+        """Drop a deleted projected edge and shift later links down."""
+        edges: List[ProjectedEdge] = []
+        for link in self.projected_edges:
+            if link.edge == removed:
+                continue
+            index = link.edge - 1 if link.edge > removed else link.edge
+            edges.append(ProjectedEdge(
+                index, link.feature_id, link.start, link.end
+            ))
+        self.projected_edges = edges
+
+    def is_projected_point(self, index: int) -> bool:
+        """Return whether a sketch point follows solid geometry."""
+        return any(link.point == index for link in self.projected_points)
+
+    def is_projected_edge(self, index: int) -> bool:
+        """Return whether a sketch edge follows solid geometry."""
+        return any(link.edge == index for link in self.projected_edges)
 
     @staticmethod
     def _remap_removed_edge_ref(
@@ -1529,6 +1730,12 @@ class Sketch:
             "measurements": [
                 measurement.to_dict()
                 for measurement in self.measurements
+            ],
+            "projected_points": [
+                link.to_dict() for link in self.projected_points
+            ],
+            "projected_edges": [
+                link.to_dict() for link in self.projected_edges
             ],
             "line_type": self.line_type,
             # Kept for older readers; edges are the source of truth.
@@ -1645,6 +1852,20 @@ class Sketch:
                 measurement = Measurement.from_dict(raw)
                 if measurement is not None:
                     measurements.append(measurement)
+        projected_points: List[ProjectedPoint] = []
+        raw_projected_points = data.get("projected_points", [])
+        if isinstance(raw_projected_points, (list, tuple)):
+            for raw in raw_projected_points:
+                link = ProjectedPoint.from_dict(raw)
+                if link is not None:
+                    projected_points.append(link)
+        projected_edges: List[ProjectedEdge] = []
+        raw_projected_edges = data.get("projected_edges", [])
+        if isinstance(raw_projected_edges, (list, tuple)):
+            for raw in raw_projected_edges:
+                link = ProjectedEdge.from_dict(raw)
+                if link is not None:
+                    projected_edges.append(link)
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Sketch")),
@@ -1660,6 +1881,8 @@ class Sketch:
             edge_constraints=constraints[:len(edges)],
             circles=circles,
             measurements=measurements,
+            projected_points=projected_points,
+            projected_edges=projected_edges,
         )
 
     @staticmethod

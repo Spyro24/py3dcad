@@ -13,6 +13,10 @@ from .sketch import (
     Measurement,
     PlaneFrame,
     Point,
+    Point3,
+    ProjectedEdge,
+    ProjectedPoint,
+    ProjectionSource,
     Sketch,
     aligned_edge_endpoint,
     normalize_edge_constraint,
@@ -20,6 +24,7 @@ from .sketch import (
     normalize_measurement_value,
     normalize_plane,
 )
+from .projection import projected_point, projected_segments
 from .solver.objects import circle2d, point2d
 
 
@@ -738,6 +743,172 @@ class AddRectangleCommand(Command):
         self.document.dirty = True
 
 
+class AddProjectionCommand(Command):
+    """Project solid points or edges into a sketch as linked geometry."""
+
+    kind = "project"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        feature_id: int,
+        points: Sequence[Point3] = (),
+        chains: Sequence[Sequence[Point3]] = (),
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.feature_id = feature_id
+        self.points = [tuple(map(float, point)) for point in points]
+        self.chains = [
+            [tuple(map(float, point)) for point in chain]
+            for chain in chains
+        ]
+        self._before = None
+        self._plan_points, self._plan_segments = self._build_plan()
+
+    def _add_planned(
+        self,
+        source: ProjectionSource,
+        local: Point,
+        points: List[Tuple[ProjectionSource, Point]],
+        seen: set,
+    ) -> None:
+        key = source.key()
+        if key in seen:
+            return
+        seen.add(key)
+        points.append((source, local))
+
+    def _build_plan(
+        self,
+    ) -> Tuple[
+        List[Tuple[ProjectionSource, Point]],
+        List[Tuple[ProjectionSource, ProjectionSource]],
+    ]:
+        points: List[Tuple[ProjectionSource, Point]] = []
+        segments: List[Tuple[ProjectionSource, ProjectionSource]] = []
+        seen: set = set()
+        for world in self.points:
+            planned = projected_point(
+                self.document, self.sketch, self.feature_id, world
+            )
+            if planned is not None:
+                self._add_planned(
+                    planned[0], planned[1], points, seen,
+                )
+        for chain in self.chains:
+            chain_points, chain_segments = projected_segments(
+                self.document, self.sketch, self.feature_id, chain
+            )
+            for source, local in chain_points:
+                self._add_planned(source, local, points, seen)
+            segments.extend(chain_segments)
+        return points, segments
+
+    @property
+    def has_targets(self) -> bool:
+        if not self._plan_points:
+            return False
+        existing = {
+            link.source.key() for link in self.sketch.projected_points
+        }
+        if not self._plan_segments:
+            return any(
+                source.key() not in existing
+                for source, _ in self._plan_points
+            )
+        joined = {
+            frozenset((link.start.key(), link.end.key()))
+            for link in self.sketch.projected_edges
+        }
+        return any(
+            frozenset((start.key(), end.key())) not in joined
+            for start, end in self._plan_segments
+        )
+
+    @property
+    def label(self) -> str:
+        count = len(self._plan_segments)
+        if count == 0:
+            return "Project Point"
+        if count == 1:
+            return "Project Edge"
+        return f"Project {count} Edges"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        sketch = self.sketch
+        if self._before is None:
+            self._before = (
+                len(sketch.points),
+                len(sketch.edges),
+                len(sketch.edge_constraints),
+                len(sketch.projected_points),
+                len(sketch.projected_edges),
+            )
+        existing = {
+            link.source.key(): link.point
+            for link in sketch.projected_points
+            if 0 <= link.point < len(sketch.points)
+        }
+        sources = {source.key(): source for source, _ in self._plan_points}
+        for source, local in self._plan_points:
+            key = source.key()
+            if key in existing:
+                continue
+            index = sketch.add_point(local)
+            sketch.projected_points.append(ProjectedPoint(index, source))
+            existing[key] = index
+        joined = {
+            frozenset((link.start.key(), link.end.key()))
+            for link in sketch.projected_edges
+        }
+        for start, end in self._plan_segments:
+            first = existing.get(start.key())
+            second = existing.get(end.key())
+            if first is None or second is None or first == second:
+                continue
+            pair = frozenset((start.key(), end.key()))
+            if pair in joined:
+                continue
+            if (first, second) in sketch.edges or (
+                second, first
+            ) in sketch.edges:
+                continue
+            index = len(sketch.edges)
+            sketch.edges.append((first, second))
+            sketch.edge_constraints.append(None)
+            sketch.projected_edges.append(ProjectedEdge(
+                index, self.feature_id,
+                sources[start.key()], sources[end.key()],
+            ))
+            joined.add(pair)
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self._before is None:
+            return
+        sketch = self.sketch
+        (
+            point_count, edge_count, constraint_count,
+            projected_point_count, projected_edge_count,
+        ) = self._before
+        del sketch.projected_edges[projected_edge_count:]
+        del sketch.projected_points[projected_point_count:]
+        if len(sketch.edges) > edge_count:
+            del sketch.edges[edge_count:]
+        if len(sketch.edge_constraints) > constraint_count:
+            del sketch.edge_constraints[constraint_count:]
+        if len(sketch.points) > point_count:
+            del sketch.points[point_count:]
+        self.document.dirty = True
+
+
 class AddCircleCommand(Command):
     """Add a circle to a sketch."""
 
@@ -938,6 +1109,8 @@ class DeleteSketchEntitiesCommand(Command):
                 self.sketch.edge_constraints,
                 self.sketch.circles,
                 self.sketch.measurements,
+                self.sketch.projected_points,
+                self.sketch.projected_edges,
             ))
         for index in sorted(self.edge_indices, reverse=True):
             self.sketch.remove_edge(index)
@@ -949,13 +1122,16 @@ class DeleteSketchEntitiesCommand(Command):
         if self._before is None:
             return
         (
-            points, edges, constraints, circles, measurements
+            points, edges, constraints, circles, measurements,
+            projected_points, projected_edges,
         ) = copy.deepcopy(self._before)
         self.sketch.points = points
         self.sketch.edges = edges
         self.sketch.edge_constraints = constraints
         self.sketch.circles = circles
         self.sketch.measurements = measurements
+        self.sketch.projected_points = projected_points
+        self.sketch.projected_edges = projected_edges
         self.document.dirty = True
 
 
