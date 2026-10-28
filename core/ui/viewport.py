@@ -162,18 +162,21 @@ class Viewport:
                 f"{active.name}  ·  {active.display_plane}  ·  "
                 f"{len(active.points)} points"
             )
-            if active.lines:
-                line_word = "line" if len(active.lines) == 1 else "lines"
-                status += f"  ·  {len(active.lines)} {line_word}"
+            if active.edges:
+                edge_word = "edge" if len(active.edges) == 1 else "edges"
+                status += f"  ·  {len(active.edges)} {edge_word}"
             if active.circles:
                 circle_word = (
                     "circle" if len(active.circles) == 1 else "circles"
                 )
                 status += f"  ·  {len(active.circles)} {circle_word}"
-            if active.projected_points:
-                status += (
-                    f"  ·  {len(active.projected_points)} projected"
-                )
+            projected = (
+                len(active.projected_points)
+                + len(active.projected_edges)
+                + len(active.projected_circles)
+            )
+            if projected:
+                status += f"  ·  {projected} projected"
             profile_count = len(active.closed_loops())
             if active_tool == "extrude":
                 hint = (
@@ -194,8 +197,8 @@ class Viewport:
                 )
             elif active_tool == "project":
                 hint = (
-                    "Click a solid edge or vertex to project it into the"
-                    " sketch  ·  Esc to deselect"
+                    "Click a solid edge to project its line, arc or circle"
+                    " into the sketch  ·  Esc to deselect"
                 )
             elif active_tool != "point":
                 if profile_count == 0:

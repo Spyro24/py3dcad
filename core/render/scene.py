@@ -389,47 +389,6 @@ class SceneRenderer:
         _, _, feature_id, edge_index, edge = hits[0]
         return feature_id, edge_index, edge
 
-    def pick_vertex(
-        self,
-        pos: Point2,
-        rect: pygame.Rect,
-        document: Document,
-        camera: OrbitCamera,
-    ) -> Optional[Tuple[int, Tuple[float, float, float]]]:
-        """Return the solid vertex nearest to a screen position."""
-        center = rect.center
-        tolerance = float(self._s(8))
-        view = camera.view_direction()
-        hits: List[
-            Tuple[float, float, int, Tuple[float, float, float]]
-        ] = []
-        seen: Set[Tuple[float, ...]] = set()
-        for feature_id, _, edge in iter_solid_edges(document):
-            if not edge_visible(edge, view):
-                continue
-            for vertex in (edge.start, edge.end):
-                key = tuple(round(value, 6) for value in vertex)
-                if key in seen:
-                    continue
-                seen.add(key)
-                screen = camera.project(vertex, center)
-                distance = math.hypot(
-                    pos[0] - screen[0], pos[1] - screen[1]
-                )
-                if distance > tolerance:
-                    continue
-                hits.append((
-                    distance,
-                    -camera.depth((vertex,)),
-                    feature_id,
-                    vertex,
-                ))
-        if not hits:
-            return None
-        hits.sort(key=lambda item: (item[0], item[1]))
-        _, _, feature_id, vertex = hits[0]
-        return feature_id, vertex
-
     @staticmethod
     def _point_segment_distance(
         pos: Point2, start: Point2, end: Point2
@@ -1026,24 +985,27 @@ class SceneRenderer:
                 else self.palette.sketch
             )
             frame = sketch.frame()
-            for index, (start, end) in enumerate(sketch.edges):
+            for index in range(len(sketch.edges)):
                 line_color = (
                     self.palette.projection
                     if sketch.is_projected_edge(index) else color
                 )
-                start_point = camera.project(
-                    point_on_plane(frame, sketch.points[start]), center
+                screen = [
+                    camera.project(point_on_plane(frame, point), center)
+                    for point in sketch.edge_points(index)
+                ]
+                for start_point, end_point in zip(screen, screen[1:]):
+                    self._draw_sketch_segment(
+                        surface, line_color, start_point, end_point,
+                        sketch.line_type,
+                    )
+            for index, circle in enumerate(sketch.circles):
+                circle_color = (
+                    self.palette.projection
+                    if sketch.is_projected_circle(index) else color
                 )
-                end_point = camera.project(
-                    point_on_plane(frame, sketch.points[end]), center
-                )
-                self._draw_sketch_segment(
-                    surface, line_color, start_point, end_point,
-                    sketch.line_type,
-                )
-            for circle in sketch.circles:
                 self._draw_sketch_circle(
-                    surface, color, frame, circle, camera, center
+                    surface, circle_color, frame, circle, camera, center
                 )
 
     def _draw_sketch_circle(self, surface: pygame.Surface, color: Color, frame: PlaneFrame, circle: Circle, camera: OrbitCamera, center: Tuple[int, int]) -> None:

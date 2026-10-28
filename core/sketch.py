@@ -35,6 +35,57 @@ def circle_polygon(circle: Circle, segments: int = CIRCLE_SEGMENTS) -> List[Poin
     ]
 
 
+def normalize_bulge(value: Any) -> Optional[float]:
+    """Return a finite, meaningful bulge or ``None`` for a straight edge."""
+    try:
+        bulge = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(bulge) or abs(bulge) < 1e-12:
+        return None
+    return bulge
+
+
+def bulge_arc_points(
+    start: Point, end: Point, bulge: float,
+    max_step: float = math.pi / 24.0,
+) -> List[Point]:
+    """Sample an exact circular bulge edge, including both endpoints.
+
+    A bulge is ``tan(sweep / 4)``: positive runs counter-clockwise from
+    ``start`` to ``end`` and negative runs clockwise.  The shape itself is
+    stored by the two points and the bulge; sampling only feeds display,
+    area and volume rebuilds.
+    """
+    first = point2d(start)
+    second = point2d(end)
+    chord = math.hypot(second[0] - first[0], second[1] - first[1])
+    if chord <= 1e-12 or abs(bulge) <= 1e-12:
+        return [first, second]
+    sweep = 4.0 * math.atan(bulge)
+    if abs(sweep) >= math.tau - 1e-9:
+        return [first, second]
+    mid_x = (first[0] + second[0]) * 0.5
+    mid_y = (first[1] + second[1]) * 0.5
+    dx = (second[0] - first[0]) / chord
+    dy = (second[1] - first[1]) / chord
+    offset = (chord * 0.5) / math.tan(sweep * 0.5)
+    center_x = mid_x - dy * offset
+    center_y = mid_y + dx * offset
+    radius = chord / (2.0 * abs(math.sin(sweep * 0.5)))
+    start_angle = math.atan2(first[1] - center_y, first[0] - center_x)
+    steps = max(2, int(math.ceil(abs(sweep) / max_step)))
+    points: List[Point] = [first]
+    for step in range(1, steps):
+        angle = start_angle + sweep * step / steps
+        points.append(point2d((
+            center_x + radius * math.cos(angle),
+            center_y + radius * math.sin(angle),
+        )))
+    points.append(second)
+    return points
+
+
 def _strip_loop_spikes(loop: List[int]) -> List[int]:
     """Remove zero-area detours from a face traversal."""
     cleaned: List[int] = []
@@ -383,12 +434,17 @@ class ProjectedPoint:
 
 @dataclass(frozen=True)
 class ProjectedEdge:
-    """A sketch edge whose endpoints follow a solid edge."""
+    """A sketch edge whose endpoints follow a solid edge.
+
+    ``bulge`` keeps circular fillet edges exact: the two endpoint sources
+    define a real arc instead of a run of tessellation chords.
+    """
 
     edge: int
     feature_id: int
     start: ProjectionSource
     end: ProjectionSource
+    bulge: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -396,6 +452,7 @@ class ProjectedEdge:
             "feature": self.feature_id,
             "start": self.start.to_dict(),
             "end": self.end.to_dict(),
+            "bulge": self.bulge,
         }
 
     @classmethod
@@ -411,7 +468,54 @@ class ProjectedEdge:
         end = ProjectionSource.from_dict(data.get("end"))
         if edge < 0 or feature_id < 0 or start is None or end is None:
             return None
-        return cls(edge, feature_id, start, end)
+        return cls(
+            edge, feature_id, start, end,
+            normalize_bulge(data.get("bulge")),
+        )
+
+
+@dataclass(frozen=True)
+class ProjectedCircle:
+    """A sketch circle whose centre and radius follow a solid circle."""
+
+    circle: int
+    center: ProjectionSource
+    source_circle: int = -1
+    radius: float = 0.0
+
+    def key(self) -> Tuple[object, ...]:
+        """Return a stable identity for repeated projections."""
+        return (
+            self.center.key(),
+            self.source_circle,
+            round(self.radius, 6),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "circle": self.circle,
+            "center": self.center.to_dict(),
+            "source_circle": self.source_circle,
+            "radius": self.radius,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["ProjectedCircle"]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            circle = int(data.get("circle", -1))
+            source_circle = int(data.get("source_circle", -1))
+            radius = float(data.get("radius", 0.0))
+        except (TypeError, ValueError):
+            return None
+        center = ProjectionSource.from_dict(data.get("center"))
+        if (
+            circle < 0 or center is None
+            or not math.isfinite(radius) or radius < 0.0
+        ):
+            return None
+        return cls(circle, center, source_circle, radius)
 
 
 @dataclass
@@ -435,6 +539,9 @@ class Sketch:
     line_type: str = "normal"
     edges: List[Tuple[int, int]] = field(default_factory=list)
     edge_constraints: List[Optional[str]] = field(default_factory=list)
+    # A bulge is tan(sweep / 4) for an exact circular arc.  Straight edges
+    # keep ``None`` so ordinary lines stay plain two-point shapes.
+    edge_bulges: List[Optional[float]] = field(default_factory=list)
     circles: List[Circle] = field(default_factory=list)
     measurements: List[Measurement] = field(default_factory=list)
     # Projected entities are ordinary points and edges that also remember
@@ -442,6 +549,7 @@ class Sketch:
     # them whenever the source geometry changes.
     projected_points: List[ProjectedPoint] = field(default_factory=list)
     projected_edges: List[ProjectedEdge] = field(default_factory=list)
+    projected_circles: List[ProjectedCircle] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.points = [point2d(point) for point in self.points]
@@ -453,15 +561,22 @@ class Sketch:
             if circle is not None
         ]
         self.circles = []
-        self.edges = [
-            (start, end)
-            for start, end in self.edges
-            if (
+        raw_bulges = list(self.edge_bulges)
+        edges: List[Tuple[int, int]] = []
+        bulges: List[Optional[float]] = []
+        for index, (start, end) in enumerate(self.edges):
+            if not (
                 0 <= start < len(self.points)
                 and 0 <= end < len(self.points)
                 and start != end
+            ):
+                continue
+            edges.append((start, end))
+            bulges.append(
+                raw_bulges[index] if index < len(raw_bulges) else None
             )
-        ]
+        self.edges = edges
+        self.edge_bulges = [normalize_bulge(value) for value in bulges]
         constraints = [
             normalize_edge_constraint(value)
             for value in self.edge_constraints[:len(self.edges)]
@@ -549,6 +664,15 @@ class Sketch:
                 for item in self.projected_edges
             )
             if link is not None and 0 <= link.edge < len(self.edges)
+        ]
+        self.projected_circles = [
+            link
+            for link in (
+                item if isinstance(item, ProjectedCircle)
+                else ProjectedCircle.from_dict(item)
+                for item in self.projected_circles
+            )
+            if link is not None and 0 <= link.circle < len(self.circles)
         ]
         # A loaded sketch may predate dimension enforcement.  Make its
         # stored values authoritative immediately, without a command.
@@ -1477,7 +1601,12 @@ class Sketch:
         return None
 
     def loop_points(self, loop: Sequence[int]) -> List[Point]:
-        """Return the polygon for an edge loop or a circle loop."""
+        """Return the boundary polygon for an edge loop or a circle loop.
+
+        Circular bulges contribute sampled points here only so area, picking
+        and the volume rebuild can consume the exact shape; the stored edge
+        itself remains one two-point arc.
+        """
         circle = self.circle_for_loop(loop)
         if circle is not None:
             return circle_polygon(circle)
@@ -1485,17 +1614,85 @@ class Sketch:
             return []
         if any(not 0 <= index < len(self.points) for index in loop):
             return []
-        return [self.points[index] for index in loop]
+        points: List[Point] = []
+        for offset, index in enumerate(loop):
+            following = loop[(offset + 1) % len(loop)]
+            start = self.points[index]
+            points.append(start)
+            bulge = self.edge_bulge_between(index, following)
+            if bulge is not None:
+                samples = bulge_arc_points(
+                    start, self.points[following], bulge
+                )
+                points.extend(samples[1:-1])
+        return points
+
+    def edge_bulge(self, index: int) -> Optional[float]:
+        """Return the circular bulge of one edge, or ``None`` if straight."""
+        if not 0 <= index < len(self.edge_bulges):
+            return None
+        return self.edge_bulges[index]
+
+    def edge_points(self, index: int) -> List[Point]:
+        """Return the display/rebuild polyline for one exact edge shape."""
+        if not 0 <= index < len(self.edges):
+            return []
+        start, end = self.edges[index]
+        bulge = self.edge_bulge(index)
+        if bulge is None:
+            return [self.points[start], self.points[end]]
+        return bulge_arc_points(
+            self.points[start], self.points[end], bulge
+        )
+
+    def edge_bulge_between(
+        self, first: int, second: int
+    ) -> Optional[float]:
+        """Return the bulge when an edge joins two loop points."""
+        for index, (start, end) in enumerate(self.edges):
+            bulge = self.edge_bulge(index)
+            if bulge is None:
+                continue
+            if start == first and end == second:
+                return bulge
+            if start == second and end == first:
+                return -bulge
+        return None
 
     def loop_area(self, loop: Sequence[int]) -> float:
-        """Return the area of an edge loop or circle loop."""
+        """Return the exact area of an edge loop or circle loop.
+
+        Bulged edges contribute their true circular segment area instead of
+        the chord approximation used for display sampling.
+        """
         circle = self.circle_for_loop(loop)
         if circle is not None:
             return math.pi * circle.radius * circle.radius
-        points = self.loop_points(loop)
-        if len(points) < 3:
+        if len(loop) < 3:
             return 0.0
-        return abs(polygon_area(points))
+        if any(not 0 <= index < len(self.points) for index in loop):
+            return 0.0
+        area = polygon_area([self.points[index] for index in loop])
+        for offset, index in enumerate(loop):
+            following = loop[(offset + 1) % len(loop)]
+            area += self._segment_area(index, following)
+        return abs(area)
+
+    def _segment_area(self, first: int, second: int) -> float:
+        """Return the signed circular segment area of a bulged edge."""
+        bulge = self.edge_bulge_between(first, second)
+        if bulge is None:
+            return 0.0
+        start = self.points[first]
+        end = self.points[second]
+        chord = math.hypot(
+            end[0] - start[0], end[1] - start[1]
+        )
+        if chord <= 1e-12:
+            return 0.0
+        sweep = 4.0 * math.atan(bulge)
+        radius = chord / (2.0 * abs(math.sin(sweep * 0.5)))
+        return 0.5 * radius * radius * (sweep - math.sin(sweep))
 
     def find_point(self, point: Point) -> Optional[int]:
         """Find an existing point by its coordinates."""
@@ -1510,17 +1707,29 @@ class Sketch:
         self.points.append(point2d(point))
         return index
 
+    def add_circle(self, center: Point, diameter: float) -> Circle:
+        """Append a circle and bind its midpoint to a regular sketch point."""
+        index = self.add_point(center)
+        circle = Circle(self.points[index], diameter)
+        self.circles.append(circle)
+        return circle
+
     def remove_point(self, index: int) -> None:
         """Remove a point, its edges, and measurements that depend on them."""
         if not 0 <= index < len(self.points):
             return
         removed_point = self.points.pop(index)
-        self.circles = [
-            circle for circle in self.circles
-            if circle.midPoint is not removed_point
-        ]
+        circles: List[Circle] = []
+        circle_map: Dict[int, int] = {}
+        for circle_index, circle in enumerate(self.circles):
+            if circle.midPoint is removed_point:
+                continue
+            circle_map[circle_index] = len(circles)
+            circles.append(circle)
+        self.circles = circles
         shifted: List[Tuple[int, int]] = []
         constraints: List[Optional[str]] = []
+        bulges: List[Optional[float]] = []
         edge_map: Dict[int, int] = {}
         for edge_index, (start, end) in enumerate(self.edges):
             if start == index or end == index:
@@ -1531,8 +1740,10 @@ class Sketch:
                 end if end < index else end - 1,
             ))
             constraints.append(self.edge_constraint(edge_index))
+            bulges.append(self.edge_bulge(edge_index))
         self.edges = shifted
         self.edge_constraints = constraints
+        self.edge_bulges = bulges
 
         measurements: List[Measurement] = []
         for measurement in self.measurements:
@@ -1553,7 +1764,7 @@ class Sketch:
                     )
                 )
         self.measurements = measurements
-        self._remap_projected_points(index, edge_map)
+        self._remap_projected_points(index, edge_map, circle_map)
 
     def remove_edge(self, index: int) -> None:
         """Remove one edge and any measurement that depends on it."""
@@ -1562,6 +1773,8 @@ class Sketch:
         del self.edges[index]
         if index < len(self.edge_constraints):
             del self.edge_constraints[index]
+        if index < len(self.edge_bulges):
+            del self.edge_bulges[index]
         measurements: List[Measurement] = []
         for measurement in self.measurements:
             first = self._remap_removed_edge_ref(
@@ -1584,7 +1797,10 @@ class Sketch:
         self._shift_projected_edges(index)
 
     def _remap_projected_points(
-        self, removed_point: int, edge_map: Dict[int, int]
+        self,
+        removed_point: int,
+        edge_map: Dict[int, int],
+        circle_map: Dict[int, int],
     ) -> None:
         """Keep projection links valid after a point is removed."""
         links: List[ProjectedPoint] = []
@@ -1595,6 +1811,7 @@ class Sketch:
             links.append(ProjectedPoint(index, link.source))
         self.projected_points = links
         self._remap_projected_edges(edge_map)
+        self._remap_projected_circles(circle_map)
 
     def _remap_projected_edges(
         self, edge_map: Dict[int, int]
@@ -1604,9 +1821,22 @@ class Sketch:
             mapped = edge_map.get(link.edge)
             if mapped is not None:
                 edges.append(ProjectedEdge(
-                    mapped, link.feature_id, link.start, link.end
+                    mapped, link.feature_id, link.start, link.end,
+                    link.bulge,
                 ))
         self.projected_edges = edges
+
+    def _remap_projected_circles(
+        self, circle_map: Dict[int, int]
+    ) -> None:
+        circles: List[ProjectedCircle] = []
+        for link in self.projected_circles:
+            mapped = circle_map.get(link.circle)
+            if mapped is not None:
+                circles.append(ProjectedCircle(
+                    mapped, link.center, link.source_circle, link.radius
+                ))
+        self.projected_circles = circles
 
     def _shift_projected_edges(self, removed: int) -> None:
         """Drop a deleted projected edge and shift later links down."""
@@ -1616,17 +1846,35 @@ class Sketch:
                 continue
             index = link.edge - 1 if link.edge > removed else link.edge
             edges.append(ProjectedEdge(
-                index, link.feature_id, link.start, link.end
+                index, link.feature_id, link.start, link.end,
+                link.bulge,
             ))
         self.projected_edges = edges
 
     def is_projected_point(self, index: int) -> bool:
-        """Return whether a sketch point follows solid geometry."""
-        return any(link.point == index for link in self.projected_points)
+        """Return whether a sketch point follows solid geometry.
+
+        A projected circle's centre is owned by the circle link rather than
+        a point link, but it must behave like any other projected entity.
+        """
+        if any(link.point == index for link in self.projected_points):
+            return True
+        if not 0 <= index < len(self.points):
+            return False
+        point = self.points[index]
+        return any(
+            0 <= link.circle < len(self.circles)
+            and self.circles[link.circle].midPoint is point
+            for link in self.projected_circles
+        )
 
     def is_projected_edge(self, index: int) -> bool:
         """Return whether a sketch edge follows solid geometry."""
         return any(link.edge == index for link in self.projected_edges)
+
+    def is_projected_circle(self, index: int) -> bool:
+        """Return whether a sketch circle follows solid geometry."""
+        return any(link.circle == index for link in self.projected_circles)
 
     @staticmethod
     def _remap_removed_edge_ref(
@@ -1720,6 +1968,7 @@ class Sketch:
                 [start, end] for start, end in self.edges
             ],
             "edge_constraints": list(self.edge_constraints),
+            "edge_bulges": list(self.edge_bulges),
             "circles": [
                 {
                     "center": [circle.midPoint[0], circle.midPoint[1]],
@@ -1736,6 +1985,9 @@ class Sketch:
             ],
             "projected_edges": [
                 link.to_dict() for link in self.projected_edges
+            ],
+            "projected_circles": [
+                link.to_dict() for link in self.projected_circles
             ],
             "line_type": self.line_type,
             # Kept for older readers; edges are the source of truth.
@@ -1782,11 +2034,15 @@ class Sketch:
         line_type = str(data.get("line_type", "normal"))
         edges: List[Tuple[int, int]] = []
         constraints: List[Optional[str]] = []
+        bulges: List[Optional[float]] = []
         raw_edges = data.get("edges")
         raw_profile = data.get("profile")
         raw_constraints = data.get("edge_constraints")
+        raw_bulges = data.get("edge_bulges")
         if not isinstance(raw_constraints, (list, tuple)):
             raw_constraints = []
+        if not isinstance(raw_bulges, (list, tuple)):
+            raw_bulges = []
         if isinstance(raw_edges, (list, tuple)):
             for raw_index, raw in enumerate(raw_edges):
                 if not isinstance(raw, (list, tuple)) or len(raw) < 2:
@@ -1810,10 +2066,18 @@ class Sketch:
                     constraints.append(
                         normalize_edge_constraint(constraint)
                     )
+                    bulge = (
+                        raw_bulges[raw_index]
+                        if raw_index < len(raw_bulges)
+                        else None
+                    )
+                    bulges.append(normalize_bulge(bulge))
             # Older point-profile sketches stored their loop separately.
+            before = len(edges)
             cls._add_loop_edges(
                 edges, cls._valid_profile(raw_profile, len(points))
             )
+            bulges.extend([None] * (len(edges) - before))
         else:
             # Legacy sketches draw a profile through their ordered points
             # and store extra edge coordinates separately.
@@ -1821,7 +2085,9 @@ class Sketch:
                 profile = cls._valid_profile(raw_profile, len(points))
             else:
                 profile = list(range(len(points)))
+            before = len(edges)
             cls._add_loop_edges(edges, profile)
+            bulges.extend([None] * (len(edges) - before))
             raw_lines = data.get("lines", [])
             if not isinstance(raw_lines, (list, tuple)):
                 raw_lines = []
@@ -1835,9 +2101,13 @@ class Sketch:
                     continue
                 start_index = cls._find_or_add_point(points, start)
                 end_index = cls._find_or_add_point(points, end)
+                before = len(edges)
                 cls._add_edge(edges, start_index, end_index)
+                bulges.extend([None] * (len(edges) - before))
 
         constraints.extend([None] * (len(edges) - len(constraints)))
+        bulges = bulges[:len(edges)]
+        bulges.extend([None] * (len(edges) - len(bulges)))
         circles: List[Circle] = []
         raw_circles = data.get("circles", [])
         if isinstance(raw_circles, (list, tuple)):
@@ -1866,6 +2136,13 @@ class Sketch:
                 link = ProjectedEdge.from_dict(raw)
                 if link is not None:
                     projected_edges.append(link)
+        projected_circles: List[ProjectedCircle] = []
+        raw_projected_circles = data.get("projected_circles", [])
+        if isinstance(raw_projected_circles, (list, tuple)):
+            for raw in raw_projected_circles:
+                link = ProjectedCircle.from_dict(raw)
+                if link is not None:
+                    projected_circles.append(link)
         return cls(
             id=int(data.get("id", 0)),
             name=str(data.get("name", "Sketch")),
@@ -1879,10 +2156,12 @@ class Sketch:
             line_type=line_type,
             edges=edges,
             edge_constraints=constraints[:len(edges)],
+            edge_bulges=bulges,
             circles=circles,
             measurements=measurements,
             projected_points=projected_points,
             projected_edges=projected_edges,
+            projected_circles=projected_circles,
         )
 
     @staticmethod

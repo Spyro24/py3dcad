@@ -263,7 +263,6 @@ class Application:
             on_add_line=self.add_line,
             on_add_circle=self.add_circle,
             on_add_rectangle=self.add_rectangle,
-            on_project_point=self.project_point,
             on_project_edge=self.project_edge,
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
@@ -552,27 +551,8 @@ class Application:
             AddRectangleCommand(document, sketch, first, opposite)
         )
 
-    def project_point(
-        self, feature_id: int, point: Tuple[float, float, float]
-    ) -> None:
-        """Project one solid vertex into the active sketch."""
-        self._playing = False
-        document = self.active_document()
-        stack = self._active_stack()
-        if document is None or stack is None:
-            return
-        sketch = document.sketch(document.active_sketch_id)
-        if sketch is None:
-            return
-        document.refresh_projections()
-        command = AddProjectionCommand(
-            document, sketch, feature_id, points=[point]
-        )
-        if command.has_targets:
-            stack.execute(command)
-
     def project_edge(self, feature_id: int, edge_index: int) -> None:
-        """Project one solid edge (including smooth runs) into the sketch."""
+        """Project the exact shape of one solid edge into the sketch."""
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
@@ -586,7 +566,9 @@ class Application:
             return
         document.refresh_projections()
         command = AddProjectionCommand(
-            document, sketch, feature_id, chains=[edge.chain]
+            document, sketch, feature_id,
+            chains=[edge.chain],
+            edge=(edge.start, edge.end),
         )
         if command.has_targets:
             stack.execute(command)

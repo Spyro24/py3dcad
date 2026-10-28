@@ -245,9 +245,6 @@ class Workspace:
         on_delete_sketch: Optional[
             Callable[[Optional[Tuple[str, int]], List[List[int]]], bool]
         ] = None,
-        on_project_point: Optional[
-            Callable[[int, Tuple[float, float, float]], None]
-        ] = None,
         on_project_edge: Optional[
             Callable[[int, int], None]
         ] = None,
@@ -273,7 +270,6 @@ class Workspace:
         self.on_set_measurement_value = on_set_measurement_value
         self.on_fillet = on_fillet
         self.on_delete_sketch = on_delete_sketch
-        self.on_project_point = on_project_point
         self.on_project_edge = on_project_edge
 
         self.scale = 1.0
@@ -2185,19 +2181,18 @@ class Workspace:
         line_limit = self._s(6)
         nearest_line: Optional[int] = None
         nearest_distance = float(line_limit)
-        for index, (start, end) in enumerate(sketch.lines):
-            screen_start = self._project_sketch_point(
-                sketch, start, region
-            )
-            screen_end = self._project_sketch_point(
-                sketch, end, region
-            )
-            distance = self._distance_to_segment(
-                pos, screen_start, screen_end
-            )
-            if distance <= nearest_distance:
-                nearest_line = index
-                nearest_distance = distance
+        for index in range(len(sketch.edges)):
+            screen = [
+                self._project_sketch_point(sketch, point, region)
+                for point in sketch.edge_points(index)
+            ]
+            for screen_start, screen_end in zip(screen, screen[1:]):
+                distance = self._distance_to_segment(
+                    pos, screen_start, screen_end
+                )
+                if distance <= nearest_distance:
+                    nearest_line = index
+                    nearest_distance = distance
         if nearest_line is not None:
             return "line", nearest_line
         return None
@@ -3314,15 +3309,17 @@ class Workspace:
                 width=max(1, self._s(2 if selected else 1)),
             )
             return
-        if not 0 <= index < len(sketch.lines):
+        if not 0 <= index < len(sketch.edges):
             return
-        start, end = sketch.lines[index]
-        screen_start = self._project_sketch_point(sketch, start, region)
-        screen_end = self._project_sketch_point(sketch, end, region)
-        pygame.draw.line(
-            surface, color, screen_start, screen_end,
-            max(1, self._s(3 if selected else 2)),
-        )
+        screen = [
+            self._project_sketch_point(sketch, point, region)
+            for point in sketch.edge_points(index)
+        ]
+        width = max(1, self._s(3 if selected else 2))
+        for screen_start, screen_end in zip(screen, screen[1:]):
+            pygame.draw.line(
+                surface, color, screen_start, screen_end, width,
+            )
 
     def _draw_line_menu(
         self, surface: pygame.Surface, region: Rect, document: Document
@@ -5450,16 +5447,8 @@ class Workspace:
     def _project_at(
         self, pos: Tuple[int, int], region: Rect, document: Document
     ) -> None:
-        """Project a solid vertex or edge under the cursor into the sketch."""
-        renderer = self.viewport.renderer
-        vertex = renderer.pick_vertex(
-            pos, region.rect, document, self.viewport.camera
-        )
-        if vertex is not None and self.on_project_point is not None:
-            self._clear_sketch_selection()
-            self.on_project_point(vertex[0], vertex[1])
-            return
-        edge = renderer.pick_edge(
+        """Project the exact solid edge under the cursor into the sketch."""
+        edge = self.viewport.renderer.pick_edge(
             pos, region.rect, document, self.viewport.camera
         )
         if edge is not None and self.on_project_edge is not None:
