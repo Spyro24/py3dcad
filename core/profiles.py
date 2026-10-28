@@ -731,7 +731,11 @@ def _point_on_segment(point: Point2, start: Point2, end: Point2) -> bool:
     cross = abs(
         (point[0] - start[0]) * dy - (point[1] - start[1]) * dx
     )
-    if cross > max(1e-7, length * 1e-7):
+    # Scale the tolerance with the segment length so it bounds the
+    # perpendicular distance.  A fixed absolute tolerance would accept points
+    # millimetres away from a short edge, which makes boolean sampling treat
+    # both sides of a hairline segment as "on" the boundary.
+    if cross > max(length * 1e-7, 1e-12):
         return False
     dot = (point[0] - start[0]) * dx + (point[1] - start[1]) * dy
     return -1e-7 <= dot <= length * length + 1e-7
