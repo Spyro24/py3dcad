@@ -75,9 +75,7 @@ def _plane_offset(point, frame) -> float:
     )
 
 
-def _stack_cap_side(
-    feature: Extrude, offset: float
-) -> Tuple[Optional[str], float]:
+def _stack_cap_side(feature: Extrude, offset: float) -> Tuple[Optional[str], float]:
     """Return which cap of a sliced body lies at a local plane offset."""
     zmin = min(entry.z0 for entry in feature.slices)
     zmax = max(entry.z1 for entry in feature.slices)
@@ -88,9 +86,7 @@ def _stack_cap_side(
     return None, offset
 
 
-def _resolve_fillet_ref(
-    document: Document, reference: Optional[Tuple[int, int]], radius: float
-) -> Tuple[Optional[str], Optional[FilletTarget]]:
+def _resolve_fillet_ref(document: Document, reference: Optional[Tuple[int, int]], radius: float) -> Tuple[Optional[str], Optional[FilletTarget]]:
     """Turn one selected edge reference into a fillet without editing it.
 
     Returns ``(error, target)``.  Applying a fillet and the live preview both
@@ -208,9 +204,7 @@ def _resolve_fillet_ref(
     return None, FilletTarget(feature, kind, u, v)
 
 
-def _resolve_fillets(
-    document: Document, radius: float
-) -> Tuple[Optional[str], List[FilletTarget]]:
+def _resolve_fillets(document: Document, radius: float) -> Tuple[Optional[str], List[FilletTarget]]:
     """Resolve every selected edge, skipping duplicates and dead references."""
     if not document.selected_edges:
         return "Select a solid edge first", []
@@ -222,9 +216,7 @@ def _resolve_fillets(
         if target is None:
             error = error or ref_error
             continue
-        if max_fillet_radius(
-            document, target.feature, target.kind, target.u, target.v
-        ) is None:
+        if max_fillet_radius(document, target.feature, target.kind, target.u, target.v) is None:
             error = error or "Edge cannot be filleted"
             continue
         key = (
@@ -242,7 +234,6 @@ def _resolve_fillets(
 
 class Application:
     """Owns the window, documents, UI components and event loop."""
-
     def __init__(self, window: Window) -> None:
         self.window = window
         self.config = Config()
@@ -254,9 +245,7 @@ class Application:
             on_open_recent=self.open_recent,
             on_open_example=self.open_example,
         )
-        self.tab_bar = TabBar(
-            self.select_document, self.close_document, self.new_document
-        )
+        self.tab_bar = TabBar(self.select_document, self.close_document, self.new_document)
         self.workspace = Workspace(
             on_new_sketch=self.new_sketch,
             on_extrude=self.extrude_active,
@@ -303,17 +292,13 @@ class Application:
     # ------------------------------------------------------------------
     # Scaling
     # ------------------------------------------------------------------
-
     @property
     def scale(self) -> float:
         return SCALE_STEPS[self._scale_index]
 
     @staticmethod
     def _nearest_scale_index(scale: float) -> int:
-        return min(
-            range(len(SCALE_STEPS)),
-            key=lambda index: abs(SCALE_STEPS[index] - scale),
-        )
+        return min(range(len(SCALE_STEPS)), key=lambda index: abs(SCALE_STEPS[index] - scale))
 
     def _apply_scale(self, save: bool = True) -> None:
         scale = self.scale
@@ -337,7 +322,6 @@ class Application:
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
-
     def open_settings(self) -> None:
         if self.save_dialog.active:
             return
@@ -399,10 +383,7 @@ class Application:
 
     def close_document(self, document_id: int) -> None:
         self._playing = False
-        index = next(
-            (i for i, doc in enumerate(self.documents) if doc.id == document_id),
-            None,
-        )
+        index = next((i for i, doc in enumerate(self.documents) if doc.id == document_id), None)
         if index is None:
             return
         self.documents.pop(index)
@@ -415,9 +396,7 @@ class Application:
             self.active_id = None
 
     def active_document(self) -> Optional[Document]:
-        return next(
-            (doc for doc in self.documents if doc.id == self.active_id), None
-        )
+        return next((doc for doc in self.documents if doc.id == self.active_id), None)
 
     def _active_stack(self) -> Optional[CommandStack]:
         document = self.active_document()
@@ -429,52 +408,29 @@ class Application:
     def _history_entries(stack: Optional[CommandStack]) -> List[HistoryEntry]:
         if stack is None:
             return []
-        return [
-            HistoryEntry(
-                command.kind,
-                command.label,
-                command.timeline_visible,
-            )
-            for command in stack.history()
-        ]
+        return [HistoryEntry(command.kind, command.label, command.timeline_visible) for command in stack.history()]
 
-    def _timeline(
-        self, stack: Optional[CommandStack]
-    ) -> Tuple[List[HistoryEntry], List[HistoryEntry]]:
+    def _timeline(self, stack: Optional[CommandStack]) -> Tuple[List[HistoryEntry], List[HistoryEntry]]:
         """Return ``(full_history, timeline_visible_history)`` for a stack."""
         full_history = self._history_entries(stack)
-        filtered_history = [
-            entry for entry in full_history if entry.timeline_visible
-        ]
+        filtered_history = [entry for entry in full_history if entry.timeline_visible]
         return full_history, filtered_history
 
     def _sync_active_sketch(self, document: Document) -> None:
-        if (
-            document.active_sketch_id is not None
-            and document.sketch(document.active_sketch_id) is None
-        ):
+        if (document.active_sketch_id is not None and document.sketch(document.active_sketch_id) is None):
             document.active_sketch_id = None
             self.workspace.sketch_palette_window.close()
         if document.selected_faces:
-            document.selected_faces = [
-                reference for reference in document.selected_faces
-                if face_for_ref(document, reference) is not None
-            ]
+            document.selected_faces = [reference for reference in document.selected_faces if face_for_ref(document, reference) is not None]
         if document.selected_edges:
-            document.selected_edges = [
-                reference for reference in document.selected_edges
-                if edge_for_ref(document, reference) is not None
-            ]
+            document.selected_edges = [reference for reference in document.selected_edges if edge_for_ref(document, reference) is not None]
 
     def _activate_editable_sketch(self, document: Document) -> None:
         """After rolling back, resume the latest sketch that is not consumed."""
         if document.active_sketch_id is not None:
             return
         consumed = {feature.sketch_id for feature in document.features}
-        editable = [
-            sketch for sketch in document.sketches
-            if sketch.id not in consumed
-        ]
+        editable = [sketch for sketch in document.sketches if sketch.id not in consumed]
         if editable:
             document.active_sketch_id = editable[-1].id
             self._align_camera_to_active_sketch(document)
@@ -485,7 +441,6 @@ class Application:
     # ------------------------------------------------------------------
     # Editing (all in memory, saving is never required)
     # ------------------------------------------------------------------
-
     def new_sketch(self) -> None:
         self._playing = False
         document = self.active_document()
@@ -498,16 +453,9 @@ class Application:
                 document.selected_face = None
                 self.workspace.open_create_sketch_dialog()
                 return
-            command = AddSketchCommand(
-                document,
-                "XY",
-                frame=face.to_plane_frame(),
-                label=face.label,
-            )
+            command = AddSketchCommand(document, "XY", frame=face.to_plane_frame(), label=face.label)
         elif document.selected_plane is not None:
-            command = AddSketchCommand(
-                document, document.selected_plane
-            )
+            command = AddSketchCommand(document, document.selected_plane)
         else:
             self.workspace.open_create_sketch_dialog()
             return
@@ -530,10 +478,7 @@ class Application:
             return
         stack.execute(AddPointCommand(document, sketch, point))
 
-    def add_line(
-        self, start: Point, end: Point,
-        constraint: Optional[str] = None,
-    ) -> None:
+    def add_line(self, start: Point, end: Point, constraint: Optional[str] = None) -> None:
         self._playing = False
         document = self.active_document()
         stack = self._active_stack()
@@ -542,9 +487,7 @@ class Application:
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or start == end:
             return
-        stack.execute(
-            AddLineCommand(document, sketch, start, end, constraint)
-        )
+        stack.execute(AddLineCommand(document, sketch, start, end, constraint))
 
     def add_rectangle(
         self, first: Point, opposite: Point
@@ -1264,9 +1207,7 @@ class Application:
             self.layout.update(self.window)
             return
         if self.settings_dialog.active:
-            self.settings_dialog.handle_event(
-                event, Rect(0, 0, *self.window.get_size())
-            )
+            self.settings_dialog.handle_event(event, Rect(0, 0, *self.window.get_size()))
             return
         if self.save_dialog.active:
             self.save_dialog.handle_event(event)
@@ -1274,15 +1215,11 @@ class Application:
         if event.type == pygame.KEYDOWN:
             if event.mod & pygame.KMOD_CTRL:
                 # Ctrl shortcuts are consumed whether or not they matched.
-                self._handle_ctrl_key(
-                    event.key, bool(event.mod & pygame.KMOD_SHIFT)
-                )
+                self._handle_ctrl_key(event.key, bool(event.mod & pygame.KMOD_SHIFT))
                 return
             if self.documents and self._handle_edit_key(event.key):
                 return
-        if self.tab_bar.handle_event(
-            event, self.layout.tab_bar, self.documents, self.active_id
-        ):
+        if self.tab_bar.handle_event(event, self.layout.tab_bar, self.documents, self.active_id):
             return
         if self.documents:
             document = self.active_document()
@@ -1323,26 +1260,21 @@ class Application:
     def _handle_ctrl_key(self, key: int, shift: bool = False) -> bool:
         if key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             self._change_scale(1)
-            return True
-        if key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+        elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
             self._change_scale(-1)
-            return True
-        if key == pygame.K_s:
+        elif key == pygame.K_s:
             self.save_active()
-            return True
-        if key == pygame.K_COMMA:
+        elif key == pygame.K_COMMA:
             self.open_settings()
-            return True
-        if key == pygame.K_z:
+        elif key == pygame.K_z:
             if shift:
                 self.redo()
             else:
                 self.undo()
-            return True
-        if key == pygame.K_y:
+        elif key == pygame.K_y:
             self.redo()
-            return True
-        return False
+        else: return False
+        return True
 
     def _content_region(self) -> Rect:
         bar = self.layout.tab_bar
@@ -1352,7 +1284,6 @@ class Application:
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
-
     def _draw(self) -> None:
         surface = self.window.surface
         surface.fill(pygame.Color(20, 20, 25))
@@ -1372,12 +1303,8 @@ class Application:
             else:
                 if radius is not None:
                     fillet_preview = self.fillet_preview(radius)
-                preview = (
-                    fillet_preview.document if fillet_preview else None
-                )
-                ghost_faces = (
-                    fillet_preview.ghost_faces if fillet_preview else ()
-                )
+                preview = (fillet_preview.document if fillet_preview else None)
+                ghost_faces = (fillet_preview.ghost_faces if fillet_preview else ())
             self.workspace.draw(
                 surface,
                 self.layout,
