@@ -200,6 +200,11 @@ class Viewport:
                     "Click a solid edge to project its line, arc or circle"
                     " into the sketch  ·  Esc to deselect"
                 )
+            elif active_tool == "align_x":
+                hint = (
+                    "Click a solid edge to align the sketch X axis with it"
+                    "  ·  Esc to deselect"
+                )
             elif active_tool != "point":
                 if profile_count == 0:
                     hint = (

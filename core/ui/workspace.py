@@ -126,6 +126,7 @@ class Workspace:
         "circle": "Circle",
         "point": "Point",
         "project": "Project",
+        "align_x": "Align Sketch X",
         "finish_sketch": "Finish Sketch",
         "extrude": "Extrude",
         "fillet": "Fillet",
@@ -140,7 +141,7 @@ class Workspace:
     FILLET_RADIUS = 2.0
     SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
     SKETCH_INTERACTIVE_ACTIONS = (
-        "line", "rectangle", "circle", "point", "project",
+        "line", "rectangle", "circle", "point", "project", "align_x",
         *SKETCH_CONSTRAINT_ACTIONS
     )
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
@@ -161,6 +162,7 @@ class Workspace:
             ("spline", "Spline", True),
             ("point", "Point", False),
             ("project", "Project", False),
+            ("align_x", "Align X", False),
         )),
         ("MODIFY", (
             ("fillet", None, False),
@@ -189,7 +191,8 @@ class Workspace:
         )),
     )
     ACTIVE_SKETCH_TOOLS = (
-        "line", "rectangle", "point", "project", "measure", "finish_sketch"
+        "line", "rectangle", "point", "project", "align_x", "measure",
+        "finish_sketch",
     )
     LINE_MENU_ITEMS = (
         ("normal", "Line"),
@@ -248,6 +251,9 @@ class Workspace:
         on_project_edge: Optional[
             Callable[[int, int], None]
         ] = None,
+        on_align_sketch_x: Optional[
+            Callable[[int, int], None]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -271,6 +277,7 @@ class Workspace:
         self.on_fillet = on_fillet
         self.on_delete_sketch = on_delete_sketch
         self.on_project_edge = on_project_edge
+        self.on_align_sketch_x = on_align_sketch_x
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -436,6 +443,11 @@ class Workspace:
         self.fillet_window.close()
         self._extrude_arrow_drag = None
         self._extrude_preview = None
+        # A sketch drawn on a face is normally a modification of the body
+        # under it, so start with Join instead of creating a second body.
+        self.extrude_window.operation = (
+            "join" if sketch.is_custom_plane else "new_body"
+        )
         self.extrude_window.open(len(regions))
         return True
 
@@ -1453,7 +1465,8 @@ class Workspace:
                         return True
                     continue
                 if item.action not in (
-                    "line", "rectangle", "circle", "point", "project"
+                    "line", "rectangle", "circle", "point", "project",
+                    "align_x",
                 ):
                     continue
                 if item.action == "line":
@@ -1901,7 +1914,10 @@ class Workspace:
                 color = self.text_secondary
             for item in group.items:
                 active = (
-                    item.action in ("line", "rectangle", "circle", "point")
+                    item.action in (
+                        "line", "rectangle", "circle", "point", "project",
+                        "align_x",
+                    )
                     and self._selected_tool == item.action
                 ) or (
                     selected_constraint is not None
@@ -4413,6 +4429,26 @@ class Workspace:
                     (tick_x, cy),
                     max(1, self._s(1)),
                 )
+        elif kind == "align_x":
+            thickness = max(1, self._s(2))
+            axis_y = cy + radius // 3
+            pygame.draw.line(
+                surface, color,
+                (cx - radius, axis_y), (cx + radius, axis_y), thickness,
+            )
+            pygame.draw.lines(
+                surface, color, False,
+                [(cx + radius - self._s(4), axis_y - self._s(3)),
+                 (cx + radius, axis_y),
+                 (cx + radius - self._s(4), axis_y + self._s(3))],
+                thickness,
+            )
+            pygame.draw.line(
+                surface, self.text_muted,
+                (cx - radius // 2, cy - radius),
+                (cx + radius // 3, cy - radius // 2),
+                max(1, self._s(1)),
+            )
         elif kind == "section_view":
             pygame.draw.circle(
                 surface, color, (cx - 1, cy - 1), radius - 2,
@@ -5012,6 +5048,11 @@ class Workspace:
                         event.pos, layout.viewport, document
                     )
                     return True
+                if self._selected_tool == "align_x":
+                    self._align_x_at(
+                        event.pos, layout.viewport, document
+                    )
+                    return True
                 if self._selected_tool == "rectangle":
                     point = self._rectangle_corner(
                         event.pos, layout.viewport, sketch
@@ -5454,6 +5495,17 @@ class Workspace:
         if edge is not None and self.on_project_edge is not None:
             self._clear_sketch_selection()
             self.on_project_edge(edge[0], edge[1])
+
+    def _align_x_at(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> None:
+        """Align the sketch X axis with the solid edge under the cursor."""
+        edge = self.viewport.renderer.pick_edge(
+            pos, region.rect, document, self.viewport.camera
+        )
+        if edge is not None and self.on_align_sketch_x is not None:
+            self._clear_sketch_selection()
+            self.on_align_sketch_x(edge[0], edge[1])
 
     def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":

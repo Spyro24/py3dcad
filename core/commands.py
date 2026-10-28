@@ -1,6 +1,7 @@
 """Undoable document editing commands."""
 
 import copy
+import math
 from abc import ABC, abstractmethod
 from typing import List, Optional, Sequence, Tuple
 
@@ -32,6 +33,65 @@ from .solver.objects import circle2d, point2d
 def _copy_points(points: List[Point]) -> List[Point]:
     """Return independent point objects for a command snapshot."""
     return [point2d(point) for point in points]
+
+
+def _dot3(first: Sequence[float], second: Sequence[float]) -> float:
+    """Return the dot product of two 3D vectors."""
+    return first[0] * second[0] + first[1] * second[1] + first[2] * second[2]
+
+
+def _cross3(first: Point3, second: Point3) -> Point3:
+    """Return the cross product of two 3D vectors."""
+    return (
+        first[1] * second[2] - first[2] * second[1],
+        first[2] * second[0] - first[0] * second[2],
+        first[0] * second[1] - first[1] * second[0],
+    )
+
+
+def _unit3(vector: Point3) -> Optional[Point3]:
+    """Return a unit vector, or None for a degenerate direction."""
+    length = math.sqrt(_dot3(vector, vector))
+    if length <= 1e-9:
+        return None
+    return (
+        vector[0] / length,
+        vector[1] / length,
+        vector[2] / length,
+    )
+
+
+def _aligned_frame(
+    frame: PlaneFrame, direction: Point3
+) -> Optional[PlaneFrame]:
+    """Return a frame whose local X axis follows ``direction``."""
+    normal = _unit3(frame.normal)
+    if normal is None:
+        return None
+    offset = _dot3(direction, normal)
+    planar = (
+        direction[0] - normal[0] * offset,
+        direction[1] - normal[1] * offset,
+        direction[2] - normal[2] * offset,
+    )
+    direction_length = math.sqrt(_dot3(direction, direction))
+    planar_length = math.sqrt(_dot3(planar, planar))
+    if planar_length <= 1e-6 * max(1.0, direction_length):
+        return None
+    u_axis = _unit3(planar)
+    if u_axis is None:
+        return None
+    if _dot3(u_axis, frame.u) < 0.0:
+        u_axis = (-u_axis[0], -u_axis[1], -u_axis[2])
+    v_axis = _unit3(_cross3(normal, u_axis))
+    if v_axis is None:
+        return None
+    u_axis = _unit3(_cross3(v_axis, normal))
+    if u_axis is None:
+        return None
+    return PlaneFrame(
+        frame.origin, u_axis, v_axis, normal, frame.label
+    )
 
 
 class Command(ABC):
@@ -115,6 +175,68 @@ class AddSketchCommand(Command):
         while f"Sketch {index}" in names:
             index += 1
         return f"Sketch {index}"
+
+
+class AlignSketchXCommand(Command):
+    """Rotate a sketch's local X axis to follow an existing solid edge."""
+
+    kind = "align_sketch_x"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        direction: Point3,
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.before = (
+            sketch.plane,
+            sketch.plane_label,
+            sketch.plane_origin,
+            sketch.plane_u,
+            sketch.plane_v,
+            sketch.plane_normal,
+        )
+        self.display_label = sketch.display_plane
+        self.frame = _aligned_frame(sketch.frame(), direction)
+
+    @property
+    def label(self) -> str:
+        return "Align Sketch X"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    @property
+    def is_valid(self) -> bool:
+        """Return whether the picked direction lies in the sketch plane."""
+        return self.frame is not None
+
+    def do(self) -> None:
+        if self.frame is None:
+            return
+        self.sketch.plane_label = self.display_label
+        self.sketch.plane_origin = self.frame.origin
+        self.sketch.plane_u = self.frame.u
+        self.sketch.plane_v = self.frame.v
+        self.sketch.plane_normal = self.frame.normal
+        self.document.refresh_projections()
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        (
+            self.sketch.plane,
+            self.sketch.plane_label,
+            self.sketch.plane_origin,
+            self.sketch.plane_u,
+            self.sketch.plane_v,
+            self.sketch.plane_normal,
+        ) = self.before
+        self.document.refresh_projections()
+        self.document.dirty = True
 
 
 class AddPointCommand(Command):

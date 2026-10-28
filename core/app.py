@@ -17,6 +17,7 @@ from .commands import (
     AddProjectionCommand,
     AddRectangleCommand,
     AddSketchCommand,
+    AlignSketchXCommand,
     BooleanExtrudeCommand,
     CommandStack,
     CompositeCommand,
@@ -264,6 +265,7 @@ class Application:
             on_add_circle=self.add_circle,
             on_add_rectangle=self.add_rectangle,
             on_project_edge=self.project_edge,
+            on_align_sketch_x=self.align_sketch_x,
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
@@ -573,6 +575,30 @@ class Application:
         if command.has_targets:
             stack.execute(command)
 
+    def align_sketch_x(self, feature_id: int, edge_index: int) -> None:
+        """Turn the active sketch's X axis toward one solid edge."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        edge = edge_for_ref(document, (feature_id, edge_index))
+        if edge is None:
+            return
+        direction = (
+            edge.end[0] - edge.start[0],
+            edge.end[1] - edge.start[1],
+            edge.end[2] - edge.start[2],
+        )
+        command = AlignSketchXCommand(document, sketch, direction)
+        if not command.is_valid:
+            return
+        stack.execute(command)
+        self._align_camera_to_active_sketch(document)
+
     def add_circle(self, center: Point, diameter: float) -> None:
         self._playing = False
         document = self.active_document()
@@ -779,7 +805,7 @@ class Application:
         cuts: Optional[List[List[int]]] = None,
         height: float = 20.0,
         start: float = 0.0,
-        operation: str = "new_body",
+        operation: Optional[str] = None,
         taper: float = 0.0,
     ) -> Optional[str]:
         """Extrude the selected sketch regions, returning an error text."""
@@ -791,6 +817,8 @@ class Application:
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
             return "Open a sketch to extrude"
+        if operation is None:
+            operation = "join" if sketch.is_custom_plane else "new_body"
         document.refresh_projections()
         if abs(height) <= 1e-9:
             return "Enter a distance greater than zero"
