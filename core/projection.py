@@ -324,13 +324,18 @@ def projected_shape(
     if len(unique) < 2:
         return plan
     closed = _distance3(unique[0][0], unique[-1][0]) <= 1e-9
-    loop = unique[:-1] if closed else unique
-    if len(loop) < 2:
-        return plan
-    if closed and len(loop) >= 3:
-        _plan_circle(document, sketch, feature_id, loop, plan)
+    if closed:
+        body = unique[:-1]
+        if len(body) < 3:
+            return plan
+        _plan_circle(document, sketch, feature_id, body, plan)
         if plan.circles:
             return plan
+        loop = _closed_loop(body, edge_start, edge_end)
+    else:
+        loop = unique
+    if len(loop) < 2:
+        return plan
     # Recognise straight and circular runs in 3D: an obliquely projected
     # arc is an ellipse, so splitting the projected polyline would mistake
     # its segments for short lines.
@@ -347,6 +352,32 @@ def projected_shape(
         document, sketch, feature_id, loop, kind, start, end, plan
     )
     return plan
+
+
+def _closed_loop(
+    body: Sequence[Tuple[Point3, Point2]],
+    edge_start: Sequence[float],
+    edge_end: Sequence[float],
+) -> List[Tuple[Point3, Point2]]:
+    """Rotate a closed chain so the seam is not inside the picked primitive.
+
+    ``_edge_run_points`` starts a closed chain at the picked edge, which
+    would otherwise split that edge's arc or line in two at the seam.
+    """
+    loop = list(body) + [body[0]]
+    world_loop = [world for world, _ in loop]
+    primitives = _split_primitives(world_loop)
+    picked = _picked_segment(world_loop, edge_start, edge_end)
+    if picked is None:
+        return loop
+    primitive = _primitive_at(primitives, picked)
+    if primitive is None:
+        return loop
+    _, start, end = primitive
+    if start != 0 or end >= len(body):
+        return loop
+    rotated = list(body[end:]) + list(body[:end])
+    return rotated + [rotated[0]]
 
 
 def _plan_circle(
