@@ -1,5 +1,7 @@
 """Window system for PY3DCAD."""
 
+import os
+
 import pygame
 from typing import Optional, Tuple
 
@@ -12,10 +14,15 @@ class Window:
         title: str = "PY3DCAD",
         size: Tuple[int, int] = (1280, 720),
         flags: int = pygame.RESIZABLE,
+        use_opengl: Optional[bool] = None,
     ) -> None:
         self.title = title
         self.size = size
         self.flags = flags
+        self.use_opengl = (
+            os.environ.get("PY3DCAD_RENDERER", "").lower() == "opengl"
+            if use_opengl is None else use_opengl
+        )
         self._surface: Optional[pygame.Surface] = None
         self._opengl = False
         self._gl = None
@@ -27,6 +34,13 @@ class Window:
         """Initialize pygame and create the window surface."""
         pygame.init()
         pygame.display.set_caption(self.title)
+        if self.use_opengl:
+            self._create_opengl_window()
+        if self._surface is None:
+            self._surface = pygame.display.set_mode(self.size, self.flags)
+
+    def _create_opengl_window(self) -> None:
+        """Create the optional OpenGL display without risking the fallback."""
         try:
             from OpenGL import GL
 
@@ -38,11 +52,9 @@ class Window:
             self._opengl = bool(GL.glGetString(GL.GL_VERSION))
             if self._opengl:
                 self._surface = pygame.Surface(self.size).convert_alpha()
-                return
         except Exception:
             self._opengl = False
             self._gl = None
-        self._surface = pygame.display.set_mode(self.size, self.flags)
 
     @property
     def surface(self) -> pygame.Surface:
