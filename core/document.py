@@ -103,6 +103,41 @@ class Document:
 
         refresh_document_projections(self)
 
+    def features_for_sketch(self, sketch: Sketch) -> List[Extrude]:
+        """Return every feature driven by one sketch."""
+        return [
+            feature for feature in self.features
+            if feature.sketch_id == sketch.id
+        ]
+
+    def recompute(self) -> None:
+        """Bring every feature up to date with its edited sketch.
+
+        Solid faces are already built on demand from the sketch, so the work
+        here is the state that caches sketch indices: fillet sources and the
+        projected geometry that follows the resulting body.
+        """
+        for feature in self.features:
+            sketch = self.sketch(feature.sketch_id)
+            if sketch is not None:
+                feature.recompute(sketch)
+        self.refresh_projections()
+
+    def remap_sketch_points(
+        self,
+        sketch: Sketch,
+        removed: int,
+        edge_map: Dict[int, int],
+    ) -> None:
+        """Keep feature references valid after a sketch point is deleted."""
+        for feature in self.features_for_sketch(sketch):
+            feature.remap_point(removed, edge_map)
+
+    def remap_sketch_edges(self, sketch: Sketch, removed: int) -> None:
+        """Keep cap-fillet references valid after a sketch edge is deleted."""
+        for feature in self.features_for_sketch(sketch):
+            feature.remap_edge(sketch, removed)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
@@ -116,7 +151,7 @@ class Document:
 
     def save(self, path: str) -> None:
         """Write the document as versioned JSON and adopt the file's name."""
-        self.refresh_projections()
+        self.recompute()
         target = Path(path).expanduser()
         if target.suffix.lower() != ".py3dcad":
             target = target.with_suffix(".py3dcad")
@@ -160,7 +195,7 @@ class Document:
         consumed = {feature.sketch_id for feature in features}
         active = sketches[-1].id if sketches and sketches[-1].id not in consumed else None
         name = str(payload.get("name") or source.stem)
-        return cls(
+        document = cls(
             id=doc_id,
             name=name,
             path=str(source),
@@ -174,3 +209,5 @@ class Document:
                 if payload.get("selected_plane") else None
             ),
         )
+        document.recompute()
+        return document

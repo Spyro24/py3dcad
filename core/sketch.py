@@ -1624,6 +1624,26 @@ class Sketch:
                 return circle
         return None
 
+    def loop_is_closed(self, loop: Sequence[int]) -> bool:
+        """Return whether a profile loop still has every edge it needs.
+
+        Deleting a sketch edge must invalidate any feature profile that used
+        it.  Point-index loops alone would keep describing the old polygon.
+        """
+        if len(loop) == 1:
+            return self.circle_for_loop(loop) is not None
+        if len(loop) < 3:
+            return False
+        pairs = set()
+        for start, end in self.edges:
+            pairs.add((start, end))
+            pairs.add((end, start))
+        count = len(loop)
+        return all(
+            (loop[index], loop[(index + 1) % count]) in pairs
+            for index in range(count)
+        )
+
     def loop_points(self, loop: Sequence[int]) -> List[Point]:
         """Return the boundary polygon for an edge loop or a circle loop.
 
@@ -1763,10 +1783,14 @@ class Sketch:
         self.circles.append(circle)
         return circle
 
-    def remove_point(self, index: int) -> None:
-        """Remove a point, its edges, and measurements that depend on them."""
+    def remove_point(self, index: int) -> Dict[int, int]:
+        """Remove a point, its edges, and measurements that depend on them.
+
+        Returns the surviving edge index map so features can keep their
+        references valid after the deletion shifted the edge list.
+        """
         if not 0 <= index < len(self.points):
-            return
+            return {}
         removed_point = self.points.pop(index)
         circles: List[Circle] = []
         circle_map: Dict[int, int] = {}
@@ -1814,6 +1838,7 @@ class Sketch:
                 )
         self.measurements = measurements
         self._remap_projected_points(index, edge_map, circle_map)
+        return edge_map
 
     def remove_edge(self, index: int) -> None:
         """Remove one edge and any measurement that depends on it."""
@@ -2279,20 +2304,32 @@ class Fillet:
     ``"top"`` or ``"bottom"`` for an edge of the matching cap.  ``(u, v)``
     is the profile corner for a vertical fillet and the midpoint of the
     profile segment for a cap fillet.
+
+    ``point``/``edge`` remember which sketch entity produced the fillet.
+    They keep the rounding on its source when the sketch is edited, instead
+    of leaving it at a stale coordinate.  Older files without them are
+    rebound from ``(u, v)`` on the first recompute.
     """
 
     kind: str = "vertical"
     u: float = 0.0
     v: float = 0.0
     radius: float = 0.0
+    point: Optional[int] = None
+    edge: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "kind": self.kind,
             "u": self.u,
             "v": self.v,
             "radius": self.radius,
         }
+        if self.point is not None:
+            data["point"] = self.point
+        if self.edge is not None:
+            data["edge"] = self.edge
+        return data
 
     @classmethod
     def from_dict(cls, data: Any) -> Optional["Fillet"]:
@@ -2304,6 +2341,8 @@ class Fillet:
                 radius = float(data.get("radius", 0.0))
             except (TypeError, ValueError):
                 return None
+            point = _optional_index(data.get("point"))
+            edge = _optional_index(data.get("edge"))
         elif isinstance(data, (list, tuple)) and len(data) >= 3:
             # Version 1 stored only vertical fillets as [u, v, radius].
             kind = "vertical"
@@ -2313,13 +2352,107 @@ class Fillet:
                 radius = float(data[2])
             except (TypeError, ValueError):
                 return None
+            point = None
+            edge = None
         else:
             return None
         if kind not in ("vertical", "top", "bottom"):
             kind = "vertical"
         if radius <= 0.0:
             return None
-        return cls(kind, u, v, radius)
+        return cls(kind, u, v, radius, point, edge)
+
+    def bind(self, sketch: Sketch) -> None:
+        """Remember the sketch point or edge that produced this fillet."""
+        if self.point is not None or self.edge is not None:
+            return
+        if self.kind == "vertical":
+            self.point = _point_near(sketch, (self.u, self.v))
+        else:
+            self.edge = _edge_near(sketch, (self.u, self.v))
+
+    def refresh(self, sketch: Sketch) -> bool:
+        """Move the fillet with its source; return False when it is gone."""
+        self.bind(sketch)
+        if self.point is not None:
+            if not 0 <= self.point < len(sketch.points):
+                self.point = None
+                return self.edge is not None
+            point = sketch.points[self.point]
+            self.u = float(point[0])
+            self.v = float(point[1])
+            return True
+        if self.edge is not None:
+            if not 0 <= self.edge < len(sketch.edges):
+                self.edge = None
+                return False
+            samples = sketch.edge_points(self.edge)
+            if not samples:
+                return False
+            if len(samples) == 2:
+                self.u = (samples[0][0] + samples[1][0]) * 0.5
+                self.v = (samples[0][1] + samples[1][1]) * 0.5
+            else:
+                middle = samples[len(samples) // 2]
+                self.u = float(middle[0])
+                self.v = float(middle[1])
+            return True
+        return True
+
+
+def _optional_index(value: Any) -> Optional[int]:
+    """Parse an optional non-negative entity index."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    return index if index >= 0 else None
+
+
+def _point_near(
+    sketch: Sketch, point: Point, tolerance: float = 1e-4
+) -> Optional[int]:
+    """Return the sketch point at one local coordinate."""
+    for index, existing in enumerate(sketch.points):
+        if (
+            abs(existing[0] - point[0]) <= tolerance
+            and abs(existing[1] - point[1]) <= tolerance
+        ):
+            return index
+    return None
+
+
+def _edge_near(
+    sketch: Sketch, point: Point, tolerance: float = 1e-4
+) -> Optional[int]:
+    """Return the sketch edge that passes through one local coordinate."""
+    for index in range(len(sketch.edges)):
+        samples = sketch.edge_points(index)
+        for first, second in zip(samples, samples[1:]):
+            if _segment_distance(point, first, second) <= tolerance:
+                return index
+    return None
+
+
+def _segment_distance(
+    point: Point, first: Point, second: Point
+) -> float:
+    """Return the distance from a point to a line segment."""
+    dx = second[0] - first[0]
+    dy = second[1] - first[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 1e-18:
+        return math.hypot(point[0] - first[0], point[1] - first[1])
+    amount = (
+        (point[0] - first[0]) * dx + (point[1] - first[1]) * dy
+    ) / length_squared
+    amount = min(1.0, max(0.0, amount))
+    return math.hypot(
+        point[0] - (first[0] + dx * amount),
+        point[1] - (first[1] + dy * amount),
+    )
 
 
 @dataclass
@@ -2415,9 +2548,13 @@ class Extrude:
     operation: str = "new_body"
     # A combined body stores its finished z-slices instead of one prism.
     slices: List[ExtrudeSlice] = field(default_factory=list)
+    # Legacy files may name no profile and rely on the sketch's first loop.
+    # Once a profile is deleted the feature must stay empty instead of
+    # silently extruding whatever geometry is left.
+    fallback: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "id": self.id,
             "type": "extrude",
             "name": self.name,
@@ -2433,6 +2570,9 @@ class Extrude:
             "fillets": [fillet.to_dict() for fillet in self.fillets],
             "slices": [entry.to_dict() for entry in self.slices],
         }
+        if not self.fallback:
+            data["fallback"] = False
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Extrude":
@@ -2448,6 +2588,7 @@ class Extrude:
             start=float(data.get("start", 0.0)),
             operation=str(data.get("operation", "new_body")),
             slices=cls._parse_slices(data.get("slices", [])),
+            fallback=bool(data.get("fallback", True)),
         )
 
     @staticmethod
@@ -2508,10 +2649,14 @@ class Extrude:
         """Return the selected profiles as polygons, including circles."""
         loops: List[List[Point]] = []
         for profile in self.profiles:
+            if not sketch.loop_is_closed(profile):
+                continue
             points = sketch.loop_points(profile)
             if len(points) >= 3:
                 loops.append(points)
         for region in self.regions:
+            if not all(sketch.loop_is_closed(loop) for loop in region):
+                continue
             polygons: List[List[Point]] = []
             for loop in region:
                 points = sketch.loop_points(loop)
@@ -2521,6 +2666,8 @@ class Extrude:
                 loops.extend(intersect_loops(polygons))
         if loops or self.profiles or self.regions:
             return loops
+        if not self.fallback:
+            return []
         fallback = sketch.profile_points()
         return [fallback] if len(fallback) >= 3 else []
 
@@ -2528,7 +2675,124 @@ class Extrude:
         """Return the overlapping profiles that cut the selected material."""
         loops: List[List[Point]] = []
         for cut in self.cuts:
+            if not sketch.loop_is_closed(cut):
+                continue
             points = sketch.loop_points(cut)
             if len(points) >= 3:
                 loops.append(points)
         return loops
+
+    def recompute(self, sketch: Sketch) -> None:
+        """Re-derive feature state from the current sketch geometry.
+
+        Feature loops are point indices, so they are remapped when points are
+        deleted.  Fillets also keep a source reference and follow the corner
+        or edge they were placed on instead of staying at a stale coordinate.
+        """
+        self.fillets = [
+            fillet for fillet in self.fillets
+            if fillet.refresh(sketch)
+        ]
+        self._contact_face_cache = None
+
+    def remap_point(self, removed: int, edge_map: Dict[int, int]) -> None:
+        """Drop or shift feature references after one sketch point vanishes."""
+        counts = (len(self.profiles), len(self.regions))
+        self.profiles = _remap_loops(self.profiles, removed)
+        self.regions = _remap_regions(self.regions, removed)
+        self.cuts = _remap_loops(self.cuts, removed)
+        if counts != (len(self.profiles), len(self.regions)):
+            self.fallback = False
+        fillets: List[Fillet] = []
+        for fillet in self.fillets:
+            if fillet.point is not None:
+                if fillet.point == removed:
+                    continue
+                if fillet.point > removed:
+                    fillet.point -= 1
+            if fillet.edge is not None:
+                mapped = edge_map.get(fillet.edge)
+                if mapped is None:
+                    continue
+                fillet.edge = mapped
+            fillets.append(fillet)
+        self.fillets = fillets
+        self._contact_face_cache = None
+
+    def remap_edge(self, sketch: Sketch, removed: int) -> None:
+        """Drop or shift cap fillets after one sketch edge vanishes."""
+        fillets: List[Fillet] = []
+        for fillet in self.fillets:
+            if fillet.edge is not None:
+                if fillet.edge == removed:
+                    continue
+                if fillet.edge > removed:
+                    fillet.edge -= 1
+            fillets.append(fillet)
+        self.fillets = fillets
+        self._prune_open_loops(sketch)
+        self._contact_face_cache = None
+
+    def _prune_open_loops(self, sketch: Sketch) -> None:
+        """Drop profiles and regions whose boundary lost a sketch edge."""
+        profiles = [
+            loop for loop in self.profiles
+            if sketch.loop_is_closed(loop)
+        ]
+        regions: List[List[List[int]]] = []
+        for region in self.regions:
+            if all(sketch.loop_is_closed(loop) for loop in region):
+                regions.append(region)
+        cuts = [
+            loop for loop in self.cuts
+            if sketch.loop_is_closed(loop)
+        ]
+        if (
+            len(profiles) != len(self.profiles)
+            or len(regions) != len(self.regions)
+        ):
+            self.fallback = False
+        self.profiles = profiles
+        self.regions = regions
+        self.cuts = cuts
+
+
+def _remap_loop(
+    loop: Sequence[int], removed: int
+) -> Optional[List[int]]:
+    """Return a loop with shifted indices, or None if it lost a point."""
+    if removed in loop:
+        return None
+    return [
+        index - 1 if index > removed else index for index in loop
+    ]
+
+
+def _remap_loops(
+    loops: Sequence[Sequence[int]], removed: int
+) -> List[List[int]]:
+    """Remap profile loops after one point is removed."""
+    mapped: List[List[int]] = []
+    for loop in loops:
+        result = _remap_loop(loop, removed)
+        if result is not None:
+            mapped.append(result)
+    return mapped
+
+
+def _remap_regions(
+    regions: Sequence[Sequence[Sequence[int]]], removed: int
+) -> List[List[List[int]]]:
+    """Remap arrangement regions, dropping any region that lost a point."""
+    mapped: List[List[List[int]]] = []
+    for region in regions:
+        loops: List[List[int]] = []
+        for loop in region:
+            result = _remap_loop(loop, removed)
+            if result is None:
+                loops = []
+                break
+            loops.append(result)
+        if loops:
+            mapped.append(loops)
+    return mapped

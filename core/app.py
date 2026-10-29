@@ -519,7 +519,7 @@ class Application:
         edge = edge_for_ref(document, (feature_id, edge_index))
         if edge is None:
             return
-        document.refresh_projections()
+        document.recompute()
         command = AddProjectionCommand(
             document, sketch, feature_id,
             chains=[edge.chain],
@@ -772,7 +772,7 @@ class Application:
             return "Open a sketch to extrude"
         if operation is None:
             operation = "join" if sketch.is_custom_plane else "new_body"
-        document.refresh_projections()
+        document.recompute()
         if abs(height) <= 1e-9:
             return "Enter a distance greater than zero"
         if abs(taper) > 1e-9:
@@ -1291,7 +1291,7 @@ class Application:
 
         document = self.active_document()
         if document is not None:
-            document.refresh_projections()
+            document.recompute()
             stack = self._active_stack()
             full_history, filtered_history = self._timeline(stack)
             radius = self.workspace.fillet_preview_radius()

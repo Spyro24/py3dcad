@@ -264,8 +264,14 @@ class AddPointCommand(Command):
         self.document.dirty = True
 
     def undo(self) -> None:
-        if self.index is not None:
-            self.sketch.remove_point(self.index)
+        if self.index is not None and 0 <= self.index < len(
+            self.sketch.points
+        ):
+            edge_map = self.sketch.remove_point(self.index)
+            self.document.remap_sketch_points(
+                self.sketch, self.index, edge_map
+            )
+            self.document.recompute()
         self.document.dirty = True
 
 
@@ -309,12 +315,14 @@ class MovePointCommand(Command):
         if self.next_points is None:
             return
         self.sketch.apply_point_positions(self.next_points)
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
         if self.previous_points is None:
             return
         self.sketch.apply_point_positions(self.previous_points)
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -372,12 +380,14 @@ class MoveEdgeCommand(Command):
         if self.next_points is None:
             return
         self.sketch.apply_point_positions(self.next_points)
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
         if self.previous_points is None:
             return
         self.sketch.apply_point_positions(self.previous_points)
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -449,6 +459,7 @@ class SetEdgeConstraintCommand(Command):
         if self.next_points is not None:
             self.sketch.apply_point_positions(self.next_points)
         self.sketch.edge_constraints[self.index] = self.constraint
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -459,6 +470,7 @@ class SetEdgeConstraintCommand(Command):
         self.sketch.edge_constraints[self.index] = (
             self.previous_constraint
         )
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -531,6 +543,7 @@ class AddMeasurementCommand(Command):
                 self.sketch.points
             )
         self.sketch.apply_point_positions(self.next_points)
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -548,6 +561,7 @@ class AddMeasurementCommand(Command):
                 pass
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -674,6 +688,7 @@ class SetMeasurementValueCommand(Command):
             self._replace(self.value)
         if self.next_points is not None:
             self.sketch.apply_point_positions(self.next_points)
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -682,6 +697,7 @@ class SetMeasurementValueCommand(Command):
         self._replace(self.previous)
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -765,8 +781,12 @@ class AddLineCommand(Command):
                 index < len(self.sketch.points)
                 and index not in referenced
             ):
-                self.sketch.remove_point(index)
+                edge_map = self.sketch.remove_point(index)
+                self.document.remap_sketch_points(
+                    self.sketch, index, edge_map
+                )
         self.created_points = []
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -870,8 +890,12 @@ class AddRectangleCommand(Command):
                 index < len(self.sketch.points)
                 and index not in referenced
             ):
-                self.sketch.remove_point(index)
+                edge_map = self.sketch.remove_point(index)
+                self.document.remap_sketch_points(
+                    self.sketch, index, edge_map
+                )
         self.created_points = []
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -1217,8 +1241,12 @@ class AddCircleCommand(Command):
                 for circle in self.sketch.circles
             ):
                 continue
-            self.sketch.remove_point(index)
+            edge_map = self.sketch.remove_point(index)
+            self.document.remap_sketch_points(
+                self.sketch, index, edge_map
+            )
         self.created_points = []
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -1245,6 +1273,7 @@ class DeleteSketchEntitiesCommand(Command):
         self.entity = entity
         self.loops = [list(loop) for loop in (loops or [])]
         self._before = None
+        self._before_features = None
         self.edge_indices: List[int] = []
         self.point_indices: List[int] = []
         self._plan()
@@ -1342,10 +1371,28 @@ class DeleteSketchEntitiesCommand(Command):
                 self.sketch.projected_edges,
                 self.sketch.projected_circles,
             ))
+            self._before_features = [
+                (
+                    feature,
+                    copy.deepcopy(feature.profiles),
+                    copy.deepcopy(feature.regions),
+                    copy.deepcopy(feature.cuts),
+                    copy.deepcopy(feature.fillets),
+                    feature.fallback,
+                )
+                for feature in self.document.features_for_sketch(
+                    self.sketch
+                )
+            ]
         for index in sorted(self.edge_indices, reverse=True):
             self.sketch.remove_edge(index)
+            self.document.remap_sketch_edges(self.sketch, index)
         for index in sorted(self.point_indices, reverse=True):
-            self.sketch.remove_point(index)
+            edge_map = self.sketch.remove_point(index)
+            self.document.remap_sketch_points(
+                self.sketch, index, edge_map
+            )
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -1364,6 +1411,15 @@ class DeleteSketchEntitiesCommand(Command):
         self.sketch.projected_points = projected_points
         self.sketch.projected_edges = projected_edges
         self.sketch.projected_circles = projected_circles
+        for feature, profiles, regions, cuts, fillets, fallback in (
+            self._before_features or []
+        ):
+            feature.profiles = copy.deepcopy(profiles)
+            feature.regions = copy.deepcopy(regions)
+            feature.cuts = copy.deepcopy(cuts)
+            feature.fillets = copy.deepcopy(fillets)
+            feature.fallback = fallback
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -1547,7 +1603,11 @@ class AddFilletCommand(Command):
         elif not any(
             entry is self.fillet for entry in self.feature.fillets
         ):
+            sketch = self.document.sketch(self.feature.sketch_id)
+            if sketch is not None:
+                self.fillet.bind(sketch)
             self.feature.fillets.append(self.fillet)
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
@@ -1558,6 +1618,7 @@ class AddFilletCommand(Command):
             for entry in self.feature.fillets
             if entry is not self.fillet
         ]
+        self.document.recompute()
         self.document.dirty = True
 
 
