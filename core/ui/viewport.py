@@ -6,7 +6,7 @@ import pygame
 
 from ..document import Document
 from ..faces import Face, edge_for_ref, face_for_ref
-from ..render import OrbitCamera, SceneRenderer
+from ..render import OpenGLRenderer, OrbitCamera, SceneRenderer
 from ..sketch import PlaneLike, Point
 from .layout import Rect
 
@@ -18,6 +18,7 @@ class Viewport:
         self.ui_scale = 1.0
         self.camera = OrbitCamera()
         self.renderer = SceneRenderer()
+        self.opengl_renderer = OpenGLRenderer(self.renderer.palette)
         self.show_origin = True
         self.show_orientation_cube = True
         self._panning = False
@@ -136,12 +137,29 @@ class Viewport:
         previous_clip = surface.get_clip()
         surface.set_clip(region.rect)
 
+        active = document.sketch(document.active_sketch_id)
+        use_opengl = (
+            self.opengl_renderer.available
+            and not ghost_faces
+            and not document.selected_faces
+            and not document.selected_edges
+            and not (active is not None and active.is_custom_plane)
+        )
         self.renderer.draw(
             surface, region.rect, document, self.camera,
             preview_document=preview_document,
             ghost_faces=ghost_faces,
             highlight_features=highlight_features,
+            draw_solids=not use_opengl,
         )
+        if use_opengl and not self.opengl_renderer.draw(
+            surface, region.rect, preview_document or document, self.camera,
+            highlight_features,
+        ):
+            self.renderer._draw_solids(
+                surface, region.rect, preview_document or document,
+                self.camera, highlight_features,
+            )
         if self.show_orientation_cube:
             self.renderer.draw_orientation_cube(
                 surface, region.rect, self.camera

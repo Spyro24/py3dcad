@@ -13,6 +13,7 @@ from .camera import (
 )
 from .mesh import Face, prism_faces
 from .orientation_cube import OrientationCube
+from .opengl import OpenGLRenderer
 from .scene import ScenePalette, SceneRenderer
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "Face",
     "prism_faces",
     "OrientationCube",
+    "OpenGLRenderer",
     "ScenePalette",
     "SceneRenderer",
 ]

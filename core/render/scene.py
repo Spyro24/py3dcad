@@ -179,6 +179,7 @@ class SceneRenderer:
         preview_document: Optional[Document] = None,
         ghost_faces: Sequence[Face] = (),
         highlight_features: Sequence[int] = (),
+        draw_solids: bool = True,
     ) -> None:
         self._init_fonts()
         active = document.sketch(document.active_sketch_id)
@@ -194,11 +195,12 @@ class SceneRenderer:
             self._draw_axes(surface, rect, camera)
             self._draw_origin_marker(surface, rect, camera)
         self._draw_sketch_lines(surface, rect, document, camera)
-        self._draw_solids(
-            surface, rect, preview_document or document, camera,
-            highlight_features,
-        )
-        if ghost_faces:
+        if draw_solids:
+            self._draw_solids(
+                surface, rect, preview_document or document, camera,
+                highlight_features,
+            )
+        if draw_solids and ghost_faces:
             self._draw_ghost_solids(
                 surface, rect, ghost_faces, camera
             )
