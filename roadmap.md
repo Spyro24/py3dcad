@@ -67,6 +67,10 @@ workspaces/design/solid
 - Projection of triangles into pygame
 - Wireframe view
 - Simple shaded view with rotation
+- Replace the temporary viewport renderer with a native PyOpenGL pipeline:
+  tessellate concave faces and holes, use depth buffering, and render
+  selection, outlines, sketches, and previews without pygame framebuffer
+  compositing. Validate it against complex saved-model regression cases.
 
 ## M6 - Files and Export
 - Save and load as versioned JSON
