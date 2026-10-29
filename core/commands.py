@@ -423,6 +423,18 @@ class SetEdgeConstraintCommand(Command):
                 0 <= first < len(sketch.points)
                 and 0 <= second < len(sketch.points)
             ):
+                if (
+                    sketch.is_projected_point(first)
+                    and sketch.is_projected_point(second)
+                    and not sketch.edge_is_aligned(
+                        index, self.constraint
+                    )
+                ):
+                    # Both endpoints follow the solid, so a constraint that
+                    # is not already satisfied cannot be enforced without
+                    # detaching the projection.
+                    self.constraint = None
+                    return
                 self.previous_points = _copy_points(sketch.points)
                 next_points = _copy_points(sketch.points)
                 next_points[second] = aligned_edge_endpoint(
@@ -533,9 +545,19 @@ class AddCoincidentCommand(Command):
         return True
 
     def _anchor_indices(self) -> List[int]:
-        """Keep the first picked point fixed so the other one moves onto it."""
+        """Keep the fixed point still so the other one moves onto it.
+
+        A projected point is reference geometry, so it must be the anchor
+        whenever one side of the pair follows the solid.
+        """
         if self.coincident is None:
             return []
+        for ref in (self.coincident.first, self.coincident.second):
+            if (
+                ref[0] == "point"
+                and self.sketch.is_projected_point(ref[1])
+            ):
+                return [ref[1]]
         if self.coincident.first[0] == "point":
             return [self.coincident.first[1]]
         if self.coincident.second[0] == "point":

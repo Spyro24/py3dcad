@@ -256,6 +256,7 @@ class Application:
             on_add_line=self.add_line,
             on_add_circle=self.add_circle,
             on_add_rectangle=self.add_rectangle,
+            on_project_point=self.project_point,
             on_project_edge=self.project_edge,
             on_align_sketch_x=self.align_sketch_x,
             on_move_point=self.move_point,
@@ -510,6 +511,25 @@ class Application:
             AddRectangleCommand(document, sketch, first, opposite)
         )
 
+    def project_point(
+        self, feature_id: int, point: Tuple[float, float, float]
+    ) -> None:
+        """Project one solid vertex into the active sketch."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        document.recompute()
+        command = AddProjectionCommand(
+            document, sketch, feature_id, points=[point]
+        )
+        if command.has_targets:
+            stack.execute(command)
+
     def project_edge(self, feature_id: int, edge_index: int) -> None:
         """Project the exact shape of one solid edge into the sketch."""
         self._playing = False
@@ -645,11 +665,18 @@ class Application:
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or not 0 <= index < len(sketch.edges):
             return
-        if sketch.is_projected_edge(index):
-            return
         if constraint not in ("horizontal", "vertical"):
             return
         if sketch.edge_constraint(index) == constraint:
+            return
+        first, second = sketch.edges[index]
+        if (
+            sketch.is_projected_point(first)
+            and sketch.is_projected_point(second)
+            and not sketch.edge_is_aligned(index, constraint)
+        ):
+            # Both endpoints follow the solid; the constraint cannot be
+            # enforced without detaching the projection.
             return
         stack.execute(
             SetEdgeConstraintCommand(
@@ -687,8 +714,15 @@ class Application:
                 continue
             if not 0 <= index < len(sketch.points):
                 return
-            if sketch.is_projected_point(index):
-                return
+        # Two projected points are both fixed by the solid, so a coincidence
+        # between them could never be enforced.
+        if (
+            normalized_first[0] == "point"
+            and normalized_second[0] == "point"
+            and sketch.is_projected_point(normalized_first[1])
+            and sketch.is_projected_point(normalized_second[1])
+        ):
+            return
         key = tuple(sorted((normalized_first, normalized_second)))
         if any(
             coincidence.key() == key

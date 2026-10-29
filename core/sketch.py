@@ -1583,6 +1583,31 @@ class Sketch:
             return self.edge_constraints[index]
         return None
 
+    def edge_is_aligned(
+        self, index: int, constraint: str
+    ) -> bool:
+        """Return whether an edge already satisfies an axis constraint."""
+        if not 0 <= index < len(self.edges):
+            return False
+        first, second = self.edges[index]
+        if not (
+            0 <= first < len(self.points)
+            and 0 <= second < len(self.points)
+        ):
+            return False
+        start = self.points[first]
+        end = self.points[second]
+        delta_x = end[0] - start[0]
+        delta_y = end[1] - start[1]
+        tolerance = 1e-6 * max(
+            1.0, math.hypot(delta_x, delta_y)
+        )
+        if constraint == "horizontal":
+            return abs(delta_y) <= tolerance
+        if constraint == "vertical":
+            return abs(delta_x) <= tolerance
+        return False
+
     def constrain_axis_changes(
         self,
         points: List[Point],
@@ -1621,6 +1646,13 @@ class Sketch:
             list(locked) if locked is not None else list(changed_order)
         )
         excluded = set(excluded_edges or ())
+        # Projected points follow the solid body.  They are reference
+        # geometry, so constraints must anchor to them instead of moving
+        # them; otherwise the next projection refresh would undo the edit.
+        projected = {
+            link.point for link in self.projected_points
+            if 0 <= link.point < count
+        }
 
         horizontal = list(range(count))
         vertical = list(range(count))
@@ -1678,15 +1710,27 @@ class Sketch:
             for members in groups.values():
                 target: Optional[float] = None
                 anchor = _pick_anchor(members, locked_rank, changed_rank)
+                fixed_members = [
+                    index for index in members if index in projected
+                ]
                 if origin is not None and any(
                     index in origin_points for index in members
                 ):
                     target = origin[axis]
+                elif fixed_members:
+                    # A projected point is already positioned by the solid.
+                    # Align the free members of its group to it and leave the
+                    # projected point itself untouched.
+                    fixed_anchor = _pick_anchor(
+                        fixed_members, locked_rank, changed_rank
+                    )
+                    target = points[fixed_anchor][axis]
                 elif previous is not None and len(previous) == count:
                     shifts = [
                         points[index][axis] - previous[index][axis]
                         for index in members
-                        if abs(
+                        if index not in projected
+                        and abs(
                             points[index][axis]
                             - previous[index][axis]
                         ) > 1e-12
@@ -1699,6 +1743,8 @@ class Sketch:
                 if target is None:
                     target = points[anchor][axis]
                 for index in members:
+                    if index in projected:
+                        continue
                     point = points[index]
                     points[index] = point2d((
                         (target, point[1])

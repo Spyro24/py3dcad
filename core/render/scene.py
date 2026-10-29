@@ -425,6 +425,47 @@ class SceneRenderer:
         )
         return feature_id, edge_index, edge
 
+    def pick_vertex(
+        self,
+        pos: Point2,
+        rect: pygame.Rect,
+        document: Document,
+        camera: OrbitCamera,
+    ) -> Optional[Tuple[int, Tuple[float, float, float]]]:
+        """Return the solid vertex nearest to a screen position."""
+        center = rect.center
+        tolerance = float(self._s(8))
+        view = camera.view_direction()
+        hits: List[
+            Tuple[float, float, int, Tuple[float, float, float]]
+        ] = []
+        seen: Set[Tuple[float, ...]] = set()
+        for feature_id, _, edge in iter_solid_edges(document):
+            if not edge_visible(edge, view):
+                continue
+            for vertex in (edge.start, edge.end):
+                key = tuple(round(value, 6) for value in vertex)
+                if key in seen:
+                    continue
+                seen.add(key)
+                screen = camera.project(vertex, center)
+                distance = math.hypot(
+                    pos[0] - screen[0], pos[1] - screen[1]
+                )
+                if distance > tolerance:
+                    continue
+                hits.append((
+                    distance,
+                    -camera.depth((vertex,)),
+                    feature_id,
+                    vertex,
+                ))
+        if not hits:
+            return None
+        hits.sort(key=lambda item: (item[0], item[1]))
+        _, _, feature_id, vertex = hits[0]
+        return feature_id, vertex
+
     @staticmethod
     def _point_segment_distance(
         pos: Point2, start: Point2, end: Point2

@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Sequence, Set, Tuple
 import pygame
 
 from ..document import Document
-from ..faces import Face
+from ..faces import Edge, Face, edge_for_ref
 from ..preview import ExtrudePreview, FilletPreview
 from ..profiles import (
     build_regions, intersect_loops, loop_cuts_selection, point_in_polygon,
@@ -258,6 +258,9 @@ class Workspace:
         on_delete_sketch: Optional[
             Callable[[Optional[Tuple[str, int]], List[List[int]]], bool]
         ] = None,
+        on_project_point: Optional[
+            Callable[[int, Tuple[float, float, float]], None]
+        ] = None,
         on_project_edge: Optional[
             Callable[[int, int], None]
         ] = None,
@@ -287,6 +290,7 @@ class Workspace:
         self.on_set_measurement_value = on_set_measurement_value
         self.on_fillet = on_fillet
         self.on_delete_sketch = on_delete_sketch
+        self.on_project_point = on_project_point
         self.on_project_edge = on_project_edge
         self.on_align_sketch_x = on_align_sketch_x
 
@@ -332,6 +336,11 @@ class Workspace:
         self._measurement_edit_pristine = False
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
+        # Solid reference geometry previewed by the projection tool.
+        self._hover_project_vertex: Optional[
+            Tuple[int, Tuple[float, float, float]]
+        ] = None
+        self._hover_project_edge: Optional[Tuple[int, int, Edge]] = None
         # A selection is a list of arrangement regions.  Each region is a
         # tuple of loop indices; a single loop is a one-element tuple and
         # overlapping loops form their intersection (for example a lens).
@@ -729,6 +738,7 @@ class Workspace:
         self._draw_rectangle_preview(surface, layout.viewport, document)
         self._draw_circle_preview(surface, layout.viewport, document)
         self._draw_sketch_selection(surface, layout.viewport, document)
+        self._draw_projection_hover(surface, layout.viewport)
         self._draw_extrude_arrow(surface, layout.viewport)
         self._draw_fillet_arrow(surface, layout.viewport)
         if layout.command_bar.w > 0:
@@ -1712,6 +1722,9 @@ class Workspace:
         sketch: Sketch,
     ) -> Optional[Tuple[str, int]]:
         """Pick a sketch point or the projected document origin."""
+        index = self._pick_sketch_point(pos, region, sketch)
+        if index is not None:
+            return ("point", index)
         if self.viewport.show_origin:
             screen = self._project_sketch_point(
                 sketch, sketch.origin_point(), region
@@ -1720,9 +1733,6 @@ class Workspace:
                 pos[0] - screen[0], pos[1] - screen[1]
             ) <= self._s(9):
                 return ("origin", -1)
-        index = self._pick_sketch_point(pos, region, sketch)
-        if index is not None and not sketch.is_projected_point(index):
-            return ("point", index)
         return None
 
     def _resolve_measurement_kind(
@@ -5851,12 +5861,85 @@ class Workspace:
             return
         self.on_move_point(index, current)
 
+    def _update_projection_hover(
+        self, pos: Tuple[int, int], region: Rect, document: Document
+    ) -> None:
+        """Remember which solid vertex or edge the projection tool will use."""
+        self._hover_project_vertex = None
+        self._hover_project_edge = None
+        renderer = self.viewport.renderer
+        camera = self.viewport.camera
+        vertex = renderer.pick_vertex(
+            pos, region.rect, document, camera
+        )
+        if vertex is not None:
+            self._hover_project_vertex = vertex
+            return
+        edge = renderer.pick_edge(
+            pos, region.rect, document, camera
+        )
+        if edge is not None:
+            resolved = edge_for_ref(document, (edge[0], edge[1]))
+            self._hover_project_edge = (
+                edge[0], edge[1], resolved or edge[2]
+            )
+
+    def _draw_projection_hover(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        """Outline the solid vertex or edge the projection tool will copy."""
+        if (
+            self._selected_tool != "project"
+            or (
+                self._hover_project_vertex is None
+                and self._hover_project_edge is None
+            )
+        ):
+            return
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        camera = self.viewport.camera
+        center = region.rect.center
+        if self._hover_project_edge is not None:
+            _, _, edge = self._hover_project_edge
+            screen = [
+                camera.project(point, center) for point in edge.chain
+            ]
+            if len(screen) >= 2:
+                pygame.draw.lines(
+                    surface, self.geometry_hover, False, screen,
+                    self._s(3),
+                )
+        if self._hover_project_vertex is not None:
+            _, vertex = self._hover_project_vertex
+            screen = camera.project(vertex, center)
+            pygame.draw.circle(
+                surface, self.geometry_hover,
+                (round(screen[0]), round(screen[1])),
+                self._s(6), width=max(1, self._s(2)),
+            )
+            pygame.draw.circle(
+                surface, self.geometry_hover,
+                (round(screen[0]), round(screen[1])),
+                max(1, self._s(2)),
+            )
+        surface.set_clip(previous_clip)
+
     def _project_at(
         self, pos: Tuple[int, int], region: Rect, document: Document
     ) -> None:
-        """Project the exact solid edge under the cursor into the sketch."""
-        edge = self.viewport.renderer.pick_edge(
-            pos, region.rect, document, self.viewport.camera
+        """Project the exact solid vertex or edge under the cursor."""
+        renderer = self.viewport.renderer
+        camera = self.viewport.camera
+        vertex = renderer.pick_vertex(
+            pos, region.rect, document, camera
+        )
+        if vertex is not None and self.on_project_point is not None:
+            self._clear_sketch_selection()
+            self.on_project_point(vertex[0], vertex[1])
+            return
+        edge = renderer.pick_edge(
+            pos, region.rect, document, camera
         )
         if edge is not None and self.on_project_edge is not None:
             self._clear_sketch_selection()
@@ -5912,6 +5995,8 @@ class Workspace:
         self._hover_sketch_entity = None
         self._hover_region = None
         self._hover_measurement_index = None
+        self._hover_project_vertex = None
+        self._hover_project_edge = None
         if self._line_menu_open:
             self._line_menu_hover = self._line_menu_index_at(
                 pos, layout.toolbar, document
@@ -6157,6 +6242,15 @@ class Workspace:
                 self._hover_region = self._pick_sketch_region(
                     pos, layout.viewport, sketch
                 )
+
+        if (
+            self._selected_tool == "project"
+            and self._sketch_toolbar_visible(document)
+            and layout.viewport.collidepoint(pos)
+        ):
+            self._update_projection_hover(
+                pos, layout.viewport, document
+            )
 
         if layout.timeline.collidepoint(pos):
             controls, _, _, boxes, _, _, _, _ = self._timeline_geometry(
