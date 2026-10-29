@@ -716,8 +716,14 @@ class Application:
             return
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or measurement_kind not in (
-            "distance", "angle"
+            "distance", "angle", "diameter"
         ):
+            return
+        if measurement_kind == "diameter" and (
+            first[0] != "circle" or second[0] != "circle"
+        ):
+            return
+        if measurement_kind == "diameter" and first[1] != second[1]:
             return
         if placement is not None:
             normalized = normalize_measurement_placement(placement)
@@ -739,6 +745,11 @@ class Application:
                 if not 0 <= index < len(sketch.edges):
                     return
                 if sketch.is_projected_edge(index):
+                    return
+            elif entity_kind == "circle":
+                if not 0 <= index < len(sketch.circles):
+                    return
+                if sketch.is_projected_circle(index):
                     return
             else:
                 return
@@ -792,6 +803,8 @@ class Application:
             return
         measurement = sketch.measurements[index]
         if measurement.kind == "angle" and normalized > 180:
+            return
+        if measurement.kind == "diameter" and normalized <= 0:
             return
         stack.execute(
             SetMeasurementValueCommand(

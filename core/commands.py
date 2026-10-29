@@ -615,6 +615,8 @@ class AddMeasurementCommand(Command):
         self.index: Optional[int] = None
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
+        self.previous_diameters: Optional[List[float]] = None
+        self.next_diameters: Optional[List[float]] = None
         self.has_applied = False
 
     @property
@@ -626,21 +628,33 @@ class AddMeasurementCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        if self.measurement.kind not in ("distance", "angle"):
+        if self.measurement.kind not in (
+            "distance", "angle", "diameter"
+        ):
             return
         for ref_kind, ref_index in (
             self.measurement.first, self.measurement.second
         ):
-            limit = (
-                len(self.sketch.points) if ref_kind == "point"
-                else len(self.sketch.edges)
-            )
-            if ref_kind not in ("point", "line"):
+            if ref_kind == "point":
+                limit = len(self.sketch.points)
+            elif ref_kind == "line":
+                limit = len(self.sketch.edges)
+            elif ref_kind == "circle":
+                limit = len(self.sketch.circles)
+            else:
                 return
             if not 0 <= ref_index < limit:
                 return
+        if self.measurement.kind == "diameter" and (
+            self.measurement.first[0] != "circle"
+            or self.measurement.second[0] != "circle"
+        ):
+            return
         if not self.has_applied:
             self.previous_points = _copy_points(self.sketch.points)
+            self.previous_diameters = [
+                circle.diameter for circle in self.sketch.circles
+            ]
             self.has_applied = True
         if self.index is None:
             self.index = len(self.sketch.measurements)
@@ -650,7 +664,11 @@ class AddMeasurementCommand(Command):
             self.next_points = self.sketch.enforced_points(
                 self.sketch.points
             )
+            self.next_diameters = [
+                circle.diameter for circle in self.sketch.circles
+            ]
         self.sketch.apply_point_positions(self.next_points)
+        self._apply_diameters(self.next_diameters)
         self.document.recompute()
         self.document.dirty = True
 
@@ -669,8 +687,18 @@ class AddMeasurementCommand(Command):
                 pass
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
+        self._apply_diameters(self.previous_diameters)
         self.document.recompute()
         self.document.dirty = True
+
+    def _apply_diameters(
+        self, diameters: Optional[List[float]]
+    ) -> None:
+        """Restore the circle diameters captured for this command."""
+        if diameters is None:
+            return
+        for circle, diameter in zip(self.sketch.circles, diameters):
+            circle.change_diameter(diameter)
 
 
 class SetMeasurementPlacementCommand(Command):
@@ -750,6 +778,8 @@ class SetMeasurementValueCommand(Command):
         self.previous: Optional[float] = None
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
+        self.previous_diameters: Optional[List[float]] = None
+        self.next_diameters: Optional[List[float]] = None
         self.has_previous = False
         self.has_applied = False
 
@@ -786,16 +816,27 @@ class SetMeasurementValueCommand(Command):
         if not self.has_applied:
             self.previous = measurement.value
             self.previous_points = _copy_points(self.sketch.points)
+            self.previous_diameters = [
+                circle.diameter for circle in self.sketch.circles
+            ]
             self.has_previous = True
             self.has_applied = True
             self._replace(self.value)
             next_points = _copy_points(self.sketch.points)
             self.sketch.enforce_measurements(next_points)
             self.next_points = next_points
+            self.next_diameters = [
+                circle.diameter for circle in self.sketch.circles
+            ]
         else:
             self._replace(self.value)
         if self.next_points is not None:
             self.sketch.apply_point_positions(self.next_points)
+        if self.next_diameters is not None:
+            for circle, diameter in zip(
+                self.sketch.circles, self.next_diameters
+            ):
+                circle.change_diameter(diameter)
         self.document.recompute()
         self.document.dirty = True
 
@@ -805,6 +846,11 @@ class SetMeasurementValueCommand(Command):
         self._replace(self.previous)
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
+        if self.previous_diameters is not None:
+            for circle, diameter in zip(
+                self.sketch.circles, self.previous_diameters
+            ):
+                circle.change_diameter(diameter)
         self.document.recompute()
         self.document.dirty = True
 

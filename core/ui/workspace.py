@@ -133,6 +133,7 @@ class Workspace:
         "extrude": "Extrude",
         "fillet": "Fillet",
         "constraint_auto": "Auto Constraint",
+        "constraint_coincident": "Coincident",
         "measure": "Auto Measurement",
     }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
@@ -141,7 +142,9 @@ class Workspace:
         ("MODIFY", ("fillet",)),
     )
     FILLET_RADIUS = 2.0
-    SKETCH_CONSTRAINT_ACTIONS = ("constraint_auto", "measure")
+    SKETCH_CONSTRAINT_ACTIONS = (
+        "constraint_auto", "constraint_coincident", "measure",
+    )
     SKETCH_INTERACTIVE_ACTIONS = (
         "line", "rectangle", "circle", "point", "project", "align_x",
         *SKETCH_CONSTRAINT_ACTIONS
@@ -176,6 +179,7 @@ class Workspace:
         )),
         ("CONSTRAINTS", (
             ("constraint_auto", "V/H", True),
+            ("constraint_coincident", "Coincident", False),
             ("measure", "Measure", True),
         )),
         ("INSPECT", (
@@ -204,11 +208,11 @@ class Workspace:
     CONSTRAINT_MENU_ITEMS = (
         ("vertical", "Vertical Only"),
         ("horizontal", "Horizontal Only"),
-        ("coincident", "Coincident"),
     )
     MEASURE_MENU_ITEMS = (
         ("angle", "Angle Only"),
         ("distance", "Distance Only"),
+        ("diameter", "Diameter Only"),
     )
 
     def __init__(
@@ -1481,6 +1485,16 @@ class Workspace:
                         document.dirty = True
                         return True
                     continue
+                if item.action == "constraint_coincident":
+                    if item.rect.collidepoint(pos):
+                        self._constraint_menu_open = False
+                        self._constraint_menu_hover = -1
+                        self._activate_constraint_tool(
+                            "coincident", document
+                        )
+                        document.dirty = True
+                        return True
+                    continue
                 if item.action == "measure":
                     dropdown_hit = self._toolbar_dropdown_hit_rect(item)
                     if (
@@ -1556,6 +1570,18 @@ class Workspace:
         """Add an entity to the pending measurement pair."""
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
+            return
+        if hit[0] == "circle":
+            if self._measure_tool not in ("auto", "diameter"):
+                return
+            self._selected_sketch_entity = None
+            self._hover_sketch_entity = hit
+            self._reset_line_state()
+            self._commit_measurement(
+                sketch, "diameter", hit, hit
+            )
+            return
+        if self._measure_tool == "diameter":
             return
         if self._measure_tool == "angle" and hit[0] != "line":
             return
@@ -1713,9 +1739,18 @@ class Workspace:
             )
         if self._measure_tool == "distance":
             return "distance"
+        if self._measure_tool == "diameter":
+            return "diameter" if first[0] == "circle" else None
         if self._angle_geometry(sketch, first, second) is not None:
             return "angle"
         return "distance"
+
+    def _diameter_geometry(
+        self,
+        sketch: Sketch,
+        first: Tuple[str, int],
+    ) -> Optional[Tuple[float, Point, Point]]:
+        return sketch.diameter_geometry(first)
 
     def _angle_geometry(
         self,
@@ -1732,6 +1767,18 @@ class Workspace:
         second: Tuple[str, int],
     ) -> Optional[Tuple[float, Point, Point]]:
         return sketch.distance_geometry(first, second)
+
+    def _measurement_span_geometry(
+        self,
+        sketch: Sketch,
+        kind: str,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> Optional[Tuple[float, Point, Point]]:
+        """Return the two measured points for a distance-like annotation."""
+        if kind == "diameter":
+            return self._diameter_geometry(sketch, first)
+        return self._distance_geometry(sketch, first, second)
 
     @staticmethod
     def _measurement_axis(
@@ -1782,16 +1829,19 @@ class Workspace:
                 sketch, first, second
             )
         return self._default_distance_placement(
-            sketch, first, second
+            sketch, kind, first, second
         )
 
     def _default_distance_placement(
         self,
         sketch: Sketch,
+        kind: str,
         first: Tuple[str, int],
         second: Tuple[str, int],
     ) -> float:
-        geometry = self._distance_geometry(sketch, first, second)
+        geometry = self._measurement_span_geometry(
+            sketch, kind, first, second
+        )
         if geometry is None:
             return 5.0
         distance, first_point, second_point = geometry
@@ -1870,9 +1920,10 @@ class Workspace:
         if not 0 <= index < len(sketch.measurements):
             return None
         measurement = sketch.measurements[index]
-        if measurement.kind == "distance":
-            geometry = self._distance_geometry(
-                sketch, measurement.first, measurement.second
+        if measurement.kind in ("distance", "diameter"):
+            geometry = self._measurement_span_geometry(
+                sketch, measurement.kind,
+                measurement.first, measurement.second,
             )
             if geometry is None:
                 return None
@@ -2064,7 +2115,12 @@ class Workspace:
                     and item.action == f"constraint_{selected_constraint}"
                 ) or (
                     item.action == "constraint_auto"
-                    and self._constraint_tool is not None
+                    and self._constraint_tool in (
+                        "auto", "vertical", "horizontal"
+                    )
+                ) or (
+                    item.action == "constraint_coincident"
+                    and self._constraint_tool == "coincident"
                 ) or (
                     item.action == "measure"
                     and self._measure_tool is not None
@@ -2352,6 +2408,45 @@ class Workspace:
         if nearest_line is not None:
             return "line", nearest_line
         return None
+
+    def _pick_sketch_circle(
+        self, pos: Tuple[int, int], region: Rect, sketch: Sketch
+    ) -> Optional[int]:
+        """Return the circle under the cursor, preferring the innermost."""
+        nearest: Optional[int] = None
+        nearest_radius = float("inf")
+        for index, circle in enumerate(sketch.circles):
+            if sketch.is_projected_circle(index):
+                continue
+            radius = circle.diameter / 2.0
+            if radius <= 0.0:
+                continue
+            center = self._project_sketch_point(
+                sketch, circle.midPoint, region
+            )
+            edge = self._project_sketch_point(
+                sketch,
+                (
+                    circle.midPoint[0] + radius,
+                    circle.midPoint[1],
+                ),
+                region,
+            )
+            screen_radius = math.hypot(
+                edge[0] - center[0], edge[1] - center[1]
+            )
+            if screen_radius <= 0.0:
+                continue
+            distance = math.hypot(
+                pos[0] - center[0], pos[1] - center[1]
+            )
+            if (
+                distance <= screen_radius + self._s(6)
+                and screen_radius < nearest_radius
+            ):
+                nearest = index
+                nearest_radius = screen_radius
+        return nearest
 
     def _pick_sketch_region(
         self, pos: Tuple[int, int], region: Rect, sketch: Sketch
@@ -2862,7 +2957,7 @@ class Workspace:
         if not self.sketch_palette_window.options.get("dimensions", True):
             return
         for index, measurement in enumerate(sketch.measurements):
-            if measurement.kind == "distance":
+            if measurement.kind in ("distance", "diameter"):
                 result = self._draw_distance_measurement(
                     surface, sketch, region, index, measurement
                 )
@@ -2893,8 +2988,9 @@ class Workspace:
         index: int,
         measurement: Measurement,
     ) -> Optional[Tuple[Tuple[float, float], str]]:
-        geometry = self._distance_geometry(
-            sketch, measurement.first, measurement.second
+        geometry = self._measurement_span_geometry(
+            sketch, measurement.kind,
+            measurement.first, measurement.second,
         )
         if geometry is None:
             return None
@@ -2909,7 +3005,8 @@ class Workspace:
         )
         if offset is None:
             offset = self._default_distance_placement(
-                sketch, measurement.first, measurement.second
+                sketch, measurement.kind,
+                measurement.first, measurement.second,
             )
         _, normal, _ = self._measurement_axis(
             first_point, second_point
@@ -2989,7 +3086,11 @@ class Workspace:
             label_x, label_y, label_length = 0.0, -1.0, 1.0
         normal_x = label_x / label_length
         normal_y = label_y / label_length
-        text = f"{display_value:.2f}"
+        text = (
+            f"Ø{display_value:.2f}"
+            if measurement.kind == "diameter"
+            else f"{display_value:.2f}"
+        )
         label_width, label_height = self._font_small.size(text)
         half_width = (label_width + self._s(10)) / 2
         half_height = (label_height + self._s(4)) / 2
@@ -3352,6 +3453,8 @@ class Workspace:
             return None
         if kind == "angle" and value > 180:
             return None
+        if kind == "diameter" and value <= 0:
+            return None
         return value
 
     def _commit_measurement_edit(self, document: Document) -> bool:
@@ -3695,7 +3798,7 @@ class Workspace:
         ):
             text = f"{self._constraint_tool.title()} Constraint"
         elif action == "measure" and self._measure_tool in (
-            "angle", "distance"
+            "angle", "distance", "diameter"
         ):
             text = f"{self._measure_tool.title()} Measurement"
         shortcut = self.TOOL_SHORTCUTS.get(action)
@@ -4627,6 +4730,19 @@ class Workspace:
             pygame.draw.circle(
                 surface, color, (cx, cy), max(1, self._s(2))
             )
+        elif kind == "constraint_coincident":
+            thickness = max(1, self._s(2))
+            pygame.draw.circle(
+                surface, color, (cx - radius // 2, cy), max(1, self._s(2))
+            )
+            pygame.draw.circle(
+                surface, color, (cx + radius // 2, cy), max(1, self._s(2))
+            )
+            pygame.draw.line(
+                surface, color,
+                (cx - radius // 2, cy), (cx + radius // 2, cy),
+                thickness,
+            )
         elif kind == "measure":
             pygame.draw.rect(
                 surface, color,
@@ -5327,9 +5443,31 @@ class Workspace:
                     )
                     return True
                 if self._measure_tool is not None:
+                    if self._measure_tool == "diameter":
+                        circle_index = self._pick_sketch_circle(
+                            event.pos, layout.viewport, sketch
+                        )
+                        if circle_index is not None:
+                            self._measure_click(
+                                document, ("circle", circle_index)
+                            )
+                        else:
+                            self._measure_selection.clear()
+                            self._clear_sketch_selection()
+                            self._reset_measure_click()
+                        return True
                     hit = self._pick_sketch_entity(
                         event.pos, layout.viewport, sketch
                     )
+                    if (
+                        hit is None
+                        and self._measure_tool == "auto"
+                    ):
+                        circle_index = self._pick_sketch_circle(
+                            event.pos, layout.viewport, sketch
+                        )
+                        if circle_index is not None:
+                            hit = ("circle", circle_index)
                     if hit is not None:
                         if (
                             hit[0] == "line"

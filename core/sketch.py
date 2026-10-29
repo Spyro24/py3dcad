@@ -19,8 +19,8 @@ Circle = circle2d
 Point3 = Tuple[float, float, float]
 
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
-MEASUREMENT_KINDS = ("distance", "angle")
-MEASUREMENT_REF_KINDS = ("point", "line")
+MEASUREMENT_KINDS = ("distance", "angle", "diameter")
+MEASUREMENT_REF_KINDS = ("point", "line", "circle")
 COINCIDENT_REF_KINDS = ("point", "origin")
 CIRCLE_SEGMENTS = 48
 
@@ -339,19 +339,20 @@ def point_on_plane(
 
 @dataclass(frozen=True)
 class Measurement:
-    """A persistent distance or angle annotation between two entities."""
+    """A persistent distance, angle, or diameter annotation."""
 
     kind: str
     first: Tuple[str, int]
     second: Tuple[str, int]
-    # User-controlled annotation placement.  Distance measurements store a
-    # signed perpendicular offset from the measured points; angle
-    # measurements store the arc radius.  None selects a computed default
-    # for older documents.
+    # User-controlled annotation placement.  Distance and diameter
+    # measurements store a signed perpendicular offset from the measured
+    # points; angle measurements store the arc radius.  None selects a
+    # computed default for older documents.
     placement: Optional[float] = None
-    # User-owned measurement value.  Distance values use sketch units and
-    # angle values use degrees.  The engine sets this once when the
-    # measurement is created and only the user may change it afterwards.
+    # User-owned measurement value.  Distance and diameter values use
+    # sketch units and angle values use degrees.  The engine sets this once
+    # when the measurement is created and only the user may change it
+    # afterwards.
     value: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -685,10 +686,12 @@ class Sketch:
                 continue
             refs_valid = True
             for ref_kind, ref_index in (first, second):
-                limit = (
-                    len(self.points) if ref_kind == "point"
-                    else len(self.edges)
-                )
+                if ref_kind == "point":
+                    limit = len(self.points)
+                elif ref_kind == "line":
+                    limit = len(self.edges)
+                else:
+                    limit = len(circles)
                 if not 0 <= ref_index < limit:
                     refs_valid = False
                     break
@@ -707,9 +710,13 @@ class Sketch:
                     )
                 )
         self.measurements = measurements
+        # Bind circles first so their midpoints exist as regular points
+        # before measurement and coincidence enforcement runs.
+        self.circles = self._bind_circles(circles)
         # Older documents did not store a measurement value.  Freeze one
         # from the current geometry exactly once so the engine never
-        # overwrites a measurement afterwards.
+        # overwrites a measurement afterwards.  This runs after binding so
+        # diameter measurements can read the rebuilt circle list.
         for index, measurement in enumerate(self.measurements):
             if measurement.value is not None:
                 continue
@@ -727,9 +734,6 @@ class Sketch:
                 measurement.placement,
                 value,
             )
-        # Bind circles first so their midpoints exist as regular points
-        # before measurement and coincidence enforcement runs.
-        self.circles = self._bind_circles(circles)
         self.coincidences = self._normalize_coincidences(
             self.coincidences
         )
@@ -1156,6 +1160,29 @@ class Sketch:
         )
         return distance, first_point, second_point
 
+    def diameter_geometry(
+        self,
+        ref: Tuple[str, int],
+        points: Optional[List[Point]] = None,
+    ) -> Optional[Tuple[float, Point, Point]]:
+        """Return a circle's diameter and the two ends of that diameter."""
+        if ref[0] != "circle" or not 0 <= ref[1] < len(self.circles):
+            return None
+        circle = self.circles[ref[1]]
+        if not math.isfinite(circle.diameter) or circle.diameter <= 0.0:
+            return None
+        center: Point = circle.midPoint
+        if points is not None:
+            center_index = self.point_index(circle.midPoint)
+            if center_index is not None and center_index < len(points):
+                center = points[center_index]
+        radius = circle.diameter / 2.0
+        return (
+            circle.diameter,
+            point2d((center[0] - radius, center[1])),
+            point2d((center[0] + radius, center[1])),
+        )
+
     def measurement_value(
         self,
         kind: str,
@@ -1168,6 +1195,8 @@ class Sketch:
             geometry = self.angle_geometry(first, second, points)
         elif kind == "distance":
             geometry = self.distance_geometry(first, second, points)
+        elif kind == "diameter":
+            geometry = self.diameter_geometry(first, points)
         else:
             return None
         return geometry[0] if geometry is not None else None
@@ -1200,6 +1229,24 @@ class Sketch:
                 maximum = max(maximum, abs(residual))
         return maximum
 
+    def _apply_diameter_measurements(self) -> None:
+        """Resize circles to their stored diameter measurement values.
+
+        Circles are not made of movable sketch points, so their diameter is
+        enforced directly instead of through the point projection loop.
+        """
+        for measurement in self.measurements:
+            if measurement.kind != "diameter":
+                continue
+            if measurement.value is None:
+                continue
+            ref = measurement.first
+            if ref[0] != "circle" or not 0 <= ref[1] < len(self.circles):
+                continue
+            if measurement.value <= 0.0:
+                continue
+            self.circles[ref[1]].change_diameter(measurement.value)
+
     def enforce_measurements(
         self,
         points: List[Point],
@@ -1215,6 +1262,7 @@ class Sketch:
             self.constrain_axis_changes(points, range(len(points)))
         if not self.measurements:
             return True
+        self._apply_diameter_measurements()
         # The projection helpers replace point objects.  Keep the caller's
         # originals alive so circles and other references stay bound to the
         # same point instances, then copy the final positions back into them.
@@ -2028,10 +2076,10 @@ class Sketch:
         measurements: List[Measurement] = []
         for measurement in self.measurements:
             first = self._remap_measurement_ref(
-                measurement.first, index, edge_map
+                measurement.first, index, edge_map, circle_map
             )
             second = self._remap_measurement_ref(
-                measurement.second, index, edge_map
+                measurement.second, index, edge_map, circle_map
             )
             if first is not None and second is not None:
                 measurements.append(
@@ -2208,6 +2256,7 @@ class Sketch:
         ref: Tuple[str, int],
         removed_point: int,
         edge_map: Dict[int, int],
+        circle_map: Dict[int, int],
     ) -> Optional[Tuple[str, int]]:
         kind, index = ref
         if kind == "point":
@@ -2216,6 +2265,9 @@ class Sketch:
             return (kind, index - 1 if index > removed_point else index)
         if kind == "line":
             mapped = edge_map.get(index)
+            return (kind, mapped) if mapped is not None else None
+        if kind == "circle":
+            mapped = circle_map.get(index)
             return (kind, mapped) if mapped is not None else None
         return None
 
