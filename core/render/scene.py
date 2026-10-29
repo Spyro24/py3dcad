@@ -72,6 +72,7 @@ class ScenePalette:
     origin_marker_edge: Color = (80, 85, 95)
     sketch: Color = (120, 145, 185)
     active: Color = (59, 130, 246)
+    constrained: Color = (245, 245, 248)
     projection: Color = (196, 140, 255)
     text_muted: Color = (125, 125, 136)
     edge: Color = (55, 55, 65)
@@ -100,6 +101,9 @@ class SceneRenderer:
         self._ghost_surface: Optional[pygame.Surface] = None
         self._edge_key_cache: Dict[
             int, Tuple[Face, List[FaceEdgeEntry]]
+        ] = {}
+        self._constraint_cache: Dict[
+            int, Tuple[Sketch, Tuple[Set[int], Set[int], Set[int]]]
         ] = {}
 
     def set_scale(self, scale: float) -> None:
@@ -182,6 +186,7 @@ class SceneRenderer:
         draw_solids: bool = True,
     ) -> None:
         self._init_fonts()
+        self._constraint_cache.clear()
         active = document.sketch(document.active_sketch_id)
         custom_active = active is not None and active.is_custom_plane
         if not custom_active:
@@ -1060,11 +1065,15 @@ class SceneRenderer:
                 if sketch.id == document.active_sketch_id
                 else self.palette.sketch
             )
+            _, constrained_edges, constrained_circles = self._constraints(sketch)
             frame = sketch.frame()
             for index in range(len(sketch.edges)):
                 line_color = (
                     self.palette.projection
-                    if sketch.is_projected_edge(index) else color
+                    if sketch.is_projected_edge(index) else (
+                        self.palette.constrained
+                        if index in constrained_edges else color
+                    )
                 )
                 screen = [
                     camera.project(point_on_plane(frame, point), center)
@@ -1078,7 +1087,10 @@ class SceneRenderer:
             for index, circle in enumerate(sketch.circles):
                 circle_color = (
                     self.palette.projection
-                    if sketch.is_projected_circle(index) else color
+                    if sketch.is_projected_circle(index) else (
+                        self.palette.constrained
+                        if index in constrained_circles else color
+                    )
                 )
                 self._draw_sketch_circle(
                     surface, circle_color, frame, circle, camera, center
@@ -1129,11 +1141,15 @@ class SceneRenderer:
                 if sketch.id == document.active_sketch_id
                 else self.palette.sketch
             )
+            constrained_points, _, _ = self._constraints(sketch)
             frame = sketch.frame()
             for index, (x, y) in enumerate(sketch.points):
                 point_color = (
                     self.palette.projection
-                    if sketch.is_projected_point(index) else color
+                    if sketch.is_projected_point(index) else (
+                        self.palette.constrained
+                        if index in constrained_points else color
+                    )
                 )
                 self._draw_sketch_point(surface, point_color, camera, frame, (x, y), center, radius)
 
@@ -1142,6 +1158,17 @@ class SceneRenderer:
         center_point = (int(projected[0]), int(projected[1]))
         pygame.draw.circle(surface, color, center_point, radius)
         pygame.draw.circle(surface, self.palette.edge, center_point, radius, 1)
+
+    def _constraints(
+        self, sketch: Sketch
+    ) -> Tuple[Set[int], Set[int], Set[int]]:
+        """Return this frame's cached degree-of-freedom status for a sketch."""
+        cached = self._constraint_cache.get(id(sketch))
+        if cached is not None and cached[0] is sketch:
+            return cached[1]
+        status = sketch.constrained_entities()
+        self._constraint_cache[id(sketch)] = (sketch, status)
+        return status
 
     @staticmethod
     def _visible_sketches(document: Document) -> Iterator[Sketch]:

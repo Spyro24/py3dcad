@@ -25,6 +25,35 @@ COINCIDENT_REF_KINDS = ("point", "origin")
 CIRCLE_SEGMENTS = 48
 
 
+def _matrix_rank(rows: Sequence[Sequence[float]], columns: int) -> int:
+    """Return the numerical rank of a small constraint Jacobian."""
+    matrix = [list(row[:columns]) for row in rows if any(abs(v) > 1e-9 for v in row)]
+    rank = 0
+    for column in range(columns):
+        pivot = next(
+            (row for row in range(rank, len(matrix)) if abs(matrix[row][column]) > 1e-8),
+            None,
+        )
+        if pivot is None:
+            continue
+        matrix[rank], matrix[pivot] = matrix[pivot], matrix[rank]
+        scale = matrix[rank][column]
+        matrix[rank] = [value / scale for value in matrix[rank]]
+        for row in range(len(matrix)):
+            if row == rank:
+                continue
+            factor = matrix[row][column]
+            if abs(factor) > 1e-8:
+                matrix[row] = [
+                    value - factor * pivot_value
+                    for value, pivot_value in zip(matrix[row], matrix[rank])
+                ]
+        rank += 1
+        if rank == len(matrix):
+            break
+    return rank
+
+
 def circle_polygon(circle: Circle, segments: int = CIRCLE_SEGMENTS) -> List[Point]:
     """Return a closed polygon that approximates a circle."""
     radius = circle.diameter / 2.0
@@ -1600,6 +1629,118 @@ class Sketch:
                     point[0] + delta_x,
                     point[1] + delta_y,
                 ))
+
+    def constrained_entities(self) -> Tuple[Set[int], Set[int], Set[int]]:
+        """Return point, edge and circle indices with no free DOF left.
+
+        The constraint equations are linearised at the current sketch state.
+        A coordinate is fixed when removing its column lowers the equation
+        rank; this correctly distinguishes a merely horizontal line from one
+        whose position and length are also constrained.
+        """
+        point_count = len(self.points)
+        circle_count = len(self.circles)
+        columns = point_count * 2 + circle_count
+        if not columns:
+            return set(), set(), set()
+
+        def row() -> List[float]:
+            return [0.0] * columns
+
+        rows: List[List[float]] = []
+
+        def fixed_point(index: int) -> None:
+            if not 0 <= index < point_count:
+                return
+            for axis in range(2):
+                equation = row()
+                equation[index * 2 + axis] = 1.0
+                rows.append(equation)
+
+        for index in self.projected_point_indices():
+            fixed_point(index)
+        for projection in self.projected_edges:
+            if 0 <= projection.edge < len(self.edges):
+                fixed_point(self.edges[projection.edge][0])
+                fixed_point(self.edges[projection.edge][1])
+        for projection in self.projected_circles:
+            if 0 <= projection.circle < circle_count:
+                center = self.point_index(self.circles[projection.circle].midPoint)
+                if center is not None:
+                    fixed_point(center)
+                equation = row()
+                equation[point_count * 2 + projection.circle] = 1.0
+                rows.append(equation)
+        for coincidence in self.coincidences:
+            first, second = coincidence.first, coincidence.second
+            if first[0] == second[0] == "point":
+                for axis in range(2):
+                    equation = row()
+                    equation[first[1] * 2 + axis] = 1.0
+                    equation[second[1] * 2 + axis] = -1.0
+                    rows.append(equation)
+            else:
+                reference = second if first[0] == "origin" else first
+                if reference[0] == "point":
+                    fixed_point(reference[1])
+        for index, (first, second) in enumerate(self.edges):
+            constraint = self.edge_constraint(index)
+            if constraint is None:
+                continue
+            equation = row()
+            axis = 1 if constraint == "horizontal" else 0
+            equation[first * 2 + axis] = 1.0
+            equation[second * 2 + axis] = -1.0
+            rows.append(equation)
+        for measurement in self.measurements:
+            if measurement.value is None:
+                continue
+            if measurement.kind == "diameter" and measurement.first[0] == "circle":
+                index = measurement.first[1]
+                if 0 <= index < circle_count:
+                    equation = row()
+                    equation[point_count * 2 + index] = 1.0
+                    rows.append(equation)
+                continue
+            value = self.measurement_value(
+                measurement.kind, measurement.first, measurement.second
+            )
+            if value is None:
+                continue
+            equation = row()
+            for column in range(point_count * 2):
+                points = [point2d(point) for point in self.points]
+                points[column // 2].set_pos((
+                    points[column // 2][0] + (1e-5 if column % 2 == 0 else 0.0),
+                    points[column // 2][1] + (1e-5 if column % 2 else 0.0),
+                ))
+                changed = self.measurement_value(
+                    measurement.kind, measurement.first, measurement.second, points
+                )
+                if changed is not None:
+                    equation[column] = (changed - value) / 1e-5
+            rows.append(equation)
+        rank = _matrix_rank(rows, columns)
+        fixed = {
+            column for column in range(columns)
+            if rank > _matrix_rank(
+                [entry[:column] + entry[column + 1:] for entry in rows], columns - 1
+            )
+        }
+        points = {
+            index for index in range(point_count)
+            if index * 2 in fixed and index * 2 + 1 in fixed
+        }
+        edges = {
+            index for index, (first, second) in enumerate(self.edges)
+            if first in points and second in points
+        }
+        circles = {
+            index for index, circle in enumerate(self.circles)
+            if self.point_index(circle.midPoint) in points
+            and point_count * 2 + index in fixed
+        }
+        return points, edges, circles
 
     def edge_constraint(self, index: int) -> Optional[str]:
         """Return the axis constraint for an edge, if any."""
