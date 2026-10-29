@@ -924,6 +924,52 @@ class Sketch:
         )
 
     @staticmethod
+    def parallel_segment_distance(
+        first_start: Point,
+        first_end: Point,
+        second_start: Point,
+        second_end: Point,
+    ) -> Optional[Tuple[float, Point, Point]]:
+        """Return the perpendicular distance between two parallel segments.
+
+        The measured points are placed on a perpendicular through the
+        middle of the first segment, so the annotation shows the true gap
+        between the lines even when their spans do not overlap.
+        """
+        first_dx = first_end[0] - first_start[0]
+        first_dy = first_end[1] - first_start[1]
+        second_dx = second_end[0] - second_start[0]
+        second_dy = second_end[1] - second_start[1]
+        first_length = math.hypot(first_dx, first_dy)
+        second_length = math.hypot(second_dx, second_dy)
+        if first_length <= 1e-9 or second_length <= 1e-9:
+            return None
+        cross = abs(
+            first_dx * second_dy - first_dy * second_dx
+        ) / (first_length * second_length)
+        if cross > 1e-7:
+            return None
+        normal_x = -first_dy / first_length
+        normal_y = first_dx / first_length
+        signed = (
+            (second_start[0] - first_start[0]) * normal_x
+            + (second_start[1] - first_start[1]) * normal_y
+        )
+        if abs(signed) <= 1e-9:
+            # Collinear segments have no gap to measure; the caller falls
+            # back to the closest-point distance so disjoint spans still
+            # report the real separation.
+            return None
+        middle_x = (first_start[0] + first_end[0]) * 0.5
+        middle_y = (first_start[1] + first_end[1]) * 0.5
+        first_point = point2d((middle_x, middle_y))
+        second_point = point2d((
+            middle_x + normal_x * signed,
+            middle_y + normal_y * signed,
+        ))
+        return abs(signed), first_point, second_point
+
+    @staticmethod
     def segments_intersection(
         first_start: Point,
         first_end: Point,
@@ -1053,6 +1099,14 @@ class Sketch:
         second_length = math.hypot(second_x, second_y)
         if first_length <= 1e-9 or second_length <= 1e-9:
             return None
+        # Parallel lines have no meaningful angle.  Treating them as an
+        # angle measurement would freeze a 0 or 180 degree value and make
+        # the distance tool pick the wrong kind for collinear edges.
+        cross = abs(
+            first_x * second_y - first_y * second_x
+        ) / (first_length * second_length)
+        if cross <= 1e-7:
+            return None
         cosine = (
             first_x * second_x + first_y * second_y
         ) / (first_length * second_length)
@@ -1071,6 +1125,13 @@ class Sketch:
         second_points = self.measurement_entity_points(second, points)
         if first_points is None or second_points is None:
             return None
+        if first[0] == "line" and second[0] == "line":
+            parallel = self.parallel_segment_distance(
+                first_points[0], first_points[1],
+                second_points[0], second_points[1],
+            )
+            if parallel is not None:
+                return parallel
         if first[0] == "point" and second[0] == "point":
             first_point = first_points[0]
             second_point = second_points[0]

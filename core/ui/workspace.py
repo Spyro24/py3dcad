@@ -45,6 +45,8 @@ class HistoryEntry:
 
 
 ARROW_SNAP_PIXELS = 3.0
+MEASURE_DOUBLE_CLICK_MS = 400
+MEASURE_DOUBLE_CLICK_PIXELS = 6.0
 
 
 def _arrow_snap_step(world_per_pixel: float) -> float:
@@ -305,6 +307,9 @@ class Workspace:
         self._measure_menu_hover = -1
         self._measure_tool: Optional[str] = None
         self._measure_selection: List[Tuple[str, int]] = []
+        self._measure_click_time = 0
+        self._measure_click_pos: Optional[Tuple[int, int]] = None
+        self._measure_click_hit: Optional[Tuple[str, int]] = None
         self._coincident_selection: List[Tuple[str, int]] = []
         self._measurement_label_rects: List[
             Tuple[int, pygame.Rect]
@@ -521,6 +526,7 @@ class Workspace:
         self._measure_tool = None
         self._measure_selection.clear()
         self._coincident_selection.clear()
+        self._reset_measure_click()
         self._measure_menu_open = False
         self._measure_menu_hover = -1
         self._drag_measurement_index = None
@@ -1570,12 +1576,22 @@ class Workspace:
             # Angle-only mode needs two edges with one shared vertex.
             self._measure_selection = [first]
             return
+        self._commit_measurement(sketch, kind, first, second)
+
+    def _commit_measurement(
+        self,
+        sketch: Sketch,
+        kind: str,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> bool:
+        """Freeze the current geometry into a new persistent measurement."""
         value = self._measurement_value_from_geometry(
             sketch, kind, first, second
         )
         if value is None:
             self._measure_selection.clear()
-            return
+            return False
         if self.on_add_measurement is not None:
             placement = self._default_measurement_placement(
                 sketch, kind, first, second
@@ -1584,6 +1600,57 @@ class Workspace:
                 kind, first, second, placement, value
             )
         self._measure_selection.clear()
+        # A completed measurement ends the click gesture, so a following
+        # click cannot be mistaken for the second half of a double click.
+        self._reset_measure_click()
+        return True
+
+    def _reset_measure_click(self) -> None:
+        """Forget the last measure click so the next one starts a gesture."""
+        self._measure_click_time = 0
+        self._measure_click_pos = None
+        self._measure_click_hit = None
+
+    def _measure_is_double_click(
+        self, pos: Tuple[int, int], hit: Tuple[str, int]
+    ) -> bool:
+        """Track measure clicks and report a fast repeat on the same entity."""
+        now = pygame.time.get_ticks()
+        previous_pos = self._measure_click_pos
+        near = (
+            previous_pos is not None
+            and math.hypot(
+                pos[0] - previous_pos[0], pos[1] - previous_pos[1]
+            ) <= self._s(MEASURE_DOUBLE_CLICK_PIXELS)
+        )
+        double = (
+            hit == self._measure_click_hit
+            and near
+            and now - self._measure_click_time <= MEASURE_DOUBLE_CLICK_MS
+        )
+        self._measure_click_time = now
+        self._measure_click_pos = pos
+        self._measure_click_hit = hit
+        return double
+
+    def _dimension_line(
+        self, document: Document, hit: Tuple[str, int]
+    ) -> bool:
+        """Measure a line's length from its two endpoints in one gesture."""
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None or not 0 <= hit[1] < len(sketch.edges):
+            return False
+        start, end = sketch.edges[hit[1]]
+        if start == end:
+            return False
+        first = ("point", start)
+        second = ("point", end)
+        self._selected_sketch_entity = None
+        self._hover_sketch_entity = hit
+        self._reset_line_state()
+        return self._commit_measurement(
+            sketch, "distance", first, second
+        )
 
     def _coincident_click(
         self,
@@ -5264,10 +5331,20 @@ class Workspace:
                         event.pos, layout.viewport, sketch
                     )
                     if hit is not None:
-                        self._measure_click(document, hit)
+                        if (
+                            hit[0] == "line"
+                            and self._measure_tool in ("auto", "distance")
+                            and self._measure_is_double_click(
+                                event.pos, hit
+                            )
+                        ):
+                            self._dimension_line(document, hit)
+                        else:
+                            self._measure_click(document, hit)
                     else:
                         self._measure_selection.clear()
                         self._clear_sketch_selection()
+                        self._reset_measure_click()
                     return True
                 point_hit = self._pick_sketch_point(
                     event.pos, layout.viewport, sketch
