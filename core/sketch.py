@@ -3,8 +3,8 @@
 import math
 from dataclasses import dataclass, field
 from typing import (
-    Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union,
-    TYPE_CHECKING,
+    Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple,
+    Union, TYPE_CHECKING,
 )
 
 from .profiles import intersect_loops, polygon_area
@@ -1359,6 +1359,15 @@ class Sketch:
             second_group = self._edge_point_indices(
                 measurement.second
             )
+        # Projected points follow the solid and cannot be moved to satisfy a
+        # measurement.  Drop them so the free side takes the whole correction.
+        fixed = self.projected_point_indices()
+        first_group = [
+            index for index in first_group if index not in fixed
+        ]
+        second_group = [
+            index for index in second_group if index not in fixed
+        ]
         if not first_group and not second_group:
             return False
         if set(first_group) & set(second_group):
@@ -1523,20 +1532,35 @@ class Sketch:
         cross = first_x * second_y - first_y * second_x
         sign = 1.0 if cross >= 0 else -1.0
         half = sign * delta / 2.0
+        # A projected far point is fixed by the solid.  Rotate the free ray
+        # by the whole correction instead of sharing it between both rays.
+        fixed = self.projected_point_indices()
+        first_movable = first_far not in fixed
+        second_movable = second_far not in fixed
+        if not first_movable and not second_movable:
+            return False
+        if first_movable and second_movable:
+            first_angle, second_angle = -half, half
+        elif first_movable:
+            first_angle, second_angle = -2.0 * half, 0.0
+        else:
+            first_angle, second_angle = 0.0, 2.0 * half
         first_rotated = self._rotate_vector(
-            first_x, first_y, -half
+            first_x, first_y, first_angle
         )
         second_rotated = self._rotate_vector(
-            second_x, second_y, half
+            second_x, second_y, second_angle
         )
-        points[first_far] = point2d((
-            vertex[0] + first_rotated[0],
-            vertex[1] + first_rotated[1],
-        ))
-        points[second_far] = point2d((
-            vertex[0] + second_rotated[0],
-            vertex[1] + second_rotated[1],
-        ))
+        if first_movable:
+            points[first_far] = point2d((
+                vertex[0] + first_rotated[0],
+                vertex[1] + first_rotated[1],
+            ))
+        if second_movable:
+            points[second_far] = point2d((
+                vertex[0] + second_rotated[0],
+                vertex[1] + second_rotated[1],
+            ))
         return True
 
     @staticmethod
@@ -1650,8 +1674,8 @@ class Sketch:
         # geometry, so constraints must anchor to them instead of moving
         # them; otherwise the next projection refresh would undo the edit.
         projected = {
-            link.point for link in self.projected_points
-            if 0 <= link.point < count
+            index for index in self.projected_point_indices()
+            if 0 <= index < count
         }
 
         horizontal = list(range(count))
@@ -2280,6 +2304,22 @@ class Sketch:
     def is_projected_edge(self, index: int) -> bool:
         """Return whether a sketch edge follows solid geometry."""
         return any(link.edge == index for link in self.projected_edges)
+
+    def projected_point_indices(self) -> Set[int]:
+        """Return every point index that is fixed by a projection link."""
+        indices = {
+            link.point for link in self.projected_points
+            if 0 <= link.point < len(self.points)
+        }
+        for link in self.projected_circles:
+            if not 0 <= link.circle < len(self.circles):
+                continue
+            center = self.circles[link.circle].midPoint
+            for index, point in enumerate(self.points):
+                if point is center:
+                    indices.add(index)
+                    break
+        return indices
 
     def is_projected_circle(self, index: int) -> bool:
         """Return whether a sketch circle follows solid geometry."""

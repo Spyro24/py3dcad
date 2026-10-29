@@ -263,6 +263,10 @@ def refresh_sketch(document: "Document", sketch: Sketch) -> None:
             document, link.center.feature_id,
             link.source_circle, link.radius,
         )
+    # Measurements may reference projected geometry.  Re-apply them after
+    # the projected points move so the free side keeps the measured value.
+    if sketch.measurements:
+        sketch.enforce_measurements(sketch.points)
 
 
 def refresh_document_projections(document: "Document") -> None:

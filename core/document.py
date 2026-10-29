@@ -122,6 +122,13 @@ class Document:
             if sketch is not None:
                 feature.recompute(self, sketch)
         self.refresh_projections()
+        # Refreshing projected geometry can re-apply measurements and move
+        # free sketch points.  Rebuild cached bodies from the final geometry;
+        # the signature check makes this a no-op when nothing moved.
+        for feature in self.features:
+            sketch = self.sketch(feature.sketch_id)
+            if sketch is not None:
+                feature.recompute(self, sketch)
 
     def remap_sketch_points(
         self,

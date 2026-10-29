@@ -773,17 +773,18 @@ class Application:
             if entity_kind == "point":
                 if not 0 <= index < len(sketch.points):
                     return
-                if sketch.is_projected_point(index):
-                    return
             elif entity_kind == "line":
                 if not 0 <= index < len(sketch.edges):
-                    return
-                if sketch.is_projected_edge(index):
                     return
             elif entity_kind == "circle":
                 if not 0 <= index < len(sketch.circles):
                     return
-                if sketch.is_projected_circle(index):
+                # A projected circle's diameter follows the solid, so a
+                # diameter measurement could never be enforced.
+                if (
+                    measurement_kind == "diameter"
+                    and sketch.is_projected_circle(index)
+                ):
                     return
             else:
                 return
