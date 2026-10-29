@@ -9,6 +9,7 @@ from .booleans import OPERATION_LABELS, fillet_slices_body
 from .document import Document
 from .sketch import (
     BooleanSource,
+    Coincident,
     Extrude,
     ExtrudeSlice,
     Fillet,
@@ -22,6 +23,7 @@ from .sketch import (
     ProjectionSource,
     Sketch,
     aligned_edge_endpoint,
+    normalize_coincident_ref,
     normalize_edge_constraint,
     normalize_measurement_placement,
     normalize_measurement_value,
@@ -471,6 +473,111 @@ class SetEdgeConstraintCommand(Command):
         self.sketch.edge_constraints[self.index] = (
             self.previous_constraint
         )
+        self.document.recompute()
+        self.document.dirty = True
+
+
+class AddCoincidentCommand(Command):
+    """Make two sketch points, or a point and the origin, coincide."""
+
+    kind = "coincident"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        normalized_first = normalize_coincident_ref(first)
+        normalized_second = normalize_coincident_ref(second)
+        self.coincident: Optional[Coincident] = None
+        if (
+            normalized_first is not None
+            and normalized_second is not None
+            and normalized_first != normalized_second
+            and not (
+                normalized_first[0] == "origin"
+                and normalized_second[0] == "origin"
+            )
+        ):
+            self.coincident = Coincident(
+                normalized_first, normalized_second
+            )
+        self.index: Optional[int] = None
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
+        self.has_applied = False
+
+    @property
+    def label(self) -> str:
+        return "Coincident"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def _refs_valid(self) -> bool:
+        if self.coincident is None:
+            return False
+        for kind, index in (
+            self.coincident.first, self.coincident.second
+        ):
+            if kind == "point" and not 0 <= index < len(
+                self.sketch.points
+            ):
+                return False
+        return True
+
+    def _anchor_indices(self) -> List[int]:
+        """Keep the first picked point fixed so the other one moves onto it."""
+        if self.coincident is None:
+            return []
+        if self.coincident.first[0] == "point":
+            return [self.coincident.first[1]]
+        if self.coincident.second[0] == "point":
+            return [self.coincident.second[1]]
+        return []
+
+    def do(self) -> None:
+        if not self._refs_valid():
+            return
+        if not self.has_applied:
+            self.previous_points = _copy_points(self.sketch.points)
+            self.has_applied = True
+        if self.index is None:
+            self.index = len(self.sketch.coincidences)
+        self.index = min(self.index, len(self.sketch.coincidences))
+        self.sketch.coincidences.insert(self.index, self.coincident)
+        if self.next_points is None:
+            next_points = _copy_points(self.sketch.points)
+            anchors = self._anchor_indices()
+            self.sketch.constrain_axis_changes(
+                next_points, anchors, anchors
+            )
+            self.next_points = self.sketch.enforced_points(next_points)
+        self.sketch.apply_point_positions(self.next_points)
+        self.document.recompute()
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.index is None:
+            return
+        if (
+            self.index < len(self.sketch.coincidences)
+            and self.sketch.coincidences[self.index] == self.coincident
+        ):
+            self.sketch.coincidences.pop(self.index)
+        else:
+            try:
+                self.sketch.coincidences.remove(self.coincident)
+            except ValueError:
+                pass
+        if self.previous_points is not None:
+            self.sketch.apply_point_positions(self.previous_points)
         self.document.recompute()
         self.document.dirty = True
 
@@ -1368,6 +1475,7 @@ class DeleteSketchEntitiesCommand(Command):
                 self.sketch.edge_bulges,
                 self.sketch.circles,
                 self.sketch.measurements,
+                self.sketch.coincidences,
                 self.sketch.projected_points,
                 self.sketch.projected_edges,
                 self.sketch.projected_circles,
@@ -1401,7 +1509,8 @@ class DeleteSketchEntitiesCommand(Command):
             return
         (
             points, edges, constraints, bulges, circles, measurements,
-            projected_points, projected_edges, projected_circles,
+            coincidences, projected_points, projected_edges,
+            projected_circles,
         ) = copy.deepcopy(self._before)
         self.sketch.points = points
         self.sketch.edges = edges
@@ -1409,6 +1518,7 @@ class DeleteSketchEntitiesCommand(Command):
         self.sketch.edge_bulges = bulges
         self.sketch.circles = circles
         self.sketch.measurements = measurements
+        self.sketch.coincidences = coincidences
         self.sketch.projected_points = projected_points
         self.sketch.projected_edges = projected_edges
         self.sketch.projected_circles = projected_circles

@@ -9,6 +9,7 @@ import pygame
 
 from .commands import (
     AddCircleCommand,
+    AddCoincidentCommand,
     AddExtrudeCommand,
     AddFilletCommand,
     AddLineCommand,
@@ -45,6 +46,7 @@ from .sketch import (
     Extrude,
     Point,
     Sketch,
+    normalize_coincident_ref,
     normalize_measurement_placement,
     normalize_measurement_value,
 )
@@ -259,6 +261,7 @@ class Application:
             on_move_point=self.move_point,
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
+            on_add_coincident=self.add_coincident,
             on_select_sketch=self.select_sketch,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
@@ -651,6 +654,50 @@ class Application:
         stack.execute(
             SetEdgeConstraintCommand(
                 document, sketch, index, constraint
+            )
+        )
+
+    def add_coincident(
+        self,
+        first: tuple[str, int],
+        second: tuple[str, int],
+    ) -> None:
+        """Constrain two sketch points, or a point and the origin, together."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        normalized_first = normalize_coincident_ref(first)
+        normalized_second = normalize_coincident_ref(second)
+        if normalized_first is None or normalized_second is None:
+            return
+        if normalized_first == normalized_second:
+            return
+        if (
+            normalized_first[0] == "origin"
+            and normalized_second[0] == "origin"
+        ):
+            return
+        for kind, index in (normalized_first, normalized_second):
+            if kind != "point":
+                continue
+            if not 0 <= index < len(sketch.points):
+                return
+            if sketch.is_projected_point(index):
+                return
+        key = tuple(sorted((normalized_first, normalized_second)))
+        if any(
+            coincidence.key() == key
+            for coincidence in sketch.coincidences
+        ):
+            return
+        stack.execute(
+            AddCoincidentCommand(
+                document, sketch, normalized_first, normalized_second
             )
         )
 

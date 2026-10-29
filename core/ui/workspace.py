@@ -202,6 +202,7 @@ class Workspace:
     CONSTRAINT_MENU_ITEMS = (
         ("vertical", "Vertical Only"),
         ("horizontal", "Horizontal Only"),
+        ("coincident", "Coincident"),
     )
     MEASURE_MENU_ITEMS = (
         ("angle", "Angle Only"),
@@ -219,6 +220,9 @@ class Workspace:
         on_move_point: Callable[[int, Point], None],
         on_move_edge: Callable[[int, Point, Point], None],
         on_set_edge_constraint: Callable[[int, str], None],
+        on_add_coincident: Callable[
+            [Tuple[str, int], Tuple[str, int]], None
+        ],
         on_select_sketch: Callable[[int], None],
         on_history_jump: Callable[[int], None],
         on_history_delete: Callable[[int], None],
@@ -264,6 +268,7 @@ class Workspace:
         self.on_move_point = on_move_point
         self.on_move_edge = on_move_edge
         self.on_set_edge_constraint = on_set_edge_constraint
+        self.on_add_coincident = on_add_coincident
         self.on_select_sketch = on_select_sketch
         self.on_history_jump = on_history_jump
         self.on_history_delete = on_history_delete
@@ -300,6 +305,7 @@ class Workspace:
         self._measure_menu_hover = -1
         self._measure_tool: Optional[str] = None
         self._measure_selection: List[Tuple[str, int]] = []
+        self._coincident_selection: List[Tuple[str, int]] = []
         self._measurement_label_rects: List[
             Tuple[int, pygame.Rect]
         ] = []
@@ -514,6 +520,7 @@ class Workspace:
         """Stop the measurement tool and discard pending entity picks."""
         self._measure_tool = None
         self._measure_selection.clear()
+        self._coincident_selection.clear()
         self._measure_menu_open = False
         self._measure_menu_hover = -1
         self._drag_measurement_index = None
@@ -1391,6 +1398,13 @@ class Workspace:
         self._clear_measure_state()
         if kind == "auto":
             self._set_auto_constraints(True)
+        elif kind == "coincident":
+            # A selected point becomes the first half of the pair, so the
+            # user only has to pick the second point (or the origin).
+            selected = self._selected_sketch_entity
+            if selected is not None and selected[0] == "point":
+                self._coincident_selection.append(selected)
+                self._selected_sketch_entity = None
         # Constraint tools replace drawing tools but keep the selection so it
         # can be constrained immediately and the next edge can be picked.
         self._selected_tool = None
@@ -1404,7 +1418,19 @@ class Workspace:
             return self._apply_edge_constraint(
                 self._constraint_tool, document
             )
+        if self._constraint_tool == "coincident":
+            return self._apply_coincident(document)
         return False
+
+    def _apply_coincident(self, document: Document) -> bool:
+        """Constrain the two picked points or point/origin pair."""
+        if len(self._coincident_selection) != 2:
+            return False
+        first, second = self._coincident_selection
+        self._coincident_selection.clear()
+        if self.on_add_coincident is not None:
+            self.on_add_coincident(first, second)
+        return True
 
     def _choose_constraint(self, index: int, document: Document) -> None:
         if not 0 <= index < len(self.CONSTRAINT_MENU_ITEMS):
@@ -1558,6 +1584,53 @@ class Workspace:
                 kind, first, second, placement, value
             )
         self._measure_selection.clear()
+
+    def _coincident_click(
+        self,
+        document: Document,
+        pos: Tuple[int, int],
+        region: Rect,
+        sketch: Sketch,
+    ) -> None:
+        """Add or remove one point/origin pick for the coincident tool."""
+        ref = self._pick_coincident_ref(pos, region, sketch)
+        if ref is None:
+            self._coincident_selection.clear()
+            self._clear_sketch_selection()
+            return
+        if ref in self._coincident_selection:
+            self._coincident_selection.remove(ref)
+        else:
+            if len(self._coincident_selection) >= 2:
+                self._coincident_selection.clear()
+            self._coincident_selection.append(ref)
+        self._selected_sketch_entity = None
+        self._hover_sketch_entity = (
+            ref if ref[0] == "point" else None
+        )
+        self._reset_line_state()
+        if len(self._coincident_selection) == 2:
+            self._apply_coincident(document)
+
+    def _pick_coincident_ref(
+        self,
+        pos: Tuple[int, int],
+        region: Rect,
+        sketch: Sketch,
+    ) -> Optional[Tuple[str, int]]:
+        """Pick a sketch point or the projected document origin."""
+        if self.viewport.show_origin:
+            screen = self._project_sketch_point(
+                sketch, sketch.origin_point(), region
+            )
+            if math.hypot(
+                pos[0] - screen[0], pos[1] - screen[1]
+            ) <= self._s(9):
+                return ("origin", -1)
+        index = self._pick_sketch_point(pos, region, sketch)
+        if index is not None and not sketch.is_projected_point(index):
+            return ("point", index)
+        return None
 
     def _resolve_measurement_kind(
         self,
@@ -2578,7 +2651,19 @@ class Workspace:
                     surface, sketch, region, entity,
                     self.geometry_selection, True,
                 )
+        if self._constraint_tool == "coincident":
+            for entity in self._coincident_selection:
+                if entity[0] == "point":
+                    self._draw_sketch_entity_highlight(
+                        surface, sketch, region, entity,
+                        self.geometry_selection, True,
+                    )
+                else:
+                    self._draw_origin_pick_highlight(
+                        surface, sketch, region
+                    )
         self._draw_sketch_constraints(surface, sketch, region)
+        self._draw_sketch_coincidences(surface, sketch, region)
         self._draw_sketch_measurements(surface, sketch, region)
         if selected is not None and not (
             self._drag_edge_index is not None
@@ -2640,6 +2725,67 @@ class Workspace:
                 width=1, border_radius=self._s(3),
             )
             surface.blit(label, label.get_rect(center=box.center))
+
+    def _draw_sketch_coincidences(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        """Draw a small marker on every point taking part in a coincidence."""
+        if not self.sketch_palette_window.options.get(
+            "constraints", True
+        ):
+            return
+        seen: set = set()
+        for coincidence in sketch.coincidences:
+            for ref in (coincidence.first, coincidence.second):
+                if ref in seen:
+                    continue
+                seen.add(ref)
+                if ref[0] == "point":
+                    if not 0 <= ref[1] < len(sketch.points):
+                        continue
+                    world = sketch.points[ref[1]]
+                else:
+                    if not self.viewport.show_origin:
+                        continue
+                    world = sketch.origin_point()
+                screen = self._project_sketch_point(
+                    sketch, world, region
+                )
+                anchor = (
+                    screen[0] + self._s(11),
+                    screen[1] - self._s(11),
+                )
+                if not region.collidepoint(anchor):
+                    continue
+                label = self._font_small.render("C", True, self.accent)
+                box = label.get_rect(center=(
+                    round(anchor[0]), round(anchor[1])
+                ))
+                box.inflate_ip(self._s(6), self._s(2))
+                pygame.draw.rect(
+                    surface, self.header_bg, box,
+                    border_radius=self._s(3),
+                )
+                pygame.draw.rect(
+                    surface, self.border_color, box,
+                    width=1, border_radius=self._s(3),
+                )
+                surface.blit(
+                    label, label.get_rect(center=box.center)
+                )
+
+    def _draw_origin_pick_highlight(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        """Ring the projected document origin while it is picked."""
+        screen = self._project_sketch_point(
+            sketch, sketch.origin_point(), region
+        )
+        pygame.draw.circle(
+            surface, self.geometry_selection,
+            (round(screen[0]), round(screen[1])),
+            self._s(9), width=max(1, self._s(2)),
+        )
 
     def _draw_sketch_measurements(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -5106,6 +5252,11 @@ class Workspace:
                     self._start_measurement_drag(
                         label_index, sketch, event.pos,
                         layout.viewport,
+                    )
+                    return True
+                if self._constraint_tool == "coincident":
+                    self._coincident_click(
+                        document, event.pos, layout.viewport, sketch
                     )
                     return True
                 if self._measure_tool is not None:

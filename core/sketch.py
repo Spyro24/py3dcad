@@ -21,6 +21,7 @@ Point3 = Tuple[float, float, float]
 EDGE_CONSTRAINTS = ("horizontal", "vertical")
 MEASUREMENT_KINDS = ("distance", "angle")
 MEASUREMENT_REF_KINDS = ("point", "line")
+COINCIDENT_REF_KINDS = ("point", "origin")
 CIRCLE_SEGMENTS = 48
 
 
@@ -142,6 +143,29 @@ def normalize_measurement_ref(value: Any) -> Optional[Tuple[str, int]]:
         return None
     kind = str(value[0]).lower()
     if kind not in MEASUREMENT_REF_KINDS:
+        return None
+    try:
+        index = int(value[1])
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    return kind, index
+
+
+def normalize_coincident_ref(value: Any) -> Optional[Tuple[str, int]]:
+    """Return a point or document-origin reference for a coincidence.
+
+    The document origin is a world-space point rather than a sketch point,
+    so it is stored as ``("origin", -1)`` and projected into the sketch
+    plane whenever the constraint is solved.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    kind = str(value[0]).lower()
+    if kind == "origin":
+        return ("origin", -1)
+    if kind not in COINCIDENT_REF_KINDS:
         return None
     try:
         index = int(value[1])
@@ -358,6 +382,41 @@ class Measurement:
 
 
 @dataclass(frozen=True)
+class Coincident:
+    """A persistent coincidence between two points or a point and origin.
+
+    ``first`` and ``second`` are ``("point", index)`` references or
+    ``("origin", -1)`` for the document origin projected onto the sketch.
+    The origin is never moved; a coincidence with it pins the other point.
+    """
+
+    first: Tuple[str, int]
+    second: Tuple[str, int]
+
+    def key(self) -> Tuple[object, ...]:
+        """Return an order-independent identity for duplicate detection."""
+        return tuple(sorted((self.first, self.second)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "first": [self.first[0], self.first[1]],
+            "second": [self.second[0], self.second[1]],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["Coincident"]:
+        if not isinstance(data, dict):
+            return None
+        first = normalize_coincident_ref(data.get("first"))
+        second = normalize_coincident_ref(data.get("second"))
+        if first is None or second is None or first == second:
+            return None
+        if first[0] == "origin" and second[0] == "origin":
+            return None
+        return cls(first, second)
+
+
+@dataclass(frozen=True)
 class ProjectionSource:
     """Where a projected sketch entity comes from on the solid.
 
@@ -567,6 +626,7 @@ class Sketch:
     edge_bulges: List[Optional[float]] = field(default_factory=list)
     circles: List[Circle] = field(default_factory=list)
     measurements: List[Measurement] = field(default_factory=list)
+    coincidences: List[Coincident] = field(default_factory=list)
     # Projected entities are ordinary points and edges that also remember
     # the solid vertex/edge they came from.  ``refresh_projections`` moves
     # them whenever the source geometry changes.
@@ -668,8 +728,11 @@ class Sketch:
                 value,
             )
         # Bind circles first so their midpoints exist as regular points
-        # before measurement enforcement runs on the point list.
+        # before measurement and coincidence enforcement runs.
         self.circles = self._bind_circles(circles)
+        self.coincidences = self._normalize_coincidences(
+            self.coincidences
+        )
         self.projected_points = [
             link
             for link in (
@@ -700,6 +763,35 @@ class Sketch:
         # A loaded sketch may predate dimension enforcement.  Make its
         # stored values authoritative immediately, without a command.
         self.enforce_measurements(self.points)
+
+    def _normalize_coincidences(
+        self, items: Iterable[Any]
+    ) -> List[Coincident]:
+        """Keep only valid, distinct coincidence constraints."""
+        result: List[Coincident] = []
+        seen: set = set()
+        for item in items:
+            coincidence = (
+                item if isinstance(item, Coincident)
+                else Coincident.from_dict(item)
+            )
+            if coincidence is None:
+                continue
+            refs_valid = True
+            for kind, index in (
+                coincidence.first, coincidence.second
+            ):
+                if kind == "point" and not 0 <= index < len(self.points):
+                    refs_valid = False
+                    break
+            if not refs_valid:
+                continue
+            key = coincidence.key()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(coincidence)
+        return result
 
     def _bind_circles(self, circles: Iterable[Circle]) -> List[Circle]:
         """Make each circle midpoint a regular point of the sketch.
@@ -1054,7 +1146,13 @@ class Sketch:
         tolerance: float = 1e-6,
     ) -> bool:
         """Project points until all fixed measurement values are satisfied."""
-        if not self.measurements or len(points) != len(self.points):
+        if len(points) != len(self.points):
+            return True
+        # Coincidences are hard constraints and must hold even when a
+        # sketch has no measurements at all (for example right after load).
+        if self.coincidences:
+            self.constrain_axis_changes(points, range(len(points)))
+        if not self.measurements:
             return True
         # The projection helpers replace point objects.  Keep the caller's
         # originals alive so circles and other references stay bound to the
@@ -1387,12 +1485,15 @@ class Sketch:
         """Enforce all axis constraints after points have been changed.
 
         Horizontal constraints make the y-coordinates of their endpoints
-        equal, and vertical constraints do the same for x-coordinates.  Each
-        connected group is therefore solved independently for the affected
-        axis.  ``locked`` lists the preferred anchor points in priority
-        order; the first anchor in a group provides its target coordinate.
-        Remaining points in the group follow, which keeps every constraint
-        satisfied even when several previously constrained edges meet.
+        equal, and vertical constraints do the same for x-coordinates.
+        Coincident points share both coordinates, so they join the same
+        groups on both axes; a coincidence with the document origin pins its
+        group to the projected origin.  Each connected group is therefore
+        solved independently for the affected axis.  ``locked`` lists the
+        preferred anchor points in priority order; the first anchor in a
+        group provides its target coordinate.  Remaining points in the group
+        follow, which keeps every constraint satisfied even when several
+        previously constrained edges meet.
 
         Edges in ``excluded_edges`` are ignored, allowing an edge's old
         constraint to be replaced without it fighting the new alignment.
@@ -1441,6 +1542,24 @@ class Sketch:
             elif constraint == "vertical":
                 join(vertical, first, second)
 
+        origin_points: set = set()
+        for coincidence in self.coincidences:
+            first, second = coincidence.first, coincidence.second
+            if first[0] == "point" and second[0] == "point":
+                if (
+                    0 <= first[1] < count
+                    and 0 <= second[1] < count
+                ):
+                    join(horizontal, first[1], second[1])
+                    join(vertical, first[1], second[1])
+                continue
+            point_ref = (
+                second if first[0] == "origin" else first
+            )
+            if point_ref[0] == "point" and 0 <= point_ref[1] < count:
+                origin_points.add(point_ref[1])
+
+        origin = self.origin_point() if origin_points else None
         locked_rank = _first_positions(locked_order)
         changed_rank = _first_positions(changed_order)
         for parent, axis in ((horizontal, 1), (vertical, 0)):
@@ -1450,7 +1569,11 @@ class Sketch:
             for members in groups.values():
                 target: Optional[float] = None
                 anchor = _pick_anchor(members, locked_rank, changed_rank)
-                if previous is not None and len(previous) == count:
+                if origin is not None and any(
+                    index in origin_points for index in members
+                ):
+                    target = origin[axis]
+                elif previous is not None and len(previous) == count:
                     shifts = [
                         points[index][axis] - previous[index][axis]
                         for index in members
@@ -1860,8 +1983,42 @@ class Sketch:
                     )
                 )
         self.measurements = measurements
+        self.coincidences = self._remap_removed_point_coincidences(
+            index
+        )
         self._remap_projected_points(index, edge_map, circle_map)
         return edge_map
+
+    def _remap_removed_point_coincidences(
+        self, removed: int
+    ) -> List[Coincident]:
+        """Drop or shift coincidences after a point is deleted."""
+        result: List[Coincident] = []
+        for coincidence in self.coincidences:
+            first = self._shift_coincident_ref(
+                coincidence.first, removed
+            )
+            second = self._shift_coincident_ref(
+                coincidence.second, removed
+            )
+            if first is None or second is None or first == second:
+                continue
+            if first[0] == "origin" and second[0] == "origin":
+                continue
+            result.append(Coincident(first, second))
+        return result
+
+    @staticmethod
+    def _shift_coincident_ref(
+        ref: Tuple[str, int], removed: int
+    ) -> Optional[Tuple[str, int]]:
+        """Shift one coincidence reference past a deleted point."""
+        kind, index = ref
+        if kind != "point":
+            return ref
+        if index == removed:
+            return None
+        return (kind, index - 1 if index > removed else index)
 
     def remove_edge(self, index: int) -> None:
         """Remove one edge and any measurement that depends on it."""
@@ -2055,6 +2212,28 @@ class Sketch:
             )
         return plane_frame(self.plane)
 
+    def origin_point(self) -> Point:
+        """Return the document origin projected into the sketch plane.
+
+        The projection is expressed in the sketch's local U/V coordinates,
+        so a coincidence with the origin pins a point to world (0, 0, 0)
+        even when the sketch sits on a face away from the document origin.
+        """
+        frame = self.frame()
+        origin = frame.origin
+        return point2d((
+            -(
+                origin[0] * frame.u[0]
+                + origin[1] * frame.u[1]
+                + origin[2] * frame.u[2]
+            ),
+            -(
+                origin[0] * frame.v[0]
+                + origin[1] * frame.v[1]
+                + origin[2] * frame.v[2]
+            ),
+        ))
+
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "id": self.id,
@@ -2076,6 +2255,10 @@ class Sketch:
             "measurements": [
                 measurement.to_dict()
                 for measurement in self.measurements
+            ],
+            "coincidences": [
+                coincidence.to_dict()
+                for coincidence in self.coincidences
             ],
             "projected_points": [
                 link.to_dict() for link in self.projected_points
@@ -2219,6 +2402,13 @@ class Sketch:
                 measurement = Measurement.from_dict(raw)
                 if measurement is not None:
                     measurements.append(measurement)
+        coincidences: List[Coincident] = []
+        raw_coincidences = data.get("coincidences", [])
+        if isinstance(raw_coincidences, (list, tuple)):
+            for raw in raw_coincidences:
+                coincidence = Coincident.from_dict(raw)
+                if coincidence is not None:
+                    coincidences.append(coincidence)
         projected_points: List[ProjectedPoint] = []
         raw_projected_points = data.get("projected_points", [])
         if isinstance(raw_projected_points, (list, tuple)):
@@ -2256,6 +2446,7 @@ class Sketch:
             edge_bulges=bulges,
             circles=circles,
             measurements=measurements,
+            coincidences=coincidences,
             projected_points=projected_points,
             projected_edges=projected_edges,
             projected_circles=projected_circles,

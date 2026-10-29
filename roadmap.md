@@ -25,7 +25,7 @@ workspaces/design/sketch/create
 workspaces/design/sketch/constrain
 [x] Sketch Dimension
 [x] Horizontal/Vertical
-[ ] Coincident
+[x] Coincident
 [ ] Tangent
 [ ] Equal
 [ ] Parallel
