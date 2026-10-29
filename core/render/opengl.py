@@ -29,11 +29,14 @@ class OpenGLRenderer:
         self._depth_buffer = 0
         try:
             from OpenGL import GL
+            from OpenGL import GLU
 
             self.gl = GL
+            self.glu = GLU
             self.available = bool(GL.glGetString(GL.GL_VERSION))
         except Exception:
             self.gl = None
+            self.glu = None
 
     def draw(
         self,
@@ -47,8 +50,6 @@ class OpenGLRenderer:
         if not self.available or rect.width < 1 or rect.height < 1:
             return False
         try:
-            if not all(self._supports_face(face) for _, _, face in iter_solid_faces(document)):
-                return False
             self._ensure_target(rect.size)
             self._rect = rect
             pixels = self._render_pixels(document, camera, highlight_features)
@@ -123,7 +124,7 @@ class OpenGLRenderer:
         highlighted = set(highlight_features)
         view = camera.view_direction()
         for feature_id, _, face in faces:
-            if len(face.vertices) < 3 or face.holes:
+            if len(face.vertices) < 3:
                 continue
             if sum(face.normal[index] * view[index] for index in range(3)) <= 0:
                 continue
@@ -138,36 +139,40 @@ class OpenGLRenderer:
     def _draw_face(
         self, face: Face, camera: OrbitCamera, color: Tuple[int, int, int], z: float
     ) -> None:
-        """Draw a convex mesh panel; complex caps stay on the pygame path."""
+        """Draw one face with GLU tessellation, including concavity and holes."""
         gl = self.gl
+        glu = self.glu
         gl.glColor4ub(*color, 255)
-        gl.glBegin(gl.GL_TRIANGLE_FAN)
-        for vertex in face.vertices:
-            x, y = camera.project(vertex, self._rect.center)
-            gl.glVertex3f(x - self._rect.x, self._size[1] - (y - self._rect.y), z)
-        gl.glEnd()
+        tessellator = glu.gluNewTess()
 
-    @staticmethod
-    def _supports_face(face: Face) -> bool:
-        """Return whether the fixed-function path can fill this face safely."""
-        if face.holes or len(face.vertices) < 3:
-            return not face.holes
-        signs = []
-        vertices = face.vertices
-        for index, vertex in enumerate(vertices):
-            previous = vertices[index - 1]
-            following = vertices[(index + 1) % len(vertices)]
-            first = tuple(vertex[axis] - previous[axis] for axis in range(3))
-            second = tuple(following[axis] - vertex[axis] for axis in range(3))
-            cross = (
-                first[1] * second[2] - first[2] * second[1],
-                first[2] * second[0] - first[0] * second[2],
-                first[0] * second[1] - first[1] * second[0],
-            )
-            signed = sum(cross[axis] * face.normal[axis] for axis in range(3))
-            if abs(signed) > 1e-8:
-                signs.append(signed > 0.0)
-        return not signs or all(sign == signs[0] for sign in signs)
+        def begin(mode: int) -> None:
+            gl.glBegin(mode)
+
+        def vertex(point: Tuple[float, float, float]) -> None:
+            gl.glVertex3f(*point)
+
+        def combine(
+            coordinates: Tuple[float, float, float], _data, _weights
+        ) -> Tuple[float, float, float]:
+            return tuple(coordinates)
+
+        glu.gluTessCallback(tessellator, glu.GLU_TESS_BEGIN, begin)
+        glu.gluTessCallback(tessellator, glu.GLU_TESS_VERTEX, vertex)
+        glu.gluTessCallback(tessellator, glu.GLU_TESS_END, gl.glEnd)
+        glu.gluTessCallback(tessellator, glu.GLU_TESS_COMBINE, combine)
+        glu.gluTessProperty(
+            tessellator, glu.GLU_TESS_WINDING_RULE, glu.GLU_TESS_WINDING_ODD
+        )
+        glu.gluTessBeginPolygon(tessellator, None)
+        for contour in (face.vertices, *face.holes):
+            glu.gluTessBeginContour(tessellator)
+            for source in contour:
+                x, y = camera.project(source, self._rect.center)
+                point = (x - self._rect.x, self._size[1] - (y - self._rect.y), z)
+                glu.gluTessVertex(tessellator, point, point)
+            glu.gluTessEndContour(tessellator)
+        glu.gluTessEndPolygon(tessellator)
+        glu.gluDeleteTess(tessellator)
 
     def _color(self, face: Face, highlighted: bool) -> Tuple[int, int, int]:
         if not highlighted:
