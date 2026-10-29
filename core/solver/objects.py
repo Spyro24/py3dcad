@@ -26,6 +26,10 @@ class point2d:
         return 2
 
     def __getitem__(self, index):
+        if index == 0 or index == -2:
+            return self.x
+        if index == 1 or index == -1:
+            return self.y
         return (self.x, self.y)[index]
 
     def __eq__(self, other) -> bool:
@@ -58,6 +62,7 @@ class point2d:
     def set_pos(self, pos: tuple[float, float]) -> None:
         self.setPos(pos)
 
+
 class line2d:
     """A mutable 2D line that also behaves like a two-item tuple.
 
@@ -89,6 +94,10 @@ class line2d:
         return 2
 
     def __getitem__(self, index):
+        if index == 0 or index == -2:
+            return self.p1
+        if index == 1 or index == -1:
+            return self.p2
         return (self.p1, self.p2)[index]
 
     def __eq__(self, other) -> bool:
@@ -114,6 +123,7 @@ class line2d:
         self.p1.move(amount)
         self.p2.move(amount)
 
+
 class circle2d:
     """A mutable 2D circle defined by its midpoint and diameter."""
 
@@ -138,4 +148,3 @@ class circle2d:
 
     def copy(self) -> "circle2d":
         return circle2d(self.midPoint.copy(), self.diameter)
-        

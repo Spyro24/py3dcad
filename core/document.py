@@ -117,8 +117,9 @@ class Document:
         here is the state that caches sketch indices: fillet sources and the
         projected geometry that follows the resulting body.
         """
+        sketches_by_id = {sketch.id: sketch for sketch in self.sketches}
         for feature in self.features:
-            sketch = self.sketch(feature.sketch_id)
+            sketch = sketches_by_id.get(feature.sketch_id)
             if sketch is not None:
                 feature.recompute(self, sketch)
         self.refresh_projections()
@@ -126,7 +127,7 @@ class Document:
         # free sketch points.  Rebuild cached bodies from the final geometry;
         # the signature check makes this a no-op when nothing moved.
         for feature in self.features:
-            sketch = self.sketch(feature.sketch_id)
+            sketch = sketches_by_id.get(feature.sketch_id)
             if sketch is not None:
                 feature.recompute(self, sketch)
 
