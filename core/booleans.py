@@ -130,11 +130,26 @@ def feature_stack(
     if sketch is None:
         return []
     source = sketch.frame()
-    mapping = _frame_mapping(source, target)
-    if mapping is None:
+    if _frame_mapping(source, target) is None:
         return []
     if feature.slices:
         return _map_stack(feature.slices, source, target)
+    return _base_stack(document, feature, source, target)
+
+
+def _base_stack(
+    document: "Document",
+    feature: Extrude,
+    source: PlaneFrame,
+    target: PlaneFrame,
+) -> List[ExtrudeSlice]:
+    """Return the prism under a feature's stored boolean slices."""
+    sketch = document.sketch(feature.sketch_id)
+    if sketch is None:
+        return []
+    mapping = _frame_mapping(source, target)
+    if mapping is None:
+        return []
     if feature.fillets:
         # A rounded body is not one constant prism.  Turn it into slices so
         # the boolean result keeps the fillet instead of rejecting the body.
@@ -150,6 +165,38 @@ def feature_stack(
     if not groups or z1 - z0 <= TOLERANCE:
         return []
     return [ExtrudeSlice(z0, z1, _map_groups(groups, mapping))]
+
+
+def replay_booleans(
+    document: "Document", feature: Extrude
+) -> Optional[List[ExtrudeSlice]]:
+    """Rebuild a combined body from its prism and stored tool sources."""
+    sketch = document.sketch(feature.sketch_id)
+    if sketch is None:
+        return None
+    frame = sketch.frame()
+    stack = _base_stack(document, feature, frame, frame)
+    if not stack:
+        return []
+    for source in feature.booleans:
+        tool_sketch = document.sketch(source.sketch_id)
+        if tool_sketch is None:
+            continue
+        tool = build_tool_stack(
+            document, tool_sketch, source.height, source.start,
+            source.profiles, source.regions, source.cuts,
+        )
+        tool_in_target = _map_stack(
+            tool, tool_sketch.frame(), frame
+        )
+        if not tool_in_target:
+            continue
+        stack = combine_stacks(
+            stack, tool_in_target, source.operation
+        )
+        if not stack:
+            return []
+    return stack
 
 
 def build_tool_stack(

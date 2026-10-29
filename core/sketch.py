@@ -4,10 +4,14 @@ import math
 from dataclasses import dataclass, field
 from typing import (
     Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union,
+    TYPE_CHECKING,
 )
 
 from .profiles import intersect_loops, polygon_area
 from .solver.objects import circle2d, line2d, point2d
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .document import Document
 
 Point = point2d
 Line = line2d
@@ -1644,6 +1648,25 @@ class Sketch:
             for index in range(count)
         )
 
+    def geometry_signature(self) -> Tuple[object, ...]:
+        """Return a hashable snapshot used to detect sketch edits."""
+        return (
+            tuple(
+                (round(point[0], 6), round(point[1], 6))
+                for point in self.points
+            ),
+            tuple(self.edges),
+            tuple(self.edge_bulges),
+            tuple(
+                (
+                    round(circle.midPoint[0], 6),
+                    round(circle.midPoint[1], 6),
+                    round(circle.diameter, 6),
+                )
+                for circle in self.circles
+            ),
+        )
+
     def loop_points(self, loop: Sequence[int]) -> List[Point]:
         """Return the boundary polygon for an edge loop or a circle loop.
 
@@ -2527,6 +2550,59 @@ class ExtrudeSlice:
 
 
 @dataclass
+class BooleanSource:
+    """The tool extrusion that produced one boolean operation.
+
+    Keeping the tool parameters lets a combined body be rebuilt when either
+    the body's sketch or the tool's sketch is edited.  Loops are point
+    indices in the tool sketch, just like ``Extrude.profiles``.
+    """
+
+    sketch_id: int
+    height: float = 20.0
+    start: float = 0.0
+    profiles: List[List[int]] = field(default_factory=list)
+    regions: List[List[List[int]]] = field(default_factory=list)
+    cuts: List[List[int]] = field(default_factory=list)
+    operation: str = "join"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sketch": self.sketch_id,
+            "height": self.height,
+            "start": self.start,
+            "operation": self.operation,
+            "profiles": [list(loop) for loop in self.profiles],
+            "regions": [
+                [list(loop) for loop in region] for region in self.regions
+            ],
+            "cuts": [list(loop) for loop in self.cuts],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["BooleanSource"]:
+        if not isinstance(data, dict):
+            return None
+        try:
+            sketch_id = int(data.get("sketch", -1))
+            height = float(data.get("height", 20.0))
+            start = float(data.get("start", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if sketch_id < 0:
+            return None
+        return cls(
+            sketch_id,
+            height,
+            start,
+            Extrude._parse_loops(data.get("profiles", [])),
+            Extrude._parse_regions(data.get("regions", [])),
+            Extrude._parse_loops(data.get("cuts", [])),
+            str(data.get("operation", "join")),
+        )
+
+
+@dataclass
 class Extrude:
     """A prism created by extruding closed sketch faces along its normal."""
 
@@ -2548,10 +2624,19 @@ class Extrude:
     operation: str = "new_body"
     # A combined body stores its finished z-slices instead of one prism.
     slices: List[ExtrudeSlice] = field(default_factory=list)
+    # Boolean tools that produced ``slices``, in application order.  Empty
+    # for a plain prism or for older files whose booleans were baked.
+    booleans: List[BooleanSource] = field(default_factory=list)
+    # Fillets applied after a boolean was baked into the slices.
+    slices_fillets: List[Fillet] = field(default_factory=list)
     # Legacy files may name no profile and rely on the sketch's first loop.
     # Once a profile is deleted the feature must stay empty instead of
     # silently extruding whatever geometry is left.
     fallback: bool = True
+    # Signature of the inputs that produced ``slices``; None forces a replay.
+    _boolean_state: Optional[Tuple[object, ...]] = field(
+        default=None, repr=False, compare=False
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -2570,6 +2655,14 @@ class Extrude:
             "fillets": [fillet.to_dict() for fillet in self.fillets],
             "slices": [entry.to_dict() for entry in self.slices],
         }
+        if self.booleans:
+            data["booleans"] = [
+                source.to_dict() for source in self.booleans
+            ]
+        if self.slices_fillets:
+            data["slices_fillets"] = [
+                fillet.to_dict() for fillet in self.slices_fillets
+            ]
         if not self.fallback:
             data["fallback"] = False
         return data
@@ -2588,8 +2681,23 @@ class Extrude:
             start=float(data.get("start", 0.0)),
             operation=str(data.get("operation", "new_body")),
             slices=cls._parse_slices(data.get("slices", [])),
+            booleans=cls._parse_booleans(data.get("booleans", [])),
+            slices_fillets=cls._parse_fillets(
+                data.get("slices_fillets", [])
+            ),
             fallback=bool(data.get("fallback", True)),
         )
+
+    @staticmethod
+    def _parse_booleans(raw_sources: Any) -> List[BooleanSource]:
+        sources: List[BooleanSource] = []
+        if not isinstance(raw_sources, (list, tuple)):
+            return sources
+        for raw_source in raw_sources:
+            source = BooleanSource.from_dict(raw_source)
+            if source is not None:
+                sources.append(source)
+        return sources
 
     @staticmethod
     def _parse_slices(raw_slices: Any) -> List[ExtrudeSlice]:
@@ -2682,18 +2790,98 @@ class Extrude:
                 loops.append(points)
         return loops
 
-    def recompute(self, sketch: Sketch) -> None:
+    def recompute(self, document: "Document", sketch: Sketch) -> None:
         """Re-derive feature state from the current sketch geometry.
 
         Feature loops are point indices, so they are remapped when points are
         deleted.  Fillets also keep a source reference and follow the corner
         or edge they were placed on instead of staying at a stale coordinate.
+        A body that was combined by a boolean is rebuilt from its stored tool
+        sources so editing either sketch updates the finished shape.
         """
         self.fillets = [
             fillet for fillet in self.fillets
             if fillet.refresh(sketch)
         ]
         self._contact_face_cache = None
+        if self.booleans:
+            self._recompute_booleans(document)
+
+    def _recompute_booleans(self, document: "Document") -> None:
+        """Replay stored boolean tools when their input geometry changed."""
+        state = self._boolean_signature(document)
+        if state == self._boolean_state:
+            return
+        self._boolean_state = state
+        from .booleans import fillet_slices_body, replay_booleans
+
+        stack = replay_booleans(document, self)
+        if stack is None:
+            return
+        for fillet in self.slices_fillets if stack else ():
+            rounded = fillet_slices_body(stack, fillet)
+            if rounded is not None:
+                stack = rounded
+        self.slices = stack
+
+    def _boolean_signature(self, document: "Document") -> Tuple[object, ...]:
+        """Return everything that affects a combined body's shape."""
+        parts: List[object] = [
+            _sketch_signature(document, self.sketch_id),
+            round(self.height, 6),
+            round(self.start, 6),
+            tuple(tuple(loop) for loop in self.profiles),
+            tuple(
+                tuple(tuple(loop) for loop in region)
+                for region in self.regions
+            ),
+            tuple(tuple(loop) for loop in self.cuts),
+            tuple(_fillet_signature(fillet) for fillet in self.fillets),
+            tuple(
+                _fillet_signature(fillet)
+                for fillet in self.slices_fillets
+            ),
+        ]
+        for source in self.booleans:
+            parts.append((
+                source.sketch_id,
+                round(source.height, 6),
+                round(source.start, 6),
+                source.operation,
+                tuple(tuple(loop) for loop in source.profiles),
+                tuple(
+                    tuple(tuple(loop) for loop in region)
+                    for region in source.regions
+                ),
+                tuple(tuple(loop) for loop in source.cuts),
+                _sketch_signature(document, source.sketch_id),
+            ))
+        return tuple(parts)
+
+    def remap_boolean_points(
+        self,
+        sketch_id: int,
+        removed: int,
+        edge_map: Dict[int, int],
+    ) -> None:
+        """Keep a stored boolean tool valid after a point is deleted."""
+        changed = False
+        for source in self.booleans:
+            if source.sketch_id != sketch_id:
+                continue
+            source.profiles = _remap_loops(source.profiles, removed)
+            source.regions = _remap_regions(source.regions, removed)
+            source.cuts = _remap_loops(source.cuts, removed)
+            changed = True
+        if changed:
+            self._boolean_state = None
+
+    def remap_boolean_edges(self, sketch_id: int) -> None:
+        """Force a boolean replay after a tool sketch loses an edge."""
+        if any(
+            source.sketch_id == sketch_id for source in self.booleans
+        ):
+            self._boolean_state = None
 
     def remap_point(self, removed: int, edge_map: Dict[int, int]) -> None:
         """Drop or shift feature references after one sketch point vanishes."""
@@ -2755,6 +2943,29 @@ class Extrude:
         self.profiles = profiles
         self.regions = regions
         self.cuts = cuts
+
+
+def _sketch_signature(
+    document: "Document", sketch_id: int
+) -> Optional[Tuple[object, ...]]:
+    """Return a sketch's geometry and plane signature, or None if gone."""
+    sketch = document.sketch(sketch_id)
+    if sketch is None:
+        return None
+    return (
+        tuple(tuple(axis) for axis in sketch.frame()),
+        sketch.geometry_signature(),
+    )
+
+
+def _fillet_signature(fillet: Fillet) -> Tuple[object, ...]:
+    """Return a hashable snapshot of one fillet."""
+    return (
+        fillet.kind,
+        round(fillet.u, 6),
+        round(fillet.v, 6),
+        round(fillet.radius, 6),
+    )
 
 
 def _remap_loop(

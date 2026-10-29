@@ -8,6 +8,7 @@ from typing import List, Optional, Sequence, Tuple
 from .booleans import OPERATION_LABELS, fillet_slices_body
 from .document import Document
 from .sketch import (
+    BooleanSource,
     Extrude,
     ExtrudeSlice,
     Fillet,
@@ -1378,11 +1379,11 @@ class DeleteSketchEntitiesCommand(Command):
                     copy.deepcopy(feature.regions),
                     copy.deepcopy(feature.cuts),
                     copy.deepcopy(feature.fillets),
+                    copy.deepcopy(feature.booleans),
+                    copy.deepcopy(feature.slices_fillets),
                     feature.fallback,
                 )
-                for feature in self.document.features_for_sketch(
-                    self.sketch
-                )
+                for feature in self.document.features
             ]
         for index in sorted(self.edge_indices, reverse=True):
             self.sketch.remove_edge(index)
@@ -1411,14 +1412,18 @@ class DeleteSketchEntitiesCommand(Command):
         self.sketch.projected_points = projected_points
         self.sketch.projected_edges = projected_edges
         self.sketch.projected_circles = projected_circles
-        for feature, profiles, regions, cuts, fillets, fallback in (
-            self._before_features or []
-        ):
+        for (
+            feature, profiles, regions, cuts, fillets, booleans,
+            slices_fillets, fallback,
+        ) in (self._before_features or []):
             feature.profiles = copy.deepcopy(profiles)
             feature.regions = copy.deepcopy(regions)
             feature.cuts = copy.deepcopy(cuts)
             feature.fillets = copy.deepcopy(fillets)
+            feature.booleans = copy.deepcopy(booleans)
+            feature.slices_fillets = copy.deepcopy(slices_fillets)
             feature.fallback = fallback
+            feature._boolean_state = None
         self.document.recompute()
         self.document.dirty = True
 
@@ -1521,10 +1526,12 @@ class BooleanExtrudeCommand(Command):
         target: Extrude,
         slices: List[ExtrudeSlice],
         operation: str,
+        source: Optional[BooleanSource] = None,
     ) -> None:
         self.document = document
         self.target = target
         self.operation = operation
+        self.source = source
         self.slices = [
             ExtrudeSlice(
                 entry.z0,
@@ -1543,6 +1550,8 @@ class BooleanExtrudeCommand(Command):
         ]
         self._before_slices: Optional[List[ExtrudeSlice]] = None
         self._before_operation: Optional[str] = None
+        self._source_applied = False
+        self._can_replay = True
 
     @property
     def label(self) -> str:
@@ -1553,15 +1562,38 @@ class BooleanExtrudeCommand(Command):
         if self._before_slices is None:
             self._before_slices = copy.deepcopy(self.target.slices)
             self._before_operation = self.target.operation
+            # An older file can carry baked slices without their tool
+            # sources.  Those cannot be replayed, so keep the result baked
+            # instead of silently dropping the earlier boolean.
+            self._can_replay = (
+                not self.target.slices or bool(self.target.booleans)
+            )
+        if (
+            self.source is not None
+            and not self._source_applied
+            and self._can_replay
+        ):
+            self.target.booleans.append(self.source)
+            self._source_applied = True
         self.target.slices = copy.deepcopy(self.slices)
         self.target.operation = self.operation
+        self.target._boolean_state = None
+        self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
+        if self._source_applied and self.source is not None:
+            self.target.booleans = [
+                entry for entry in self.target.booleans
+                if entry is not self.source
+            ]
+            self._source_applied = False
         if self._before_slices is not None:
             self.target.slices = copy.deepcopy(self._before_slices)
         if self._before_operation is not None:
             self.target.operation = self._before_operation
+        self.target._boolean_state = None
+        self.document.recompute()
         self.document.dirty = True
 
 
@@ -1600,6 +1632,11 @@ class AddFilletCommand(Command):
             if rounded is None:
                 return
             self.feature.slices = rounded
+            if not any(
+                entry is self.fillet
+                for entry in self.feature.slices_fillets
+            ):
+                self.feature.slices_fillets.append(self.fillet)
         elif not any(
             entry is self.fillet for entry in self.feature.fillets
         ):
@@ -1607,17 +1644,24 @@ class AddFilletCommand(Command):
             if sketch is not None:
                 self.fillet.bind(sketch)
             self.feature.fillets.append(self.fillet)
+        self.feature._boolean_state = None
         self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
         if self._before_slices is not None:
             self.feature.slices = copy.deepcopy(self._before_slices)
+        self.feature.slices_fillets[:] = [
+            entry
+            for entry in self.feature.slices_fillets
+            if entry is not self.fillet
+        ]
         self.feature.fillets[:] = [
             entry
             for entry in self.feature.fillets
             if entry is not self.fillet
         ]
+        self.feature._boolean_state = None
         self.document.recompute()
         self.document.dirty = True
 

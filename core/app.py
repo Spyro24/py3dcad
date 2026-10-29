@@ -41,6 +41,7 @@ from .preview import (
     build_fillet_preview, common_fillet_radius,
 )
 from .sketch import (
+    BooleanSource,
     Extrude,
     Point,
     Sketch,
@@ -850,7 +851,19 @@ class Application:
         if target is None:
             return "No body found"
         stack.execute(
-            BooleanExtrudeCommand(document, target, slices, operation)
+            BooleanExtrudeCommand(
+                document, target, slices, operation,
+                BooleanSource(
+                    sketch.id, height, start,
+                    [list(profile) for profile in profiles],
+                    [
+                        [list(loop) for loop in region]
+                        for region in regions
+                    ],
+                    [list(cut) for cut in cuts],
+                    operation,
+                ),
+            )
         )
         return None
 

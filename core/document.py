@@ -120,7 +120,7 @@ class Document:
         for feature in self.features:
             sketch = self.sketch(feature.sketch_id)
             if sketch is not None:
-                feature.recompute(sketch)
+                feature.recompute(self, sketch)
         self.refresh_projections()
 
     def remap_sketch_points(
@@ -130,13 +130,19 @@ class Document:
         edge_map: Dict[int, int],
     ) -> None:
         """Keep feature references valid after a sketch point is deleted."""
-        for feature in self.features_for_sketch(sketch):
-            feature.remap_point(removed, edge_map)
+        for feature in self.features:
+            if feature.sketch_id == sketch.id:
+                feature.remap_point(removed, edge_map)
+            feature.remap_boolean_points(
+                sketch.id, removed, edge_map
+            )
 
     def remap_sketch_edges(self, sketch: Sketch, removed: int) -> None:
         """Keep cap-fillet references valid after a sketch edge is deleted."""
-        for feature in self.features_for_sketch(sketch):
-            feature.remap_edge(sketch, removed)
+        for feature in self.features:
+            if feature.sketch_id == sketch.id:
+                feature.remap_edge(sketch, removed)
+            feature.remap_boolean_edges(sketch.id)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
