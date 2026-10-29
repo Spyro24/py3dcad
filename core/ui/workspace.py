@@ -5497,6 +5497,19 @@ class Workspace:
                 point_hit = self._pick_sketch_point(
                     event.pos, layout.viewport, sketch
                 )
+                if (
+                    self._selected_tool is None
+                    and self._constraint_tool is None
+                ):
+                    region_hit = self._pick_sketch_region(
+                        event.pos, layout.viewport, sketch
+                    )
+                    if region_hit is not None:
+                        mods = getattr(event, "mod", 0)
+                        if not mods:
+                            mods = pygame.key.get_mods()
+                        self._select_sketch_region(region_hit, mods)
+                        return True
                 if not (
                     self._selected_tool == "line"
                     and point_hit is not None

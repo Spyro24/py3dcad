@@ -3,7 +3,7 @@
 import copy
 import math
 from abc import ABC, abstractmethod
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .booleans import OPERATION_LABELS, fillet_slices_body
 from .document import Document
@@ -33,9 +33,64 @@ from .projection import projected_point, projected_shape
 from .solver.objects import circle2d, point2d
 
 
+# ---------------------------------------------------------------------------
+# Small helpers shared by several commands
+# ---------------------------------------------------------------------------
+
 def _copy_points(points: List[Point]) -> List[Point]:
     """Return independent point objects for a command snapshot."""
     return [point2d(point) for point in points]
+
+
+def _insert_position(index: Optional[int], length: int) -> int:
+    """Clamp an insertion index to ``[0, length]``; ``None`` appends."""
+    if index is None:
+        return length
+    return min(index, length)
+
+
+def _next_free_name(prefix: str, names: Iterable[str]) -> str:
+    """Return the lowest ``"<prefix> N"`` not present in ``names``."""
+    taken = set(names)
+    index = 1
+    while f"{prefix} {index}" in taken:
+        index += 1
+    return f"{prefix} {index}"
+
+
+def _referenced_points(sketch: Sketch) -> Set[int]:
+    """Return every point index used by at least one sketch edge."""
+    return {index for edge in sketch.edges for index in edge}
+
+
+def _ensure_point(sketch: Sketch, point: Point, created: List[int]) -> int:
+    """Return the index of ``point``, adding it and recording it if new."""
+    index = sketch.find_point(point)
+    if index is None:
+        index = sketch.add_point(point)
+        created.append(index)
+    return index
+
+
+def _drop_unused_points(
+    document: Document,
+    sketch: Sketch,
+    created: List[int],
+    keep=None,
+) -> None:
+    """Remove points this command created that nothing references anymore.
+
+    Points are removed highest index first so lower indices stay valid.
+    ``keep`` is an optional predicate that protects a point index.
+    """
+    referenced = _referenced_points(sketch)
+    for index in sorted(created, reverse=True):
+        if not 0 <= index < len(sketch.points) or index in referenced:
+            continue
+        if keep is not None and keep(index):
+            continue
+        edge_map = sketch.remove_point(index)
+        document.remap_sketch_points(sketch, index, edge_map)
 
 
 def _dot3(first: Sequence[float], second: Sequence[float]) -> float:
@@ -57,11 +112,7 @@ def _unit3(vector: Point3) -> Optional[Point3]:
     length = math.sqrt(_dot3(vector, vector))
     if length <= 1e-9:
         return None
-    return (
-        vector[0] / length,
-        vector[1] / length,
-        vector[2] / length,
-    )
+    return (vector[0] / length, vector[1] / length, vector[2] / length)
 
 
 def _aligned_frame(
@@ -92,10 +143,21 @@ def _aligned_frame(
     u_axis = _unit3(_cross3(v_axis, normal))
     if u_axis is None:
         return None
-    return PlaneFrame(
-        frame.origin, u_axis, v_axis, normal, frame.label
-    )
+    return PlaneFrame(frame.origin, u_axis, v_axis, normal, frame.label)
 
+
+def _projected_circle_identity(
+    center: ProjectionSource, source_circle: int, radius: float
+) -> Tuple[object, ...]:
+    """Return a stable dedupe key for projected circles."""
+    if source_circle >= 0:
+        return (center.key(), source_circle)
+    return (center.key(), round(radius, 6))
+
+
+# ---------------------------------------------------------------------------
+# Command base class
+# ---------------------------------------------------------------------------
 
 class Command(ABC):
     """Base class for an undoable edit."""
@@ -155,7 +217,9 @@ class AddSketchCommand(Command):
             frame = self.frame
             self.sketch = Sketch(
                 self.document.new_id(),
-                self._next_name(),
+                _next_free_name(
+                    "Sketch", (sketch.name for sketch in self.document.sketches)
+                ),
                 plane=self.plane,
                 plane_label=self.plane_label if frame is not None else None,
                 plane_origin=frame.origin if frame is not None else None,
@@ -171,13 +235,6 @@ class AddSketchCommand(Command):
         if self.sketch is not None and self.sketch in self.document.sketches:
             self.document.sketches.remove(self.sketch)
         self.document.dirty = True
-
-    def _next_name(self) -> str:
-        names = {sketch.name for sketch in self.document.sketches}
-        index = 1
-        while f"Sketch {index}" in names:
-            index += 1
-        return f"Sketch {index}"
 
 
 class AlignSketchXCommand(Command):
@@ -267,9 +324,7 @@ class AddPointCommand(Command):
         self.document.dirty = True
 
     def undo(self) -> None:
-        if self.index is not None and 0 <= self.index < len(
-            self.sketch.points
-        ):
+        if self.index is not None and 0 <= self.index < len(self.sketch.points):
             edge_map = self.sketch.remove_point(self.index)
             self.document.remap_sketch_points(
                 self.sketch, self.index, edge_map
@@ -302,9 +357,7 @@ class MovePointCommand(Command):
             next_points = _copy_points(sketch.points)
             next_points[index] = self.point
             sketch.constrain_axis_changes(next_points, [index])
-            self.next_points = sketch.enforced_points(
-                next_points
-            )
+            self.next_points = sketch.enforced_points(next_points)
 
     @property
     def label(self) -> str:
@@ -364,12 +417,8 @@ class MoveEdgeCommand(Command):
                 next_points = _copy_points(sketch.points)
                 next_points[first] = self.start
                 next_points[second] = aligned_end
-                sketch.constrain_axis_changes(
-                    next_points, [first, second]
-                )
-                self.next_points = sketch.enforced_points(
-                    next_points
-                )
+                sketch.constrain_axis_changes(next_points, [first, second])
+                self.next_points = sketch.enforced_points(next_points)
 
     @property
     def label(self) -> str:
@@ -414,49 +463,42 @@ class SetEdgeConstraintCommand(Command):
         self.previous_constraint = sketch.edge_constraint(index)
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
-        if (
-            self.constraint is not None
-            and 0 <= index < len(sketch.edges)
+        if self.constraint is None or not 0 <= index < len(sketch.edges):
+            return
+        first, second = sketch.edges[index]
+        if not (
+            0 <= first < len(sketch.points)
+            and 0 <= second < len(sketch.points)
         ):
-            first, second = sketch.edges[index]
-            if (
-                0 <= first < len(sketch.points)
-                and 0 <= second < len(sketch.points)
-            ):
-                if (
-                    sketch.is_projected_point(first)
-                    and sketch.is_projected_point(second)
-                    and not sketch.edge_is_aligned(
-                        index, self.constraint
-                    )
-                ):
-                    # Both endpoints follow the solid, so a constraint that
-                    # is not already satisfied cannot be enforced without
-                    # detaching the projection.
-                    self.constraint = None
-                    return
-                self.previous_points = _copy_points(sketch.points)
-                next_points = _copy_points(sketch.points)
-                next_points[second] = aligned_edge_endpoint(
-                    next_points[first],
-                    next_points[second],
-                    self.constraint,
-                )
-                sketch.constrain_axis_changes(
-                    next_points,
-                    [second],
-                    [first, second],
-                    excluded_edges=[index],
-                )
-                sketch.edge_constraints[index] = self.constraint
-                try:
-                    self.next_points = sketch.enforced_points(
-                        next_points
-                    )
-                finally:
-                    sketch.edge_constraints[index] = (
-                        self.previous_constraint
-                    )
+            return
+        if (
+            sketch.is_projected_point(first)
+            and sketch.is_projected_point(second)
+            and not sketch.edge_is_aligned(index, self.constraint)
+        ):
+            # Both endpoints follow the solid, so a constraint that is not
+            # already satisfied cannot be enforced without detaching the
+            # projection.
+            self.constraint = None
+            return
+        self.previous_points = _copy_points(sketch.points)
+        next_points = _copy_points(sketch.points)
+        next_points[second] = aligned_edge_endpoint(
+            next_points[first],
+            next_points[second],
+            self.constraint,
+        )
+        sketch.constrain_axis_changes(
+            next_points,
+            [second],
+            [first, second],
+            excluded_edges=[index],
+        )
+        sketch.edge_constraints[index] = self.constraint
+        try:
+            self.next_points = sketch.enforced_points(next_points)
+        finally:
+            sketch.edge_constraints[index] = self.previous_constraint
 
     @property
     def label(self) -> str:
@@ -482,9 +524,7 @@ class SetEdgeConstraintCommand(Command):
             return
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
-        self.sketch.edge_constraints[self.index] = (
-            self.previous_constraint
-        )
+        self.sketch.edge_constraints[self.index] = self.previous_constraint
         self.document.recompute()
         self.document.dirty = True
 
@@ -516,9 +556,7 @@ class AddCoincidentCommand(Command):
                 and normalized_second[0] == "origin"
             )
         ):
-            self.coincident = Coincident(
-                normalized_first, normalized_second
-            )
+            self.coincident = Coincident(normalized_first, normalized_second)
         self.index: Optional[int] = None
         self.previous_points: Optional[List[Point]] = None
         self.next_points: Optional[List[Point]] = None
@@ -535,12 +573,8 @@ class AddCoincidentCommand(Command):
     def _refs_valid(self) -> bool:
         if self.coincident is None:
             return False
-        for kind, index in (
-            self.coincident.first, self.coincident.second
-        ):
-            if kind == "point" and not 0 <= index < len(
-                self.sketch.points
-            ):
+        for kind, index in (self.coincident.first, self.coincident.second):
+            if kind == "point" and not 0 <= index < len(self.sketch.points):
                 return False
         return True
 
@@ -553,10 +587,7 @@ class AddCoincidentCommand(Command):
         if self.coincident is None:
             return []
         for ref in (self.coincident.first, self.coincident.second):
-            if (
-                ref[0] == "point"
-                and self.sketch.is_projected_point(ref[1])
-            ):
+            if ref[0] == "point" and self.sketch.is_projected_point(ref[1]):
                 return [ref[1]]
         if self.coincident.first[0] == "point":
             return [self.coincident.first[1]]
@@ -577,9 +608,7 @@ class AddCoincidentCommand(Command):
         if self.next_points is None:
             next_points = _copy_points(self.sketch.points)
             anchors = self._anchor_indices()
-            self.sketch.constrain_axis_changes(
-                next_points, anchors, anchors
-            )
+            self.sketch.constrain_axis_changes(next_points, anchors, anchors)
             self.next_points = self.sketch.enforced_points(next_points)
         self.sketch.apply_point_positions(self.next_points)
         self.document.recompute()
@@ -588,14 +617,12 @@ class AddCoincidentCommand(Command):
     def undo(self) -> None:
         if self.index is None:
             return
-        if (
-            self.index < len(self.sketch.coincidences)
-            and self.sketch.coincidences[self.index] == self.coincident
-        ):
-            self.sketch.coincidences.pop(self.index)
+        coincidences = self.sketch.coincidences
+        if self.index < len(coincidences) and coincidences[self.index] == self.coincident:
+            coincidences.pop(self.index)
         else:
             try:
-                self.sketch.coincidences.remove(self.coincident)
+                coincidences.remove(self.coincident)
             except ValueError:
                 pass
         if self.previous_points is not None:
@@ -650,22 +677,17 @@ class AddMeasurementCommand(Command):
         return self.sketch.id
 
     def do(self) -> None:
-        if self.measurement.kind not in (
-            "distance", "angle", "diameter"
-        ):
+        if self.measurement.kind not in ("distance", "angle", "diameter"):
             return
+        limits = {
+            "point": len(self.sketch.points),
+            "line": len(self.sketch.edges),
+            "circle": len(self.sketch.circles),
+        }
         for ref_kind, ref_index in (
             self.measurement.first, self.measurement.second
         ):
-            if ref_kind == "point":
-                limit = len(self.sketch.points)
-            elif ref_kind == "line":
-                limit = len(self.sketch.edges)
-            elif ref_kind == "circle":
-                limit = len(self.sketch.circles)
-            else:
-                return
-            if not 0 <= ref_index < limit:
+            if ref_kind not in limits or not 0 <= ref_index < limits[ref_kind]:
                 return
         if self.measurement.kind == "diameter" and (
             self.measurement.first[0] != "circle"
@@ -678,14 +700,10 @@ class AddMeasurementCommand(Command):
                 circle.diameter for circle in self.sketch.circles
             ]
             self.has_applied = True
-        if self.index is None:
-            self.index = len(self.sketch.measurements)
-        self.index = min(self.index, len(self.sketch.measurements))
+        self.index = _insert_position(self.index, len(self.sketch.measurements))
         self.sketch.measurements.insert(self.index, self.measurement)
         if self.next_points is None:
-            self.next_points = self.sketch.enforced_points(
-                self.sketch.points
-            )
+            self.next_points = self.sketch.enforced_points(self.sketch.points)
             self.next_diameters = [
                 circle.diameter for circle in self.sketch.circles
             ]
@@ -697,14 +715,15 @@ class AddMeasurementCommand(Command):
     def undo(self) -> None:
         if self.index is None:
             return
+        measurements = self.sketch.measurements
         if (
-            self.index < len(self.sketch.measurements)
-            and self.sketch.measurements[self.index] == self.measurement
+            self.index < len(measurements)
+            and measurements[self.index] == self.measurement
         ):
-            self.sketch.measurements.pop(self.index)
+            measurements.pop(self.index)
         else:
             try:
-                self.sketch.measurements.remove(self.measurement)
+                measurements.remove(self.measurement)
             except ValueError:
                 pass
         if self.previous_points is not None:
@@ -713,9 +732,7 @@ class AddMeasurementCommand(Command):
         self.document.recompute()
         self.document.dirty = True
 
-    def _apply_diameters(
-        self, diameters: Optional[List[float]]
-    ) -> None:
+    def _apply_diameters(self, diameters: Optional[List[float]]) -> None:
         """Restore the circle diameters captured for this command."""
         if diameters is None:
             return
@@ -768,9 +785,7 @@ class SetMeasurementPlacementCommand(Command):
         if not 0 <= self.index < len(self.sketch.measurements):
             return
         if not self.has_previous:
-            self.previous = self.sketch.measurements[
-                self.index
-            ].placement
+            self.previous = self.sketch.measurements[self.index].placement
             self.has_previous = True
         self._replace(self.placement)
 
@@ -855,10 +870,7 @@ class SetMeasurementValueCommand(Command):
         if self.next_points is not None:
             self.sketch.apply_point_positions(self.next_points)
         if self.next_diameters is not None:
-            for circle, diameter in zip(
-                self.sketch.circles, self.next_diameters
-            ):
-                circle.change_diameter(diameter)
+            self._set_diameters(self.next_diameters)
         self.document.recompute()
         self.document.dirty = True
 
@@ -869,12 +881,13 @@ class SetMeasurementValueCommand(Command):
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
         if self.previous_diameters is not None:
-            for circle, diameter in zip(
-                self.sketch.circles, self.previous_diameters
-            ):
-                circle.change_diameter(diameter)
+            self._set_diameters(self.previous_diameters)
         self.document.recompute()
         self.document.dirty = True
+
+    def _set_diameters(self, diameters: List[float]) -> None:
+        for circle, diameter in zip(self.sketch.circles, diameters):
+            circle.change_diameter(diameter)
 
 
 class AddLineCommand(Command):
@@ -895,9 +908,7 @@ class AddLineCommand(Command):
         self.sketch = sketch
         self.start = point2d(start)
         self.constraint = normalize_edge_constraint(constraint)
-        self.end = aligned_edge_endpoint(
-            self.start, end, self.constraint
-        )
+        self.end = aligned_edge_endpoint(self.start, end, self.constraint)
         self.index: Optional[int] = None
         self.created_points: List[int] = []
 
@@ -909,58 +920,30 @@ class AddLineCommand(Command):
     def sketch_id(self) -> Optional[int]:
         return self.sketch.id
 
-    def _ensure_point(self, point: Point) -> int:
-        index = self.sketch.find_point(point)
-        if index is not None:
-            return index
-        index = self.sketch.add_point(point)
-        self.created_points.append(index)
-        return index
-
     def do(self) -> None:
         self.created_points = []
         if self.start == self.end:
             return
-        start_index = self._ensure_point(self.start)
-        end_index = self._ensure_point(self.end)
+        start_index = _ensure_point(self.sketch, self.start, self.created_points)
+        end_index = _ensure_point(self.sketch, self.end, self.created_points)
         if start_index == end_index:
             return
-        if self.index is None:
-            self.index = len(self.sketch.edges)
-        self.index = min(self.index, len(self.sketch.edges))
-        self.sketch.edges.insert(
-            self.index, (start_index, end_index)
-        )
-        self.sketch.edge_constraints.insert(
-            self.index, self.constraint
-        )
-        self.sketch.edge_bulges.insert(self.index, None)
+        sketch = self.sketch
+        self.index = _insert_position(self.index, len(sketch.edges))
+        sketch.edges.insert(self.index, (start_index, end_index))
+        sketch.edge_constraints.insert(self.index, self.constraint)
+        sketch.edge_bulges.insert(self.index, None)
         self.document.dirty = True
 
     def undo(self) -> None:
-        if (
-            self.index is not None
-            and self.index < len(self.sketch.edges)
-        ):
-            self.sketch.edges.pop(self.index)
-            if self.index < len(self.sketch.edge_constraints):
-                self.sketch.edge_constraints.pop(self.index)
-            if self.index < len(self.sketch.edge_bulges):
-                self.sketch.edge_bulges.pop(self.index)
-        referenced = {
-            index
-            for edge in self.sketch.edges
-            for index in edge
-        }
-        for index in sorted(self.created_points, reverse=True):
-            if (
-                index < len(self.sketch.points)
-                and index not in referenced
-            ):
-                edge_map = self.sketch.remove_point(index)
-                self.document.remap_sketch_points(
-                    self.sketch, index, edge_map
-                )
+        sketch = self.sketch
+        if self.index is not None and self.index < len(sketch.edges):
+            sketch.edges.pop(self.index)
+            if self.index < len(sketch.edge_constraints):
+                sketch.edge_constraints.pop(self.index)
+            if self.index < len(sketch.edge_bulges):
+                sketch.edge_bulges.pop(self.index)
+        _drop_unused_points(self.document, sketch, self.created_points)
         self.created_points = []
         self.document.recompute()
         self.document.dirty = True
@@ -1004,14 +987,6 @@ class AddRectangleCommand(Command):
     def sketch_id(self) -> Optional[int]:
         return self.sketch.id
 
-    def _ensure_point(self, point: Point) -> int:
-        index = self.sketch.find_point(point)
-        if index is not None:
-            return index
-        index = self.sketch.add_point(point)
-        self.created_points.append(index)
-        return index
-
     def do(self) -> None:
         self.created_points = []
         if (
@@ -1020,56 +995,41 @@ class AddRectangleCommand(Command):
             or self.corners[0][1] == self.corners[2][1]
         ):
             return
-        indices = [self._ensure_point(point) for point in self.corners]
+        indices = [
+            _ensure_point(self.sketch, point, self.created_points)
+            for point in self.corners
+        ]
         if len(set(indices)) != 4:
             return
-        if self.index is None:
-            self.index = len(self.sketch.edges)
-        self.index = min(self.index, len(self.sketch.edges))
+        sketch = self.sketch
+        self.index = _insert_position(self.index, len(sketch.edges))
         for offset in range(4):
             edge_index = self.index + offset
-            self.sketch.edges.insert(
+            sketch.edges.insert(
                 edge_index,
                 (indices[offset], indices[(offset + 1) % 4]),
             )
-            self.sketch.edge_constraints.insert(
+            sketch.edge_constraints.insert(
                 edge_index, self.CONSTRAINTS[offset]
             )
-            self.sketch.edge_bulges.insert(edge_index, None)
+            sketch.edge_bulges.insert(edge_index, None)
         self.document.dirty = True
 
     def undo(self) -> None:
+        sketch = self.sketch
         if self.index is not None:
-            end = min(self.index + 4, len(self.sketch.edges))
-            removed = end - self.index
+            # Slice deletion clamps to the list length, so the four edges
+            # and their parallel constraint/bulge entries come out together.
+            removed = min(self.index + 4, len(sketch.edges)) - self.index
             if removed > 0:
-                del self.sketch.edges[self.index:end]
-                constraint_end = min(
-                    self.index + removed,
-                    len(self.sketch.edge_constraints),
-                )
-                del self.sketch.edge_constraints[
-                    self.index:constraint_end
-                ]
-                bulge_end = min(
-                    self.index + removed,
-                    len(self.sketch.edge_bulges),
-                )
-                del self.sketch.edge_bulges[self.index:bulge_end]
-        referenced = {
-            index
-            for edge in self.sketch.edges
-            for index in edge
-        }
-        for index in sorted(self.created_points, reverse=True):
-            if (
-                index < len(self.sketch.points)
-                and index not in referenced
-            ):
-                edge_map = self.sketch.remove_point(index)
-                self.document.remap_sketch_points(
-                    self.sketch, index, edge_map
-                )
+                stop = self.index + removed
+                for entries in (
+                    sketch.edges,
+                    sketch.edge_constraints,
+                    sketch.edge_bulges,
+                ):
+                    del entries[self.index:stop]
+        _drop_unused_points(self.document, sketch, self.created_points)
         self.created_points = []
         self.document.recompute()
         self.document.dirty = True
@@ -1130,9 +1090,10 @@ class AddProjectionCommand(Command):
             Tuple[ProjectionSource, ProjectionSource, Optional[float]]
         ] = []
         circles: List[Tuple[ProjectionSource, int, float]] = []
-        seen_points: set = set()
-        seen_segments: set = set()
-        seen_circles: set = set()
+        seen_points: Set[object] = set()
+        seen_segments: Set[frozenset] = set()
+        seen_circles: Set[object] = set()
+
         for world in self.points:
             planned = projected_point(
                 self.document, self.sketch, self.feature_id, world
@@ -1141,10 +1102,9 @@ class AddProjectionCommand(Command):
                 continue
             seen_points.add(planned[0].key())
             points.append(planned)
+
         for chain in self.chains:
-            edge = self.edge
-            if edge is None:
-                edge = (chain[0], chain[-1])
+            edge = self.edge if self.edge is not None else (chain[0], chain[-1])
             plan = projected_shape(
                 self.document, self.sketch, self.feature_id,
                 chain, edge[0], edge[1],
@@ -1173,18 +1133,17 @@ class AddProjectionCommand(Command):
     @property
     def has_targets(self) -> bool:
         """Return whether the plan adds anything the sketch lacks."""
-        existing_points = {
-            link.source.key() for link in self.sketch.projected_points
-        }
+        sketch = self.sketch
+        existing_points = {link.source.key() for link in sketch.projected_points}
         existing_edges = {
             frozenset((link.start.key(), link.end.key()))
-            for link in self.sketch.projected_edges
+            for link in sketch.projected_edges
         }
         existing_circles = {
             _projected_circle_identity(
                 link.center, link.source_circle, link.radius
             )
-            for link in self.sketch.projected_circles
+            for link in sketch.projected_circles
         }
         if any(
             source.key() not in existing_points
@@ -1208,9 +1167,7 @@ class AddProjectionCommand(Command):
         if count == 0:
             return "Project Point"
         if count == 1:
-            if self._plan_circles:
-                return "Project Circle"
-            return "Project Edge"
+            return "Project Circle" if self._plan_circles else "Project Edge"
         return f"Project {count} Edges"
 
     @property
@@ -1260,6 +1217,9 @@ class AddProjectionCommand(Command):
             frozenset((link.start.key(), link.end.key()))
             for link in sketch.projected_edges
         }
+        # Unordered endpoint pairs of every existing edge, kept current as
+        # edges are appended so each lookup is O(1) instead of a list scan.
+        existing_edges = {frozenset(edge) for edge in sketch.edges}
         for start, end, bulge in self._plan_segments:
             first = points.get(start.key())
             second = points.get(end.key())
@@ -1268,9 +1228,8 @@ class AddProjectionCommand(Command):
             pair = frozenset((start.key(), end.key()))
             if pair in joined:
                 continue
-            if (first, second) in sketch.edges or (
-                second, first
-            ) in sketch.edges:
+            edge_key = frozenset((first, second))
+            if edge_key in existing_edges:
                 continue
             index = len(sketch.edges)
             sketch.edges.append((first, second))
@@ -1281,6 +1240,7 @@ class AddProjectionCommand(Command):
                 sources[start.key()], sources[end.key()], bulge,
             ))
             joined.add(pair)
+            existing_edges.add(edge_key)
 
     def _add_circles(self) -> None:
         """Append each planned round edge as one real sketch circle."""
@@ -1292,9 +1252,7 @@ class AddProjectionCommand(Command):
             for link in sketch.projected_circles
         }
         for center, source_circle, radius in self._plan_circles:
-            key = _projected_circle_identity(
-                center, source_circle, radius
-            )
+            key = _projected_circle_identity(center, source_circle, radius)
             if key in existing or radius <= 0.0:
                 continue
             sketch.add_circle((center.u, center.v), radius * 2.0)
@@ -1315,26 +1273,12 @@ class AddProjectionCommand(Command):
         del sketch.projected_circles[projected_circle_count:]
         del sketch.projected_edges[projected_edge_count:]
         del sketch.projected_points[projected_point_count:]
-        if len(sketch.circles) > circle_count:
-            del sketch.circles[circle_count:]
-        if len(sketch.edges) > edge_count:
-            del sketch.edges[edge_count:]
-        if len(sketch.edge_constraints) > constraint_count:
-            del sketch.edge_constraints[constraint_count:]
-        if len(sketch.edge_bulges) > bulge_count:
-            del sketch.edge_bulges[bulge_count:]
-        if len(sketch.points) > point_count:
-            del sketch.points[point_count:]
+        del sketch.circles[circle_count:]
+        del sketch.edges[edge_count:]
+        del sketch.edge_constraints[constraint_count:]
+        del sketch.edge_bulges[bulge_count:]
+        del sketch.points[point_count:]
         self.document.dirty = True
-
-
-def _projected_circle_identity(
-    center: ProjectionSource, source_circle: int, radius: float
-) -> Tuple[object, ...]:
-    """Return a stable dedupe key for projected circles."""
-    if source_circle >= 0:
-        return (center.key(), source_circle)
-    return (center.key(), round(radius, 6))
 
 
 class AddCircleCommand(Command):
@@ -1366,61 +1310,47 @@ class AddCircleCommand(Command):
     def sketch_id(self) -> Optional[int]:
         return self.sketch.id
 
+    def _is_midpoint(self, point) -> bool:
+        return any(circle.midPoint is point for circle in self.sketch.circles)
+
     def do(self) -> None:
         self.created_points = []
         if self.diameter <= 0:
             return
-        center_index = self.sketch.point_index(self.center)
-        if center_index is not None and any(
-            circle.midPoint is self.sketch.points[center_index]
-            for circle in self.sketch.circles
+        sketch = self.sketch
+        center_index = sketch.point_index(self.center)
+        if center_index is not None and self._is_midpoint(
+            sketch.points[center_index]
         ):
             # Concentric circles need distinct midpoint points so each closed
             # loop can be identified by its point index.
             center_index = None
         if center_index is None:
-            center_index = self.sketch.add_point(self.center)
+            center_index = sketch.add_point(self.center)
             self.created_points.append(center_index)
-        self.circle = circle2d(
-            self.sketch.points[center_index], self.diameter
-        )
-        if self.index is None:
-            self.index = len(self.sketch.circles)
-        self.index = min(self.index, len(self.sketch.circles))
-        self.sketch.circles.insert(self.index, self.circle)
+        self.circle = circle2d(sketch.points[center_index], self.diameter)
+        self.index = _insert_position(self.index, len(sketch.circles))
+        sketch.circles.insert(self.index, self.circle)
         self.document.dirty = True
 
     def undo(self) -> None:
         if self.circle is None:
             return
+        sketch = self.sketch
         if (
             self.index is not None
-            and 0 <= self.index < len(self.sketch.circles)
-            and self.sketch.circles[self.index] is self.circle
+            and 0 <= self.index < len(sketch.circles)
+            and sketch.circles[self.index] is self.circle
         ):
-            self.sketch.circles.pop(self.index)
-        elif self.circle in self.sketch.circles:
-            self.sketch.circles.remove(self.circle)
-        referenced = {
-            index
-            for edge in self.sketch.edges
-            for index in edge
-        }
-        for index in sorted(self.created_points, reverse=True):
-            if not 0 <= index < len(self.sketch.points):
-                continue
-            point = self.sketch.points[index]
-            if index in referenced:
-                continue
-            if any(
-                circle.midPoint is point
-                for circle in self.sketch.circles
-            ):
-                continue
-            edge_map = self.sketch.remove_point(index)
-            self.document.remap_sketch_points(
-                self.sketch, index, edge_map
-            )
+            sketch.circles.pop(self.index)
+        elif self.circle in sketch.circles:
+            sketch.circles.remove(self.circle)
+        _drop_unused_points(
+            self.document,
+            sketch,
+            self.created_points,
+            keep=lambda index: self._is_midpoint(sketch.points[index]),
+        )
         self.created_points = []
         self.document.recompute()
         self.document.dirty = True
@@ -1457,9 +1387,9 @@ class DeleteSketchEntitiesCommand(Command):
     def _plan(self) -> None:
         """Work out which edges and points the selection covers."""
         sketch = self.sketch
-        edges = set()
-        points = set()
-        candidates = set()
+        edges: Set[int] = set()
+        points: Set[int] = set()
+        candidates: Set[int] = set()
 
         if self.entity is not None:
             kind, index = self.entity
@@ -1468,6 +1398,15 @@ class DeleteSketchEntitiesCommand(Command):
             elif kind == "line" and 0 <= index < len(sketch.edges):
                 edges.add(index)
                 candidates.update(sketch.edges[index])
+
+        # Index edges by unordered endpoint pair once, so each loop segment
+        # is a dictionary lookup rather than a scan of every edge.
+        edges_by_pair: Dict[frozenset, List[int]] = {}
+        if self.loops:
+            for edge_index, (start, end) in enumerate(sketch.edges):
+                edges_by_pair.setdefault(
+                    frozenset((start, end)), []
+                ).append(edge_index)
 
         for loop in self.loops:
             if not loop:
@@ -1482,42 +1421,31 @@ class DeleteSketchEntitiesCommand(Command):
             for first, second in zip(loop, following):
                 if first == second:
                     continue
-                for edge_index, (start, end) in enumerate(sketch.edges):
-                    if edge_index in edges:
-                        continue
-                    if (
-                        (start == first and end == second)
-                        or (start == second and end == first)
-                    ):
+                for edge_index in edges_by_pair.get(frozenset((first, second)), ()):
+                    if edge_index not in edges:
                         edges.add(edge_index)
                         break
             candidates.update(loop)
 
-        edges = {
-            index for index in edges if 0 <= index < len(sketch.edges)
-        }
-        points = {
-            index for index in points if 0 <= index < len(sketch.points)
-        }
+        edges = {index for index in edges if 0 <= index < len(sketch.edges)}
+        points = {index for index in points if 0 <= index < len(sketch.points)}
         candidates = {
-            index
-            for index in candidates
-            if 0 <= index < len(sketch.points)
+            index for index in candidates if 0 <= index < len(sketch.points)
         }
 
         # Endpoints that no surviving edge or circle uses disappear with the
         # geometry that owned them.  A free point elsewhere is untouched.
-        remaining = [
-            edge
-            for index, edge in enumerate(sketch.edges)
-            if index not in edges
-        ]
-        used = {index for edge in remaining for index in edge}
+        used = {
+            index
+            for position, edge in enumerate(sketch.edges)
+            if position not in edges
+            for index in edge
+        }
         for circle in sketch.circles:
             midpoint = sketch.point_index(circle.midPoint)
-            if midpoint is not None and midpoint not in points:
+            if midpoint is not None:
                 used.add(midpoint)
-        points |= candidates - used - points
+        points |= candidates - used
 
         self.edge_indices = sorted(edges)
         self.point_indices = sorted(points)
@@ -1566,9 +1494,7 @@ class DeleteSketchEntitiesCommand(Command):
             self.document.remap_sketch_edges(self.sketch, index)
         for index in sorted(self.point_indices, reverse=True):
             edge_map = self.sketch.remove_point(index)
-            self.document.remap_sketch_points(
-                self.sketch, index, edge_map
-            )
+            self.document.remap_sketch_points(self.sketch, index, edge_map)
         self.document.recompute()
         self.document.dirty = True
 
@@ -1580,16 +1506,17 @@ class DeleteSketchEntitiesCommand(Command):
             coincidences, projected_points, projected_edges,
             projected_circles,
         ) = copy.deepcopy(self._before)
-        self.sketch.points = points
-        self.sketch.edges = edges
-        self.sketch.edge_constraints = constraints
-        self.sketch.edge_bulges = bulges
-        self.sketch.circles = circles
-        self.sketch.measurements = measurements
-        self.sketch.coincidences = coincidences
-        self.sketch.projected_points = projected_points
-        self.sketch.projected_edges = projected_edges
-        self.sketch.projected_circles = projected_circles
+        sketch = self.sketch
+        sketch.points = points
+        sketch.edges = edges
+        sketch.edge_constraints = constraints
+        sketch.edge_bulges = bulges
+        sketch.circles = circles
+        sketch.measurements = measurements
+        sketch.coincidences = coincidences
+        sketch.projected_points = projected_points
+        sketch.projected_edges = projected_edges
+        sketch.projected_circles = projected_circles
         for (
             feature, profiles, regions, cuts, fillets, booleans,
             slices_fillets, fallback,
@@ -1629,23 +1556,17 @@ class AddExtrudeCommand(Command):
         self.operation = operation
         if profiles is None and regions is None:
             profiles = [sketch.profile_indices()]
+
+        def usable(loop) -> bool:
+            return len(sketch.loop_points(loop)) >= 3
+
         self.profiles = [
-            list(profile)
-            for profile in (profiles or [])
-            if len(sketch.loop_points(profile)) >= 3
+            list(profile) for profile in (profiles or []) if usable(profile)
         ]
-        self.cuts = [
-            list(cut)
-            for cut in (cuts or [])
-            if len(sketch.loop_points(cut)) >= 3
-        ]
+        self.cuts = [list(cut) for cut in (cuts or []) if usable(cut)]
         self.regions: List[List[List[int]]] = []
         for region in regions or []:
-            loops = [
-                list(loop)
-                for loop in region
-                if len(sketch.loop_points(loop)) >= 3
-            ]
+            loops = [list(loop) for loop in region if usable(loop)]
             if loops:
                 self.regions.append(loops)
         self.feature: Optional[Extrude] = None
@@ -1664,15 +1585,14 @@ class AddExtrudeCommand(Command):
         if self.feature is None:
             self.feature = Extrude(
                 self.document.new_id(),
-                self._next_name(),
+                _next_free_name(
+                    "Extrude", (feature.name for feature in self.document.features)
+                ),
                 self.sketch.id,
                 self.height,
                 [list(profile) for profile in self.profiles],
                 [list(cut) for cut in self.cuts],
-                [
-                    [list(loop) for loop in region]
-                    for region in self.regions
-                ],
+                [[list(loop) for loop in region] for region in self.regions],
                 start=self.start,
                 operation=self.operation,
             )
@@ -1684,13 +1604,6 @@ class AddExtrudeCommand(Command):
         if self.feature is not None and self.feature in self.document.features:
             self.document.features.remove(self.feature)
         self.document.dirty = True
-
-    def _next_name(self) -> str:
-        names = {feature.name for feature in self.document.features}
-        index = 1
-        while f"Extrude {index}" in names:
-            index += 1
-        return f"Extrude {index}"
 
 
 class BooleanExtrudeCommand(Command):
@@ -1799,47 +1712,38 @@ class AddFilletCommand(Command):
         return f"Fillet {self.fillet.radius:g} mm"
 
     def do(self) -> None:
-        if self.feature.slices:
+        feature = self.feature
+        if feature.slices:
             # A cut or joined body keeps its slices as the source of truth,
             # so the rounding is baked into them instead of a prism profile.
             if self._before_slices is None:
-                self._before_slices = copy.deepcopy(self.feature.slices)
-            rounded = fillet_slices_body(
-                self.feature.slices, self.fillet
-            )
+                self._before_slices = copy.deepcopy(feature.slices)
+            rounded = fillet_slices_body(feature.slices, self.fillet)
             if rounded is None:
                 return
-            self.feature.slices = rounded
-            if not any(
-                entry is self.fillet
-                for entry in self.feature.slices_fillets
-            ):
-                self.feature.slices_fillets.append(self.fillet)
-        elif not any(
-            entry is self.fillet for entry in self.feature.fillets
-        ):
-            sketch = self.document.sketch(self.feature.sketch_id)
+            feature.slices = rounded
+            if not any(entry is self.fillet for entry in feature.slices_fillets):
+                feature.slices_fillets.append(self.fillet)
+        elif not any(entry is self.fillet for entry in feature.fillets):
+            sketch = self.document.sketch(feature.sketch_id)
             if sketch is not None:
                 self.fillet.bind(sketch)
-            self.feature.fillets.append(self.fillet)
-        self.feature._boolean_state = None
+            feature.fillets.append(self.fillet)
+        feature._boolean_state = None
         self.document.recompute()
         self.document.dirty = True
 
     def undo(self) -> None:
+        feature = self.feature
         if self._before_slices is not None:
-            self.feature.slices = copy.deepcopy(self._before_slices)
-        self.feature.slices_fillets[:] = [
-            entry
-            for entry in self.feature.slices_fillets
-            if entry is not self.fillet
+            feature.slices = copy.deepcopy(self._before_slices)
+        feature.slices_fillets[:] = [
+            entry for entry in feature.slices_fillets if entry is not self.fillet
         ]
-        self.feature.fillets[:] = [
-            entry
-            for entry in self.feature.fillets
-            if entry is not self.fillet
+        feature.fillets[:] = [
+            entry for entry in feature.fillets if entry is not self.fillet
         ]
-        self.feature._boolean_state = None
+        feature._boolean_state = None
         self.document.recompute()
         self.document.dirty = True
 
@@ -1907,7 +1811,7 @@ class CommandStack:
 
     def history(self) -> List[Command]:
         """All actions in chronological order, including undone ones."""
-        return list(self._undo) + list(reversed(self._redo))
+        return self._undo + self._redo[::-1]
 
     def execute(self, command: Command) -> None:
         command.do()
@@ -1932,7 +1836,7 @@ class CommandStack:
 
     def jump_to(self, position: int) -> None:
         """Roll the history marker to a number of applied actions."""
-        target = max(0, min(len(self.history()), position))
+        target = max(0, min(len(self._undo) + len(self._redo), position))
         while len(self._undo) > target:
             self.undo()
         while len(self._undo) < target and self._redo:
@@ -1954,13 +1858,18 @@ class CommandStack:
         target = history[index]
         if target.kind == "sketch" and target.sketch_id is not None:
             sketch_id = target.sketch_id
-            for position, command in enumerate(history):
-                if command.sketch_id == sketch_id:
-                    removed.add(position)
+            removed.update(
+                position
+                for position, command in enumerate(history)
+                if command.sketch_id == sketch_id
+            )
 
         old_position = self.position
         removed_applied = sum(1 for position in removed if position < old_position)
-        kept = [command for position, command in enumerate(history) if position not in removed]
+        kept = [
+            command for position, command in enumerate(history)
+            if position not in removed
+        ]
 
         # Rebuild from a clean document so index-based point commands and
         # feature dependencies stay consistent after the deletion.
