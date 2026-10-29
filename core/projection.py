@@ -422,49 +422,49 @@ def _projected_bulge(
     first = project_to_sketch(sketch, run[0][0])
     middle = project_to_sketch(sketch, midpoint)
     last = project_to_sketch(sketch, run[-1][0])
-    circle = _circle_through(first, middle, last)
-    if circle is None:
+    fit = _fit_circle([first, middle, last])
+    if fit is None:
         return None
-    return _sweep_bulge([first, middle, last], circle[0])
+    return _sweep_bulge([first, middle, last], fit[0])
 
 
 def _arc_midpoint(
     run: Sequence[Tuple[Point3, Point2]]
 ) -> Optional[Point3]:
-    """Return the point halfway along a 3D arc run, snapped to its circle."""
+    """Return the angular midpoint of a 3D arc run.
+
+    Angles are accumulated along the run, so uneven tessellation cannot
+    pull the midpoint toward a densely sampled part of the arc.
+    """
     if len(run) < 3:
         return None
     circle = _circle_through(run[0][0], run[1][0], run[2][0])
     if circle is None:
         return None
-    center, radius, _ = circle
-    lengths = [0.0]
-    for first, second in zip(run, run[1:]):
-        lengths.append(lengths[-1] + _distance3(first[0], second[0]))
-    total = lengths[-1]
-    if total <= 1e-12:
-        return None
-    half = total * 0.5
-    point = run[0][0]
-    for index in range(len(run) - 1):
-        if lengths[index] <= half <= lengths[index + 1]:
-            span = lengths[index + 1] - lengths[index]
-            t = 0.0 if span <= 1e-12 else (
-                half - lengths[index]
-            ) / span
-            first = run[index][0]
-            second = run[index + 1][0]
-            point = tuple(
-                first[axis] + (second[axis] - first[axis]) * t
-                for axis in range(3)
-            )
-            break
-    offset = _subtract3(point, center)
-    length = math.sqrt(_dot(offset, offset))
+    center, radius, normal = circle
+    first = _subtract3(run[0][0], center)
+    length = math.sqrt(_dot(first, first))
     if length <= 1e-12:
         return None
+    axis_u = tuple(component / length for component in first)
+    axis_v = _cross3(normal, axis_u)
+    angles = []
+    for point, _ in run:
+        offset = _subtract3(point, center)
+        angles.append(math.atan2(
+            _dot(offset, axis_v), _dot(offset, axis_u)
+        ))
+    sweep = 0.0
+    for first_angle, second_angle in zip(angles, angles[1:]):
+        sweep += (second_angle - first_angle + math.pi) % math.tau - math.pi
+    if abs(sweep) <= 1e-9:
+        return None
+    middle = angles[0] + sweep * 0.5
     return tuple(
-        center[axis] + offset[axis] * radius / length
+        center[axis] + radius * (
+            math.cos(middle) * axis_u[axis]
+            + math.sin(middle) * axis_v[axis]
+        )
         for axis in range(3)
     )
 
@@ -490,9 +490,9 @@ def _world_on_plane(
 
 
 def _split_primitives(
-    points: Sequence[Point2],
+    points: Sequence[Point3],
 ) -> List[Tuple[str, int, int]]:
-    """Split a polyline into maximal straight and circular-arc runs."""
+    """Split a 3D polyline into maximal straight and circular-arc runs."""
     runs: List[Tuple[str, int, int]] = []
     index = 0
     count = len(points)
@@ -517,7 +517,7 @@ def _split_primitives(
 
 
 def _arc_run(
-    points: Sequence[Point2], start: int
+    points: Sequence[Point3], start: int
 ) -> Optional[int]:
     """Return the inclusive end of a circular run, or None."""
     count = len(points)
@@ -528,12 +528,12 @@ def _arc_run(
     )
     if circle is None:
         return None
-    center, radius = circle
+    center, radius, normal = circle
     end = start + 2
     tolerance = FIT_TOLERANCE * max(1.0, radius)
-    while end < count - 1 and abs(
-        _distance(center, points[end + 1]) - radius
-    ) <= tolerance:
+    while end < count - 1 and _on_circle(
+        points[end + 1], center, radius, normal, tolerance
+    ):
         end += 1
     if end - start >= 3:
         return end
@@ -553,7 +553,7 @@ def _primitive_at(
 
 
 def _picked_segment(
-    unique: Sequence[Tuple[Point3, Point2]],
+    points: Sequence[Point3],
     edge_start: Sequence[float],
     edge_end: Sequence[float],
 ) -> Optional[int]:
@@ -561,8 +561,7 @@ def _picked_segment(
     first = tuple(round(float(value), 6) for value in edge_start)
     second = tuple(round(float(value), 6) for value in edge_end)
     rounded = [
-        tuple(round(value, 6) for value in world)
-        for world, _ in unique
+        tuple(round(value, 6) for value in point) for point in points
     ]
     for index in range(len(rounded) - 1):
         current = rounded[index]
@@ -601,38 +600,64 @@ def _consistent_circle_binding(
     return index if count * 2 >= len(loop) else -1
 
 
-def _collinear(first: Point2, second: Point2, third: Point2) -> bool:
-    """Return whether three points continue one straight segment."""
-    ax, ay = second[0] - first[0], second[1] - first[1]
-    bx, by = third[0] - second[0], third[1] - second[1]
-    scale = math.hypot(ax, ay) * math.hypot(bx, by)
+def _collinear(first: Point3, second: Point3, third: Point3) -> bool:
+    """Return whether three 3D points continue one straight segment."""
+    forward = _subtract3(second, first)
+    following = _subtract3(third, second)
+    scale = math.sqrt(_dot(forward, forward)) * math.sqrt(
+        _dot(following, following)
+    )
     if scale <= 1e-18:
         return True
-    return abs(ax * by - ay * bx) <= 1e-6 * scale and ax * bx + ay * by > 0
+    cross = _cross3(forward, following)
+    return (
+        math.sqrt(_dot(cross, cross)) <= 1e-6 * scale
+        and _dot(forward, following) > 0
+    )
 
 
 def _circle_through(
-    first: Point2, second: Point2, third: Point2
-) -> Optional[Tuple[Point2, float]]:
-    """Return the circumcircle of three points, or None if collinear."""
-    ax, ay = first
-    bx, by = second
-    cx, cy = third
-    determinant = 2.0 * (
-        ax * (by - cy) + bx * (cy - ay) + cx * (ay - by)
-    )
-    if abs(determinant) <= 1e-12:
+    first: Point3, second: Point3, third: Point3
+) -> Optional[Tuple[Point3, float, Point3]]:
+    """Return the circumcircle of three 3D points, or None if collinear."""
+    forward = _subtract3(second, first)
+    following = _subtract3(third, first)
+    normal = _cross3(forward, following)
+    area = _dot(normal, normal)
+    if area <= 1e-18:
         return None
-    a2 = ax * ax + ay * ay
-    b2 = bx * bx + by * by
-    c2 = cx * cx + cy * cy
-    ux = (
-        a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)
-    ) / determinant
-    uy = (
-        a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)
-    ) / determinant
-    return (ux, uy), math.hypot(ax - ux, ay - uy)
+    forward_sq = _dot(forward, forward)
+    following_sq = _dot(following, following)
+    forward_dot = _dot(forward, following)
+    alpha = following_sq * (forward_sq - forward_dot) / (2.0 * area)
+    beta = forward_sq * (following_sq - forward_dot) / (2.0 * area)
+    center = tuple(
+        first[axis] + forward[axis] * alpha + following[axis] * beta
+        for axis in range(3)
+    )
+    offset = _subtract3(center, first)
+    radius = math.sqrt(_dot(offset, offset))
+    if radius <= 1e-12:
+        return None
+    length = math.sqrt(area)
+    unit = tuple(component / length for component in normal)
+    return center, radius, unit
+
+
+def _on_circle(
+    point: Point3,
+    center: Point3,
+    radius: float,
+    normal: Point3,
+    tolerance: float,
+) -> bool:
+    """Return whether a 3D point lies on a circle within tolerance."""
+    offset = _subtract3(point, center)
+    radial = math.sqrt(_dot(offset, offset))
+    return (
+        abs(radial - radius) <= tolerance
+        and abs(_dot(offset, normal)) <= tolerance
+    )
 
 
 def _fit_circle(
@@ -686,12 +711,12 @@ def _fit_circle(
     return center, radius, error
 
 
-def _uniform_arc(points: Sequence[Point2]) -> bool:
+def _uniform_arc(points: Sequence[Point3]) -> bool:
     """Return whether a two-segment run looks like a sampled arc."""
     if len(points) != 3:
         return False
-    first = _distance(points[0], points[1])
-    second = _distance(points[1], points[2])
+    first = _distance3(points[0], points[1])
+    second = _distance3(points[1], points[2])
     if first <= 1e-9 or second <= 1e-9:
         return False
     if max(first, second) > min(first, second) * 1.1:
@@ -699,13 +724,14 @@ def _uniform_arc(points: Sequence[Point2]) -> bool:
     return _turn_angle(points) > math.radians(1.0)
 
 
-def _turn_angle(points: Sequence[Point2]) -> float:
-    """Return the absolute direction change at the middle point."""
-    ax = points[1][0] - points[0][0]
-    ay = points[1][1] - points[0][1]
-    bx = points[2][0] - points[1][0]
-    by = points[2][1] - points[1][1]
-    return abs(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
+def _turn_angle(points: Sequence[Point3]) -> float:
+    """Return the absolute direction change at the middle 3D point."""
+    forward = _subtract3(points[1], points[0])
+    following = _subtract3(points[2], points[1])
+    cross = _cross3(forward, following)
+    return abs(math.atan2(
+        math.sqrt(_dot(cross, cross)), _dot(forward, following)
+    ))
 
 
 def _sweep_bulge(
@@ -745,4 +771,12 @@ def _subtract3(first: Sequence[float], second: Sequence[float]) -> Point3:
         first[0] - second[0],
         first[1] - second[1],
         first[2] - second[2],
+    )
+
+
+def _cross3(first: Sequence[float], second: Sequence[float]) -> Point3:
+    return (
+        first[1] * second[2] - first[2] * second[1],
+        first[2] * second[0] - first[0] * second[2],
+        first[0] * second[1] - first[1] * second[0],
     )
