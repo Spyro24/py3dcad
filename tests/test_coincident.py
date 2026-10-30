@@ -7,32 +7,19 @@ its own; dragging it snaps it back onto the anchor.
 
 from __future__ import annotations
 
-from typing import Tuple
-
 from core.commands import (
     AddCoincidentCommand,
     AddPointCommand,
-    CommandStack,
     MovePointCommand,
 )
-from core.document import Document
-from core.sketch import Sketch
 
+from .fixtures import new_sketch
 from .harness import check
-
-
-def _new_sketch() -> Tuple[Document, Sketch, CommandStack]:
-    """Return a document with one empty sketch and its command stack."""
-    document = Document(id=1)
-    sketch = Sketch(id=1, name="Sketch1")
-    document.sketches.append(sketch)
-    document.active_sketch_id = sketch.id
-    return document, sketch, CommandStack()
 
 
 def test_coincident_second_point_follows_the_first() -> None:
     """Only the first point moves; the coincident second point follows it."""
-    document, sketch, stack = _new_sketch()
+    document, sketch, stack = new_sketch()
     stack.execute(AddPointCommand(document, sketch, (0.0, 0.0)))  # p1
     stack.execute(AddPointCommand(document, sketch, (5.0, 5.0)))  # p2
 
@@ -59,7 +46,7 @@ def test_coincident_second_point_follows_the_first() -> None:
 
 def test_coincident_follower_cannot_move_the_anchor() -> None:
     """Moving p2 must not move p1, and p2 stays fixed to p1."""
-    document, sketch, stack = _new_sketch()
+    document, sketch, stack = new_sketch()
     stack.execute(AddPointCommand(document, sketch, (0.0, 0.0)))  # p1
     stack.execute(AddPointCommand(document, sketch, (5.0, 5.0)))  # p2
 
