@@ -26,13 +26,30 @@ EQUAL_REF_KINDS = ("line", "circle")
 CIRCLE_SEGMENTS = 48
 
 
-def _matrix_rank(rows: Sequence[Sequence[float]], columns: int) -> int:
-    """Return the numerical rank of a small constraint Jacobian."""
-    matrix = [list(row[:columns]) for row in rows if any(abs(v) > 1e-9 for v in row)]
+def _rank_and_fixed_columns(
+    rows: Sequence[Sequence[float]], columns: int
+) -> Tuple[int, Set[int]]:
+    """Return a Jacobian's rank and the columns whose removal lowers it.
+
+    A variable column has no remaining degree of freedom ("is fixed") when
+    deleting it drops the rank by one.  Over the reals that holds exactly for
+    pivot columns whose reduced row-echelon row is a unit vector, so a single
+    Gauss-Jordan reduction answers the whole query instead of re-ranking the
+    matrix once per column.
+    """
+    matrix = [
+        list(row[:columns])
+        for row in rows
+        if any(abs(value) > 1e-9 for value in row)
+    ]
+    pivot_columns: List[int] = []
     rank = 0
     for column in range(columns):
         pivot = next(
-            (row for row in range(rank, len(matrix)) if abs(matrix[row][column]) > 1e-8),
+            (
+                row for row in range(rank, len(matrix))
+                if abs(matrix[row][column]) > 1e-8
+            ),
             None,
         )
         if pivot is None:
@@ -49,10 +66,23 @@ def _matrix_rank(rows: Sequence[Sequence[float]], columns: int) -> int:
                     value - factor * pivot_value
                     for value, pivot_value in zip(matrix[row], matrix[rank])
                 ]
+        pivot_columns.append(column)
         rank += 1
         if rank == len(matrix):
             break
-    return rank
+    free_columns = [
+        column for column in range(columns)
+        if column not in set(pivot_columns)
+    ]
+    fixed = {
+        pivot
+        for position, pivot in enumerate(pivot_columns)
+        if all(
+            abs(matrix[position][column]) <= 1e-8
+            for column in free_columns
+        )
+    }
+    return rank, fixed
 
 
 def circle_polygon(circle: Circle, segments: int = CIRCLE_SEGMENTS) -> List[Point]:
@@ -717,6 +747,15 @@ class Sketch:
     projected_points: List[ProjectedPoint] = field(default_factory=list)
     projected_edges: List[ProjectedEdge] = field(default_factory=list)
     projected_circles: List[ProjectedCircle] = field(default_factory=list)
+    # Memoised degree-of-freedom analysis.  The renderer asks for this on
+    # every frame, so it is cached against a geometry/constraint signature and
+    # only recomputed when the sketch actually changes.
+    _dof_signature: Optional[Tuple[object, ...]] = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _dof_cache: Optional[Tuple[Set[int], Set[int], Set[int]]] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.points = [point2d(point) for point in self.points]
@@ -2044,10 +2083,46 @@ class Sketch:
         equation[end * 2 + 1] += unit_y
         return True
 
+    def constraint_signature(self) -> Tuple[object, ...]:
+        """Return a hashable snapshot of everything the DOF analysis reads."""
+        return (
+            self.geometry_signature(),
+            tuple(self.edge_constraints),
+            tuple(
+                (coincidence.first, coincidence.second)
+                for coincidence in self.coincidences
+            ),
+            tuple(
+                (equal.first, equal.second) for equal in self.equals
+            ),
+            tuple(
+                (m.kind, m.first, m.second, m.value)
+                for m in self.measurements
+            ),
+            tuple(sorted(self.projected_point_indices())),
+            tuple(sorted(link.edge for link in self.projected_edges)),
+            tuple(sorted(link.circle for link in self.projected_circles)),
+        )
+
     def constrained_entities(self) -> Tuple[Set[int], Set[int], Set[int]]:
         """Return point, edge and circle indices with no free DOF left.
 
-        The constraint equations are linearised at the current sketch state.
+        The result is memoised against :meth:`constraint_signature` because
+        the viewport asks for it on every frame while the sketch is unchanged.
+        """
+        signature = self.constraint_signature()
+        if self._dof_signature == signature and self._dof_cache is not None:
+            return self._dof_cache
+        result = self._compute_constrained_entities()
+        self._dof_signature = signature
+        self._dof_cache = result
+        return result
+
+    def _compute_constrained_entities(
+        self,
+    ) -> Tuple[Set[int], Set[int], Set[int]]:
+        """Classify fixed entities from the linearised constraint equations.
+
         A coordinate is fixed when removing its column lowers the equation
         rank; this correctly distinguishes a merely horizontal line from one
         whose position and length are also constrained.
@@ -2122,17 +2197,21 @@ class Sketch:
             if value is None:
                 continue
             equation = row()
+            # Nudge one coordinate at a time on a single working copy instead
+            # of rebuilding every point for every column.
+            working = [point2d(point) for point in self.points]
             for column in range(point_count * 2):
-                points = [point2d(point) for point in self.points]
-                points[column // 2].set_pos((
-                    points[column // 2][0] + (1e-5 if column % 2 == 0 else 0.0),
-                    points[column // 2][1] + (1e-5 if column % 2 else 0.0),
-                ))
+                delta_x = 1e-5 if column % 2 == 0 else 0.0
+                delta_y = 1e-5 if column % 2 else 0.0
+                target = working[column // 2]
+                target.move((delta_x, delta_y))
                 changed = self.measurement_value(
-                    measurement.kind, measurement.first, measurement.second, points
+                    measurement.kind, measurement.first,
+                    measurement.second, working,
                 )
                 if changed is not None:
                     equation[column] = (changed - value) / 1e-5
+                target.move((-delta_x, -delta_y))
             rows.append(equation)
         for equal in self.equals:
             kind = equal.first[0]
@@ -2160,13 +2239,9 @@ class Sketch:
             ):
                 continue
             rows.append(equation)
-        rank = _matrix_rank(rows, columns)
-        fixed = {
-            column for column in range(columns)
-            if rank > _matrix_rank(
-                [entry[:column] + entry[column + 1:] for entry in rows], columns - 1
-            )
-        }
+        # A single reduction returns both the rank and the fully-determined
+        # coordinates, so the expensive per-column re-ranking is gone.
+        _, fixed = _rank_and_fixed_columns(rows, columns)
         points = {
             index for index in range(point_count)
             if index * 2 in fixed and index * 2 + 1 in fixed

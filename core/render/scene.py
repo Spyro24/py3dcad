@@ -107,7 +107,12 @@ class SceneRenderer:
         self._ghost_surface: Optional[pygame.Surface] = None
         self.edge_cache = FaceEdgeCache()
         self._constraint_cache: Dict[
-            int, Tuple[Sketch, Tuple[Set[int], Set[int], Set[int]]]
+            int,
+            Tuple[
+                Sketch,
+                Tuple[object, ...],
+                Tuple[Set[int], Set[int], Set[int]],
+            ],
         ] = {}
         # Constraint display options
         self.constraint_options: Dict[str, bool] = {
@@ -200,7 +205,6 @@ class SceneRenderer:
         solid_drawer: Optional[SolidDrawer] = None,
     ) -> None:
         self._init_fonts()
-        self._constraint_cache.clear()
         active = document.sketch(document.active_sketch_id)
         custom_active = active is not None and active.is_custom_plane
         if not custom_active:
@@ -1105,28 +1109,35 @@ class SceneRenderer:
             )
             _, constrained_edges, constrained_circles = self._constraints(sketch)
             frame = sketch.frame()
-            
-            # Get all edges involved in equality constraints
-            equality_edges = set()
+            show_equal = self.constraint_options.get(
+                "equal_constraints", True
+            )
+            # Collect the entities taking part in equalities once per sketch
+            # instead of rescanning the constraint list inside every loop.
+            equality_edges: Set[int] = set()
+            equality_circles: Set[int] = set()
             for equal in sketch.equals:
                 if equal.first[0] == "line" and equal.second[0] == "line":
                     equality_edges.add(equal.first[1])
                     equality_edges.add(equal.second[1])
-            
+                elif equal.first[0] == "circle" and equal.second[0] == "circle":
+                    equality_circles.add(equal.first[1])
+                    equality_circles.add(equal.second[1])
+
             for index in range(len(sketch.edges)):
                 # Determine if edge should be shown based on constraint options
                 show_edge = True
                 is_constrained = index in constrained_edges
-                
+
                 # Special handling for equal constraints
                 if is_constrained:
-                    if self.constraint_options.get("equal_constraints", True):
-                        # Show if it's in equality constraints
-                        if index in equality_edges:
-                            show_edge = self.constraint_options.get("constrained_lines", True)
-                    else:
+                    if not show_equal:
                         show_edge = False
-                
+                    elif index in equality_edges:
+                        show_edge = self.constraint_options.get(
+                            "constrained_lines", True
+                        )
+
                 line_color = (
                     self.palette.projection
                     if sketch.is_projected_edge(index) else (
@@ -1146,23 +1157,17 @@ class SceneRenderer:
                     )
             
             for index, circle in enumerate(sketch.circles):
-                # Get all circles involved in equality constraints
-                equality_circles = set()
-                for equal in sketch.equals:
-                    if equal.first[0] == "circle" and equal.second[0] == "circle":
-                        equality_circles.add(equal.first[1])
-                        equality_circles.add(equal.second[1])
-                
                 is_constrained = index in constrained_circles
                 show_circle = True
-                
+
                 if is_constrained:
-                    if self.constraint_options.get("equal_constraints", True):
-                        if index in equality_circles:
-                            show_circle = self.constraint_options.get("constrained_circles", True)
-                    else:
+                    if not show_equal:
                         show_circle = False
-                
+                    elif index in equality_circles:
+                        show_circle = self.constraint_options.get(
+                            "constrained_circles", True
+                        )
+
                 circle_color = (
                     self.palette.projection
                     if sketch.is_projected_circle(index) else (
@@ -1267,12 +1272,17 @@ class SceneRenderer:
     def _constraints(
         self, sketch: Sketch
     ) -> Tuple[Set[int], Set[int], Set[int]]:
-        """Return this frame's cached degree-of-freedom status for a sketch."""
+        """Return the cached degree-of-freedom status for a sketch.
+
+        The cache survives frames and is keyed by the sketch's constraint
+        signature, so it is only recomputed after a real geometry edit.
+        """
+        signature = sketch.constraint_signature()
         cached = self._constraint_cache.get(id(sketch))
-        if cached is not None and cached[0] is sketch:
-            return cached[1]
+        if cached is not None and cached[0] is sketch and cached[1] == signature:
+            return cached[2]
         status = sketch.constrained_entities()
-        self._constraint_cache[id(sketch)] = (sketch, status)
+        self._constraint_cache[id(sketch)] = (sketch, signature, status)
         return status
 
     @staticmethod
