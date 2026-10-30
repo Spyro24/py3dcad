@@ -21,6 +21,8 @@ PY3DCAD: sketches and features driven by named parameters. UI in pygame-ce only.
 
 ## Workflow
 - Run: `python main.py`
+- Run all tests: `python3 testAll.py`
+- A commit may only happen when all tests pass (`python3 testAll.py` reports `failed 0`).
 - Done = app runs without errors and the change works as described.
 - commit your changes as the system user before a new feature is requested
 
