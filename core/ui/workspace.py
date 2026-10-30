@@ -3126,7 +3126,12 @@ class Workspace:
     def _draw_sketch_equals(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
     ) -> None:
-        """Draw an ``=`` marker between the two equal entities."""
+        """Draw an ``=`` marker on each of the two equal entities.
+
+        The marker is duplicated so both linked objects carry the symbol, and
+        both copies share the same reference key so selecting one highlights
+        the other as well.
+        """
         if not sketch.equals:
             return
         if not self.sketch_palette_window.options.get(
@@ -3134,23 +3139,17 @@ class Workspace:
         ):
             return
         for index, equal in enumerate(sketch.equals):
-            first = self._sketch_entity_anchor(sketch, equal.first)
-            second = self._sketch_entity_anchor(sketch, equal.second)
-            if first is None or second is None:
-                continue
-            first_screen = self._project_sketch_point(
-                sketch, first, region
-            )
-            second_screen = self._project_sketch_point(
-                sketch, second, region
-            )
-            anchor = (
-                (first_screen[0] + second_screen[0]) * 0.5,
-                (first_screen[1] + second_screen[1]) * 0.5,
-            )
-            self._draw_constraint_badge(
-                surface, region, anchor, "=", ("equal", index)
-            )
+            ref_key = ("equal", index)
+            for entity in (equal.first, equal.second):
+                anchor = self._sketch_entity_anchor(sketch, entity)
+                if anchor is None:
+                    continue
+                screen = self._project_sketch_point(
+                    sketch, anchor, region
+                )
+                self._draw_constraint_badge(
+                    surface, region, screen, "=", ref_key
+                )
 
     def _draw_sketch_measurements(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
