@@ -30,6 +30,7 @@ class SketchPaletteAction(Enum):
     LINETYPE_CHANGED = "linetype_changed"
     LOOK_AT = "look_at"
     FINISH_SKETCH = "finish_sketch"
+    OPTION_CHANGED = "option_changed"
 
 class FilletWindowAction(Enum):
     """Result of passing an event to the fillet window."""
@@ -431,8 +432,13 @@ class SketchPaletteWindow(_PropertyWindowBase):
         ("profile", "Profile", True),
         ("points", "Points", True),
         ("dimensions", "Dimensions", True),
-        ("constraints", "Constraints", True),
-        ("projected", "Projected Geometries", True),
+        ("constrained_lines", "Constrained Lines", True),
+        ("constrained_circles", "Constrained Circles", True),
+        ("constraint_dim_lines", "Constraint Dimension Lines", True),
+        ("coincident_constraints", "Coincident Constraints", True),
+        ("equal_constraints", "Equal Constraints", True),
+        ("measurement_annotations", "Measurement Annotations", True),
+        ("projection", "Projected Geometries", True),
         ("construction", "Construction Geometries", True),
         ("3d_sketch", "3D Sketch", False),
     ]
@@ -745,7 +751,7 @@ class SketchPaletteWindow(_PropertyWindowBase):
                     for index, row, _box in layout.option_rows:
                         if body.contains(row) and row.collidepoint(event.pos):
                             self._toggle_option(index)
-                            return SketchPaletteAction.CONSUMED
+                            return SketchPaletteAction.OPTION_CHANGED
 
             return SketchPaletteAction.CONSUMED
 

@@ -27,7 +27,7 @@ workspaces/design/sketch/constrain
 [x] Horizontal/Vertical
 [x] Coincident
 [ ] Tangent
-[ ] Equal
+[x] Equal
 [ ] Parallel
 [ ] Perpendicular
 [ ] Fix/UnFix

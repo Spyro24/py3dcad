@@ -109,6 +109,15 @@ class SceneRenderer:
         self._constraint_cache: Dict[
             int, Tuple[Sketch, Tuple[Set[int], Set[int], Set[int]]]
         ] = {}
+        # Constraint display options
+        self.constraint_options: Dict[str, bool] = {
+            "constrained_lines": True,
+            "constrained_circles": True,
+            "constraint_dim_lines": True,
+            "coincident_constraints": True,
+            "equal_constraints": True,
+            "measurement_annotations": True,
+        }
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.ui_scale) < 1e-6:
@@ -1096,12 +1105,34 @@ class SceneRenderer:
             )
             _, constrained_edges, constrained_circles = self._constraints(sketch)
             frame = sketch.frame()
+            
+            # Get all edges involved in equality constraints
+            equality_edges = set()
+            for equal in sketch.equals:
+                if equal.first[0] == "line" and equal.second[0] == "line":
+                    equality_edges.add(equal.first[1])
+                    equality_edges.add(equal.second[1])
+            
             for index in range(len(sketch.edges)):
+                # Determine if edge should be shown based on constraint options
+                show_edge = True
+                is_constrained = index in constrained_edges
+                
+                # Special handling for equal constraints
+                if is_constrained:
+                    if self.constraint_options.get("equal_constraints", True):
+                        # Show if it's in equality constraints
+                        if index in equality_edges:
+                            show_edge = self.constraint_options.get("constrained_lines", True)
+                    else:
+                        show_edge = False
+                
                 line_color = (
                     self.palette.projection
                     if sketch.is_projected_edge(index) else (
                         self.palette.constrained
-                        if index in constrained_edges else color
+                        if is_constrained and show_edge
+                        else color
                     )
                 )
                 screen = [
@@ -1113,12 +1144,31 @@ class SceneRenderer:
                         surface, line_color, start_point, end_point,
                         sketch.line_type,
                     )
+            
             for index, circle in enumerate(sketch.circles):
+                # Get all circles involved in equality constraints
+                equality_circles = set()
+                for equal in sketch.equals:
+                    if equal.first[0] == "circle" and equal.second[0] == "circle":
+                        equality_circles.add(equal.first[1])
+                        equality_circles.add(equal.second[1])
+                
+                is_constrained = index in constrained_circles
+                show_circle = True
+                
+                if is_constrained:
+                    if self.constraint_options.get("equal_constraints", True):
+                        if index in equality_circles:
+                            show_circle = self.constraint_options.get("constrained_circles", True)
+                    else:
+                        show_circle = False
+                
                 circle_color = (
                     self.palette.projection
                     if sketch.is_projected_circle(index) else (
                         self.palette.constrained
-                        if index in constrained_circles else color
+                        if is_constrained and show_circle
+                        else color
                     )
                 )
                 self._draw_sketch_circle(
@@ -1172,12 +1222,38 @@ class SceneRenderer:
             )
             constrained_points, _, _ = self._constraints(sketch)
             frame = sketch.frame()
+            
+            # Get all points involved in coincidence constraints
+            coincidence_points = set()
+            for coincidence in sketch.coincidences:
+                if coincidence.first[0] == "point" and coincidence.second[0] == "point":
+                    coincidence_points.add(coincidence.first[1])
+                    coincidence_points.add(coincidence.second[1])
+                elif coincidence.first[0] == "point" and coincidence.second[0] == "origin":
+                    coincidence_points.add(coincidence.first[1])
+                elif coincidence.first[0] == "origin" and coincidence.second[0] == "point":
+                    coincidence_points.add(coincidence.second[1])
+            
             for index, (x, y) in enumerate(sketch.points):
+                # Determine if point should be shown based on constraint options
+                show_point = True
+                is_constrained = index in constrained_points
+                
+                # Special handling for coincidence constraints
+                if is_constrained:
+                    if self.constraint_options.get("coincident_constraints", True):
+                        # Show if it's in coincidence constraints
+                        if index in coincidence_points:
+                            show_point = self.constraint_options.get("constrained_lines", True)
+                    else:
+                        show_point = False
+                
                 point_color = (
                     self.palette.projection
                     if sketch.is_projected_point(index) else (
                         self.palette.constrained
-                        if index in constrained_points else color
+                        if is_constrained and show_point
+                        else color
                     )
                 )
                 self._draw_sketch_point(surface, point_color, camera, frame, (x, y), center, radius)

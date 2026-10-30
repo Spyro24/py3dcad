@@ -134,6 +134,7 @@ class Workspace:
         "fillet": "Fillet",
         "constraint_auto": "Auto Constraint",
         "constraint_coincident": "Coincident",
+        "constraint_equal": "Equal",
         "measure": "Auto Measurement",
     }
     TOOL_SHORTCUTS = {"sketch": "S", "extrude": "E"}
@@ -143,7 +144,8 @@ class Workspace:
     )
     FILLET_RADIUS = 2.0
     SKETCH_CONSTRAINT_ACTIONS = (
-        "constraint_auto", "constraint_coincident", "measure",
+        "constraint_auto", "constraint_coincident", "constraint_equal",
+        "measure",
     )
     SKETCH_INTERACTIVE_ACTIONS = (
         "line", "rectangle", "circle", "point", "project", "align_x",
@@ -180,6 +182,7 @@ class Workspace:
         ("CONSTRAINTS", (
             ("constraint_auto", "V/H", True),
             ("constraint_coincident", "Coincident", False),
+            ("constraint_equal", "Equal", False),
             ("measure", "Measure", True),
         )),
         ("INSPECT", (
@@ -267,6 +270,9 @@ class Workspace:
         on_align_sketch_x: Optional[
             Callable[[int, int], None]
         ] = None,
+        on_add_equal: Optional[
+            Callable[[Tuple[str, int], Tuple[str, int]], None]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -293,6 +299,7 @@ class Workspace:
         self.on_project_point = on_project_point
         self.on_project_edge = on_project_edge
         self.on_align_sketch_x = on_align_sketch_x
+        self.on_add_equal = on_add_equal
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -319,6 +326,7 @@ class Workspace:
         self._measure_click_pos: Optional[Tuple[int, int]] = None
         self._measure_click_hit: Optional[Tuple[str, int]] = None
         self._coincident_selection: List[Tuple[str, int]] = []
+        self._equal_selection: List[Tuple[str, int]] = []
         self._measurement_label_rects: List[
             Tuple[int, pygame.Rect]
         ] = []
@@ -539,6 +547,7 @@ class Workspace:
         self._measure_tool = None
         self._measure_selection.clear()
         self._coincident_selection.clear()
+        self._equal_selection.clear()
         self._reset_measure_click()
         self._measure_menu_open = False
         self._measure_menu_hover = -1
@@ -653,6 +662,17 @@ class Workspace:
     def _set_auto_constraints(self, enabled: bool) -> None:
         """Enable or disable automatic axis snapping."""
         self.sketch_palette_window.options["constraints"] = enabled
+        self._sync_constraint_options_to_renderer()
+
+    def _sync_constraint_options_to_renderer(self) -> None:
+        """Sync constraint options from sketch palette window to the renderer."""
+        # Extract constraint-related options from sketch_palette_window
+        constraint_options = {}
+        for key, value in self.sketch_palette_window.options.items():
+            if key.startswith("constrained_") or key in ("coincident_constraints", "equal_constraints", "measurement_annotations"):
+                constraint_options[key] = value
+        if constraint_options:
+            self.viewport.set_constraint_options(constraint_options)
 
     def open_create_sketch_dialog(self) -> None:
         """Ask the user to choose a plane before creating a sketch."""
@@ -1425,6 +1445,12 @@ class Workspace:
             if selected is not None and selected[0] == "point":
                 self._coincident_selection.append(selected)
                 self._selected_sketch_entity = None
+        elif kind == "equal":
+            # A selected line becomes the first half of the equality pair.
+            selected = self._selected_sketch_entity
+            if selected is not None and selected[0] == "line":
+                self._equal_selection.append(selected)
+                self._selected_sketch_entity = None
         # Constraint tools replace drawing tools but keep the selection so it
         # can be constrained immediately and the next edge can be picked.
         self._selected_tool = None
@@ -1440,7 +1466,19 @@ class Workspace:
             )
         if self._constraint_tool == "coincident":
             return self._apply_coincident(document)
+        if self._constraint_tool == "equal":
+            return self._apply_equal(document)
         return False
+
+    def _apply_equal(self, document: Document) -> bool:
+        """Constrain the two picked lines or circles to the same size."""
+        if len(self._equal_selection) != 2:
+            return False
+        first, second = self._equal_selection
+        self._equal_selection.clear()
+        if self.on_add_equal is not None:
+            self.on_add_equal(first, second)
+        return True
 
     def _apply_coincident(self, document: Document) -> bool:
         """Constrain the two picked points or point/origin pair."""
@@ -1502,6 +1540,14 @@ class Workspace:
                         self._activate_constraint_tool(
                             "coincident", document
                         )
+                        document.dirty = True
+                        return True
+                    continue
+                if item.action == "constraint_equal":
+                    if item.rect.collidepoint(pos):
+                        self._constraint_menu_open = False
+                        self._constraint_menu_hover = -1
+                        self._activate_constraint_tool("equal", document)
                         document.dirty = True
                         return True
                     continue
@@ -1733,6 +1779,53 @@ class Workspace:
                 pos[0] - screen[0], pos[1] - screen[1]
             ) <= self._s(9):
                 return ("origin", -1)
+        return None
+
+    def _equal_click(
+        self,
+        document: Document,
+        pos: Tuple[int, int],
+        region: Rect,
+        sketch: Sketch,
+    ) -> None:
+        """Add or remove one line/circle pick for the equal tool."""
+        ref = self._pick_equal_ref(pos, region, sketch)
+        if ref is None:
+            self._equal_selection.clear()
+            self._clear_sketch_selection()
+            return
+        if ref in self._equal_selection:
+            self._equal_selection.remove(ref)
+        else:
+            if len(self._equal_selection) >= 2:
+                self._equal_selection.clear()
+            if (
+                self._equal_selection
+                and self._equal_selection[0][0] != ref[0]
+            ):
+                # Lines and circles use different units, so a mixed pair is
+                # never a valid equality.
+                self._equal_selection.clear()
+            self._equal_selection.append(ref)
+        self._selected_sketch_entity = None
+        self._hover_sketch_entity = ref
+        self._reset_line_state()
+        if len(self._equal_selection) == 2:
+            self._apply_equal(document)
+
+    def _pick_equal_ref(
+        self,
+        pos: Tuple[int, int],
+        region: Rect,
+        sketch: Sketch,
+    ) -> Optional[Tuple[str, int]]:
+        """Pick the circle or line under the cursor for an equality."""
+        circle_index = self._pick_sketch_circle(pos, region, sketch)
+        if circle_index is not None:
+            return ("circle", circle_index)
+        hit = self._pick_sketch_entity(pos, region, sketch)
+        if hit is not None and hit[0] == "line":
+            return hit
         return None
 
     def _resolve_measurement_kind(
@@ -2131,6 +2224,9 @@ class Workspace:
                 ) or (
                     item.action == "constraint_coincident"
                     and self._constraint_tool == "coincident"
+                ) or (
+                    item.action == "constraint_equal"
+                    and self._constraint_tool == "equal"
                 ) or (
                     item.action == "measure"
                     and self._measure_tool is not None
@@ -2834,8 +2930,20 @@ class Workspace:
                     self._draw_origin_pick_highlight(
                         surface, sketch, region
                     )
+        if self._constraint_tool == "equal":
+            for entity in self._equal_selection:
+                if entity[0] == "line":
+                    self._draw_sketch_entity_highlight(
+                        surface, sketch, region, entity,
+                        self.geometry_selection, True,
+                    )
+                else:
+                    self._draw_circle_pick_highlight(
+                        surface, sketch, region, entity[1]
+                    )
         self._draw_sketch_constraints(surface, sketch, region)
         self._draw_sketch_coincidences(surface, sketch, region)
+        self._draw_sketch_equals(surface, sketch, region)
         self._draw_sketch_measurements(surface, sketch, region)
         if selected is not None and not (
             self._drag_edge_index is not None
@@ -2958,6 +3066,103 @@ class Workspace:
             (round(screen[0]), round(screen[1])),
             self._s(9), width=max(1, self._s(2)),
         )
+
+    def _draw_circle_pick_highlight(
+        self, surface: pygame.Surface, sketch: Sketch,
+        region: Rect, index: int,
+    ) -> None:
+        """Ring a picked circle without changing its geometry."""
+        if not 0 <= index < len(sketch.circles):
+            return
+        circle = sketch.circles[index]
+        radius = circle.diameter / 2.0
+        if radius <= 0.0:
+            return
+        center = self._project_sketch_point(
+            sketch, circle.midPoint, region
+        )
+        edge = self._project_sketch_point(
+            sketch,
+            (circle.midPoint[0] + radius, circle.midPoint[1]),
+            region,
+        )
+        screen_radius = math.hypot(
+            edge[0] - center[0], edge[1] - center[1]
+        )
+        pygame.draw.circle(
+            surface, self.geometry_selection,
+            (round(center[0]), round(center[1])),
+            max(1, round(screen_radius)),
+            width=max(1, self._s(2)),
+        )
+
+    def _sketch_entity_anchor(
+        self, sketch: Sketch, ref: Tuple[str, int]
+    ) -> Optional[Point]:
+        """Return a display anchor for a line or circle reference."""
+        kind, index = ref
+        if kind == "line":
+            if not 0 <= index < len(sketch.edges):
+                return None
+            start, end = sketch.edges[index]
+            if not (
+                0 <= start < len(sketch.points)
+                and 0 <= end < len(sketch.points)
+            ):
+                return None
+            return (
+                (sketch.points[start][0] + sketch.points[end][0]) * 0.5,
+                (sketch.points[start][1] + sketch.points[end][1]) * 0.5,
+            )
+        if kind == "circle" and 0 <= index < len(sketch.circles):
+            circle = sketch.circles[index]
+            return (
+                circle.midPoint[0],
+                circle.midPoint[1] + circle.diameter * 0.5,
+            )
+        return None
+
+    def _draw_sketch_equals(
+        self, surface: pygame.Surface, sketch: Sketch, region: Rect
+    ) -> None:
+        """Draw an ``=`` marker between the two equal entities."""
+        if not sketch.equals:
+            return
+        if not self.sketch_palette_window.options.get(
+            "constraints", True
+        ):
+            return
+        for equal in sketch.equals:
+            first = self._sketch_entity_anchor(sketch, equal.first)
+            second = self._sketch_entity_anchor(sketch, equal.second)
+            if first is None or second is None:
+                continue
+            first_screen = self._project_sketch_point(
+                sketch, first, region
+            )
+            second_screen = self._project_sketch_point(
+                sketch, second, region
+            )
+            anchor = (
+                (first_screen[0] + second_screen[0]) * 0.5,
+                (first_screen[1] + second_screen[1]) * 0.5,
+            )
+            if not region.collidepoint(anchor):
+                continue
+            label = self._font_small.render("=", True, self.accent)
+            box = label.get_rect(center=(
+                round(anchor[0]), round(anchor[1])
+            ))
+            box.inflate_ip(self._s(6), self._s(2))
+            pygame.draw.rect(
+                surface, self.header_bg, box,
+                border_radius=self._s(3),
+            )
+            pygame.draw.rect(
+                surface, self.border_color, box,
+                width=1, border_radius=self._s(3),
+            )
+            surface.blit(label, label.get_rect(center=box.center))
 
     def _draw_sketch_measurements(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -5226,6 +5431,8 @@ class Workspace:
                 elif action == SketchPaletteAction.MINIMIZE:
                     # Minimize/expand handled internally
                     pass
+                elif action == SketchPaletteAction.OPTION_CHANGED:
+                    self._sync_constraint_options_to_renderer()
                 return True
 
         # Handle create sketch dialog when no active sketch
@@ -5449,6 +5656,11 @@ class Workspace:
                     return True
                 if self._constraint_tool == "coincident":
                     self._coincident_click(
+                        document, event.pos, layout.viewport, sketch
+                    )
+                    return True
+                if self._constraint_tool == "equal":
+                    self._equal_click(
                         document, event.pos, layout.viewport, sketch
                     )
                     return True

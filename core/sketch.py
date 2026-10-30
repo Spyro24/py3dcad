@@ -22,6 +22,7 @@ EDGE_CONSTRAINTS = ("horizontal", "vertical")
 MEASUREMENT_KINDS = ("distance", "angle", "diameter")
 MEASUREMENT_REF_KINDS = ("point", "line", "circle")
 COINCIDENT_REF_KINDS = ("point", "origin")
+EQUAL_REF_KINDS = ("line", "circle")
 CIRCLE_SEGMENTS = 48
 
 
@@ -195,6 +196,22 @@ def normalize_coincident_ref(value: Any) -> Optional[Tuple[str, int]]:
     if kind == "origin":
         return ("origin", -1)
     if kind not in COINCIDENT_REF_KINDS:
+        return None
+    try:
+        index = int(value[1])
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    return kind, index
+
+
+def normalize_equal_ref(value: Any) -> Optional[Tuple[str, int]]:
+    """Return a line or circle reference for an equality constraint."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    kind = str(value[0]).lower()
+    if kind not in EQUAL_REF_KINDS:
         return None
     try:
         index = int(value[1])
@@ -447,6 +464,42 @@ class Coincident:
 
 
 @dataclass(frozen=True)
+class Equal:
+    """Keep two lines the same length or two circles the same diameter.
+
+    ``first`` and ``second`` are ``("line", edge index)`` or
+    ``("circle", circle index)`` references.  Both references must be the
+    same kind: equal length and equal diameter use different units, so a
+    mixed pair is rejected by :meth:`Sketch._normalize_equals`.
+    """
+
+    first: Tuple[str, int]
+    second: Tuple[str, int]
+
+    def key(self) -> Tuple[object, ...]:
+        """Return an order-independent identity for duplicate detection."""
+        return tuple(sorted((self.first, self.second)))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "first": [self.first[0], self.first[1]],
+            "second": [self.second[0], self.second[1]],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["Equal"]:
+        if not isinstance(data, dict):
+            return None
+        first = normalize_equal_ref(data.get("first"))
+        second = normalize_equal_ref(data.get("second"))
+        if first is None or second is None or first == second:
+            return None
+        if first[0] != second[0]:
+            return None
+        return cls(first, second)
+
+
+@dataclass(frozen=True)
 class ProjectionSource:
     """Where a projected sketch entity comes from on the solid.
 
@@ -657,6 +710,7 @@ class Sketch:
     circles: List[Circle] = field(default_factory=list)
     measurements: List[Measurement] = field(default_factory=list)
     coincidences: List[Coincident] = field(default_factory=list)
+    equals: List[Equal] = field(default_factory=list)
     # Projected entities are ordinary points and edges that also remember
     # the solid vertex/edge they came from.  ``refresh_projections`` moves
     # them whenever the source geometry changes.
@@ -766,6 +820,7 @@ class Sketch:
         self.coincidences = self._normalize_coincidences(
             self.coincidences
         )
+        self.equals = self._normalize_equals(self.equals)
         self.projected_points = [
             link
             for link in (
@@ -824,6 +879,32 @@ class Sketch:
                 continue
             seen.add(key)
             result.append(coincidence)
+        return result
+
+    def _normalize_equals(self, items: Iterable[Any]) -> List[Equal]:
+        """Keep only valid, distinct equality constraints."""
+        result: List[Equal] = []
+        seen: set = set()
+        for item in items:
+            equal = item if isinstance(item, Equal) else Equal.from_dict(item)
+            if equal is None:
+                continue
+            first, second = equal.first, equal.second
+            if first[0] != second[0]:
+                continue
+            limit = (
+                len(self.edges) if first[0] == "line"
+                else len(self.circles)
+            )
+            if not (
+                0 <= first[1] < limit and 0 <= second[1] < limit
+            ):
+                continue
+            key = equal.key()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(equal)
         return result
 
     def _bind_circles(self, circles: Iterable[Circle]) -> List[Circle]:
@@ -1258,6 +1339,288 @@ class Sketch:
                 maximum = max(maximum, abs(residual))
         return maximum
 
+    def edge_length(
+        self, index: int, points: Optional[List[Point]] = None
+    ) -> Optional[float]:
+        """Return an edge's length, or None when the edge is invalid."""
+        if not 0 <= index < len(self.edges):
+            return None
+        source = self.points if points is None else points
+        start, end = self.edges[index]
+        if not (
+            0 <= start < len(source) and 0 <= end < len(source)
+        ):
+            return None
+        delta_x = source[end][0] - source[start][0]
+        delta_y = source[end][1] - source[start][1]
+        return math.hypot(delta_x, delta_y)
+
+    def equal_value(
+        self, ref: Tuple[str, int], points: Optional[List[Point]] = None
+    ) -> Optional[float]:
+        """Return the length or diameter an equality reference measures."""
+        if ref[0] == "line":
+            return self.edge_length(ref[1], points)
+        if ref[0] == "circle" and 0 <= ref[1] < len(self.circles):
+            return self.circles[ref[1]].diameter
+        return None
+
+    def equal_residual(
+        self, equal: Equal, points: List[Point]
+    ) -> Optional[float]:
+        """Return first minus second for one equality constraint."""
+        first = self.equal_value(equal.first, points)
+        second = self.equal_value(equal.second, points)
+        if first is None or second is None:
+            return None
+        return first - second
+
+    def equal_max_error(self, points: List[Point]) -> float:
+        """Return the largest absolute equality residual."""
+        maximum = 0.0
+        for equal in self.equals:
+            residual = self.equal_residual(equal, points)
+            if residual is not None:
+                maximum = max(maximum, abs(residual))
+        return maximum
+
+    def constraint_max_error(self, points: List[Point]) -> float:
+        """Return the largest residual across measurements and equalities."""
+        return max(
+            self.measurement_max_error(points),
+            self.equal_max_error(points),
+        )
+
+    def _equal_fixed_refs(
+        self, fixed_points: Optional[Set[int]] = None
+    ) -> Set[Tuple[str, int]]:
+        """Return references whose size cannot be changed by the solver.
+
+        Projected lines and circles follow the solid.  A line whose two
+        endpoints are both projected is equally fixed even without an edge
+        projection link.
+        """
+        if fixed_points is None:
+            fixed_points = self.projected_point_indices()
+        fixed: Set[Tuple[str, int]] = {
+            ("line", link.edge) for link in self.projected_edges
+            if 0 <= link.edge < len(self.edges)
+        }
+        fixed.update(
+            ("circle", link.circle) for link in self.projected_circles
+            if 0 <= link.circle < len(self.circles)
+        )
+        # A diameter measurement owns its circle's size just like a
+        # projection does; equality must treat it as the fixed side.
+        fixed.update(
+            ("circle", measurement.first[1])
+            for measurement in self.measurements
+            if (
+                measurement.kind == "diameter"
+                and measurement.value is not None
+                and measurement.first[0] == "circle"
+                and 0 <= measurement.first[1] < len(self.circles)
+            )
+        )
+        for index, (start, end) in enumerate(self.edges):
+            if (
+                start in fixed_points
+                and end in fixed_points
+                and ("line", index) not in fixed
+            ):
+                fixed.add(("line", index))
+        # A point-to-point distance between an edge's endpoints fixes its
+        # length, so equality must use that length as the target instead of
+        # averaging it away.
+        measured_pairs = {
+            frozenset((measurement.first[1], measurement.second[1]))
+            for measurement in self.measurements
+            if (
+                measurement.kind == "distance"
+                and measurement.value is not None
+                and measurement.first[0] == "point"
+                and measurement.second[0] == "point"
+                and measurement.first[1] != measurement.second[1]
+            )
+        }
+        if measured_pairs:
+            fixed.update(
+                ("line", index)
+                for index, (start, end) in enumerate(self.edges)
+                if frozenset((start, end)) in measured_pairs
+            )
+        return fixed
+
+    def _project_equals(self, points: List[Point]) -> bool:
+        """Move geometry so every equality constraint holds.
+
+        Lines are adjusted symmetrically along their own direction; circles
+        are resized directly.  Projected references stay put and donate the
+        whole correction to the free side.  The work is linear in the number
+        of equality constraints and allocates only one offset map per pass.
+        """
+        if not self.equals:
+            return False
+        fixed_points = self.projected_point_indices()
+        fixed = self._equal_fixed_refs(fixed_points)
+        changed = self._project_equal_circles(fixed)
+        if self._project_equal_lines(points, fixed, fixed_points):
+            changed = True
+        return changed
+
+    @staticmethod
+    def _equal_target(
+        first_value: float,
+        second_value: float,
+        first_fixed: bool,
+        second_fixed: bool,
+    ) -> float:
+        """Return the size both equal references should adopt."""
+        if first_fixed:
+            return first_value
+        if second_fixed:
+            return second_value
+        return (first_value + second_value) * 0.5
+
+    def _project_equal_circles(
+        self, fixed: Set[Tuple[str, int]]
+    ) -> bool:
+        """Resize free circles until their equality pairs match."""
+        targets: Dict[int, float] = {}
+        changed = False
+        for equal in self.equals:
+            if equal.first[0] != "circle" or equal.second[0] != "circle":
+                continue
+            first, second = equal.first[1], equal.second[1]
+            if not (
+                0 <= first < len(self.circles)
+                and 0 <= second < len(self.circles)
+            ):
+                continue
+            first_fixed = ("circle", first) in fixed
+            second_fixed = ("circle", second) in fixed
+            if first_fixed and second_fixed:
+                continue
+            first_value = self.circles[first].diameter
+            second_value = self.circles[second].diameter
+            target = self._equal_target(
+                first_value, second_value, first_fixed, second_fixed
+            )
+            if target <= 1e-12:
+                continue
+            if (
+                not first_fixed
+                and abs(first_value - target) > 1e-9
+            ):
+                targets[first] = target
+                changed = True
+            if (
+                not second_fixed
+                and abs(second_value - target) > 1e-9
+            ):
+                targets[second] = target
+                changed = True
+        for index, target in targets.items():
+            self.circles[index].change_diameter(target)
+        return changed
+
+    def _project_equal_lines(
+        self,
+        points: List[Point],
+        fixed: Set[Tuple[str, int]],
+        fixed_points: Set[int],
+    ) -> bool:
+        """Move line endpoints until their equality pairs match."""
+        offsets: Dict[int, Tuple[float, float]] = {}
+        changed = False
+        for equal in self.equals:
+            if equal.first[0] != "line" or equal.second[0] != "line":
+                continue
+            first, second = equal.first[1], equal.second[1]
+            first_value = self.edge_length(first, points)
+            second_value = self.edge_length(second, points)
+            if first_value is None or second_value is None:
+                continue
+            first_fixed = ("line", first) in fixed
+            second_fixed = ("line", second) in fixed
+            if first_fixed and second_fixed:
+                continue
+            target = self._equal_target(
+                first_value, second_value, first_fixed, second_fixed
+            )
+            if target <= 1e-12:
+                continue
+            if (
+                not first_fixed
+                and abs(first_value - target) > 1e-9
+                and self._offset_edge_length(
+                    offsets, points, first, target - first_value,
+                    fixed_points,
+                )
+            ):
+                changed = True
+            if (
+                not second_fixed
+                and abs(second_value - target) > 1e-9
+                and self._offset_edge_length(
+                    offsets, points, second, target - second_value,
+                    fixed_points,
+                )
+            ):
+                changed = True
+        if offsets:
+            self._apply_point_offsets(points, offsets)
+        return changed
+
+    def _offset_edge_length(
+        self,
+        offsets: Dict[int, Tuple[float, float]],
+        points: List[Point],
+        index: int,
+        delta: float,
+        fixed: Set[int],
+    ) -> bool:
+        """Add the endpoint offsets that change an edge length by ``delta``."""
+        if not 0 <= index < len(self.edges):
+            return False
+        start, end = self.edges[index]
+        if not (
+            0 <= start < len(points) and 0 <= end < len(points)
+        ):
+            return False
+        delta_x = points[end][0] - points[start][0]
+        delta_y = points[end][1] - points[start][1]
+        length = math.hypot(delta_x, delta_y)
+        if length <= 1e-12 or abs(delta) <= 1e-12:
+            return False
+        direction_x = delta_x / length
+        direction_y = delta_y / length
+        start_fixed = start in fixed
+        end_fixed = end in fixed
+        if start_fixed and end_fixed:
+            return False
+        if start_fixed:
+            self._add_offsets(
+                offsets, [end],
+                direction_x * delta, direction_y * delta,
+            )
+        elif end_fixed:
+            self._add_offsets(
+                offsets, [start],
+                -direction_x * delta, -direction_y * delta,
+            )
+        else:
+            half = delta * 0.5
+            self._add_offsets(
+                offsets, [start],
+                -direction_x * half, -direction_y * half,
+            )
+            self._add_offsets(
+                offsets, [end],
+                direction_x * half, direction_y * half,
+            )
+        return True
+
     def _apply_diameter_measurements(self) -> None:
         """Resize circles to their stored diameter measurement values.
 
@@ -1282,14 +1645,16 @@ class Sketch:
         iterations: int = 48,
         tolerance: float = 1e-6,
     ) -> bool:
-        """Project points until all fixed measurement values are satisfied."""
+        """Project points until measurements and equalities are satisfied."""
         if len(points) != len(self.points):
             return True
-        # Coincidences are hard constraints and must hold even when a
-        # sketch has no measurements at all (for example right after load).
-        if self.coincidences:
+        has_equals = bool(self.equals)
+        # Coincidences and equalities are hard constraints and must hold
+        # even when a sketch has no measurements at all (for example right
+        # after load).
+        if self.coincidences or has_equals:
             self.constrain_axis_changes(points, range(len(points)))
-        if not self.measurements:
+        if not self.measurements and not has_equals:
             return True
         self._apply_diameter_measurements()
         # The projection helpers replace point objects.  Keep the caller's
@@ -1300,7 +1665,7 @@ class Sketch:
             for _ in range(max(1, iterations)):
                 projected = False
                 before_projection = list(points)
-                # If no measurement moves a point in this pass, every residual
+                # If no constraint moves a point in this pass, every residual
                 # was taken from the unchanged points, so ``worst`` is exact.
                 worst = 0.0
                 for measurement in self.measurements:
@@ -1321,6 +1686,9 @@ class Sketch:
                             points, measurement, residual
                         )
                         projected = projected or changed
+                if has_equals:
+                    projected = self._project_equals(points) or projected
+                    worst = max(worst, self.equal_max_error(points))
                 if not projected:
                     return worst <= tolerance
                 # A projection may move only part of an axis-constrained
@@ -1332,9 +1700,9 @@ class Sketch:
                     range(len(points)),
                     previous=before_projection,
                 )
-                if self.measurement_max_error(points) <= tolerance:
+                if self.constraint_max_error(points) <= tolerance:
                     return True
-            return self.measurement_max_error(points) <= tolerance
+            return self.constraint_max_error(points) <= tolerance
         finally:
             for index, original in enumerate(originals):
                 original.set_pos(points[index])
@@ -1630,6 +1998,31 @@ class Sketch:
                     point[1] + delta_y,
                 ))
 
+    def _add_length_derivative(
+        self, equation: List[float], edge_index: int, scale: float
+    ) -> bool:
+        """Add the exact length derivative of one edge to a Jacobian row."""
+        if not 0 <= edge_index < len(self.edges):
+            return False
+        start, end = self.edges[edge_index]
+        if not (
+            0 <= start < len(self.points)
+            and 0 <= end < len(self.points)
+        ):
+            return False
+        delta_x = self.points[end][0] - self.points[start][0]
+        delta_y = self.points[end][1] - self.points[start][1]
+        length = math.hypot(delta_x, delta_y)
+        if length <= 1e-12:
+            return False
+        unit_x = scale * delta_x / length
+        unit_y = scale * delta_y / length
+        equation[start * 2] -= unit_x
+        equation[start * 2 + 1] -= unit_y
+        equation[end * 2] += unit_x
+        equation[end * 2 + 1] += unit_y
+        return True
+
     def constrained_entities(self) -> Tuple[Set[int], Set[int], Set[int]]:
         """Return point, edge and circle indices with no free DOF left.
 
@@ -1719,6 +2112,32 @@ class Sketch:
                 )
                 if changed is not None:
                     equation[column] = (changed - value) / 1e-5
+            rows.append(equation)
+        for equal in self.equals:
+            kind = equal.first[0]
+            if kind != equal.second[0]:
+                continue
+            equation = row()
+            first, second = equal.first[1], equal.second[1]
+            if kind == "circle":
+                if (
+                    0 <= first < circle_count
+                    and 0 <= second < circle_count
+                ):
+                    equation[point_count * 2 + first] = 1.0
+                    equation[point_count * 2 + second] = -1.0
+                    rows.append(equation)
+                continue
+            if not (
+                0 <= first < len(self.edges)
+                and 0 <= second < len(self.edges)
+            ):
+                continue
+            if not (
+                self._add_length_derivative(equation, first, 1.0)
+                and self._add_length_derivative(equation, second, -1.0)
+            ):
+                continue
             rows.append(equation)
         rank = _matrix_rank(rows, columns)
         fixed = {
@@ -2306,8 +2725,36 @@ class Sketch:
         self.coincidences = self._remap_removed_point_coincidences(
             index
         )
+        self.equals = self._remap_removed_point_equals(
+            edge_map, circle_map
+        )
         self._remap_projected_points(index, edge_map, circle_map)
         return edge_map
+
+    def _remap_removed_point_equals(
+        self,
+        edge_map: Dict[int, int],
+        circle_map: Dict[int, int],
+    ) -> List[Equal]:
+        """Keep equality references valid after a point is removed."""
+        result: List[Equal] = []
+        for equal in self.equals:
+            # Ensure both references are the same kind (line-line or circle-circle)
+            if equal.first[0] != equal.second[0]:
+                continue
+                
+            # Select the appropriate mapping based on reference type
+            mapping = edge_map if equal.first[0] == "line" else circle_map
+            
+            first = mapping.get(equal.first[1])
+            second = mapping.get(equal.second[1])
+            if first is None or second is None:
+                continue
+            result.append(Equal(
+                (equal.first[0], first),
+                (equal.second[0], second),
+            ))
+        return result
 
     def _remap_removed_point_coincidences(
         self, removed: int
@@ -2340,6 +2787,151 @@ class Sketch:
             return None
         return (kind, index - 1 if index > removed else index)
 
+    def select_constraints(
+        self,
+        constraint_kind: Optional[str] = None,
+        target_type: Optional[str] = None,
+        target_index: Optional[int] = None,
+    ) -> List[Union[Coincident, Equal, Measurement]]:
+        """Select constraints based on criteria.
+        
+        Args:
+            constraint_kind: Filter by constraint type ('coincident', 'equal', 'measurement').
+                           If None, include all constraint types.
+            target_type: Filter by target type ('point', 'line', 'circle').
+                        If None, include all target types.
+            target_index: Filter by target index. If None, include all indices.
+                        
+        Returns:
+            List of constraints matching the criteria
+        """
+        result: List[Union[Coincident, Equal, Measurement]] = []
+        
+        # Select coincidences
+        for constraint in self.coincidences:
+            if constraint_kind is not None and constraint_kind != "coincident":
+                continue
+            if target_type and constraint.first[0] != target_type and constraint.second[0] != target_type:
+                continue
+            if target_index and constraint.first[1] != target_index and constraint.second[1] != target_index:
+                continue
+            result.append(constraint)
+                
+        # Select equalities
+        for constraint in self.equals:
+            if constraint_kind is not None and constraint_kind != "equal":
+                continue
+            if target_type and constraint.first[0] != target_type and constraint.second[0] != target_type:
+                continue
+            if target_index and constraint.first[1] != target_index and constraint.second[1] != target_index:
+                continue
+            result.append(constraint)
+                
+        # Select measurements
+        for constraint in self.measurements:
+            if constraint_kind is not None and constraint_kind != "measurement":
+                continue
+            if target_type and constraint.first[0] != target_type and constraint.second[0] != target_type:
+                continue
+            if target_index and constraint.first[1] != target_index and constraint.second[1] != target_index:
+                continue
+            result.append(constraint)
+                
+        return result
+
+    def remove_constraints(
+        self,
+        constraint_kind: Optional[str] = None,
+        target_type: Optional[str] = None,
+        target_index: Optional[int] = None,
+        specific_constraints: Optional[List[Union[Coincident, Equal, Measurement]]] = None,
+    ) -> int:
+        """Remove constraints based on criteria or specific constraints.
+        
+        Args:
+            constraint_kind: Remove by constraint type ('coincident', 'equal', 'measurement').
+                           If None, remove all constraint types.
+            target_type: Remove constraints involving this target type ('point', 'line', 'circle').
+                        If None, remove all target types.
+            target_index: Remove constraints involving this target index. If None, remove all indices.
+            specific_constraints: Remove these specific constraints
+            
+        Returns:
+            Number of constraints removed
+        """
+        removed_count = 0
+        
+        if specific_constraints:
+            # Remove specific constraints
+            for constraint in specific_constraints:
+                if isinstance(constraint, Coincident):
+                    try:
+                        self.coincidences.remove(constraint)
+                        removed_count += 1
+                    except ValueError:
+                        pass
+                elif isinstance(constraint, Equal):
+                    try:
+                        self.equals.remove(constraint)
+                        removed_count += 1
+                    except ValueError:
+                        pass
+                elif isinstance(constraint, Measurement):
+                    try:
+                        self.measurements.remove(constraint)
+                        removed_count += 1
+                    except ValueError:
+                        pass
+            return removed_count
+            
+        # Remove by criteria
+        remaining_coincidences: List[Coincident] = []
+        remaining_equals: List[Equal] = []
+        remaining_measurements: List[Measurement] = []
+        
+        for constraint in self.coincidences:
+            if constraint_kind is not None and constraint_kind != "coincident":
+                remaining_coincidences.append(constraint)
+                continue
+            if target_type and constraint.first[0] != target_type and constraint.second[0] != target_type:
+                remaining_coincidences.append(constraint)
+                continue
+            if target_index and constraint.first[1] != target_index and constraint.second[1] != target_index:
+                remaining_coincidences.append(constraint)
+                continue
+                
+        for constraint in self.equals:
+            if constraint_kind is not None and constraint_kind != "equal":
+                remaining_equals.append(constraint)
+                continue
+            if target_type and constraint.first[0] != target_type and constraint.second[0] != target_type:
+                remaining_equals.append(constraint)
+                continue
+            if target_index and constraint.first[1] != target_index and constraint.second[1] != target_index:
+                remaining_equals.append(constraint)
+                continue
+                
+        for constraint in self.measurements:
+            if constraint_kind is not None and constraint_kind != "measurement":
+                remaining_measurements.append(constraint)
+                continue
+            if target_type and constraint.first[0] != target_type and constraint.second[0] != target_type:
+                remaining_measurements.append(constraint)
+                continue
+            if target_index and constraint.first[1] != target_index and constraint.second[1] != target_index:
+                remaining_measurements.append(constraint)
+                continue
+                
+        removed_count += len(self.coincidences) - len(remaining_coincidences)
+        removed_count += len(self.equals) - len(remaining_equals)
+        removed_count += len(self.measurements) - len(remaining_measurements)
+        
+        self.coincidences = remaining_coincidences
+        self.equals = remaining_equals
+        self.measurements = remaining_measurements
+        
+        return removed_count
+
     def remove_edge(self, index: int) -> None:
         """Remove one edge and any measurement that depends on it."""
         if not 0 <= index < len(self.edges):
@@ -2368,7 +2960,40 @@ class Sketch:
                     )
                 )
         self.measurements = measurements
+        self.equals = self._remap_removed_edge_equals(index)
         self._shift_projected_edges(index)
+
+    def _remap_removed_edge_equals(self, index: int) -> List[Equal]:
+        """Drop or shift equality references after an edge is deleted."""
+        result: List[Equal] = []
+        for equal in self.equals:
+            first_kind = equal.first[0]
+            second_kind = equal.second[0]
+            
+            # Skip equalities that reference the removed edge
+            if first_kind == "line" and equal.first[1] == index:
+                continue
+            if second_kind == "line" and equal.second[1] == index:
+                continue
+                
+            # For line-line equality, adjust indices
+            if first_kind == "line" and second_kind == "line":
+                first = equal.first[1]
+                second = equal.second[1]
+                if first == index or second == index:
+                    continue
+                result.append(Equal(
+                    ("line", first - 1 if first > index else first),
+                    ("line", second - 1 if second > index else second),
+                ))
+            # For line-circle or circle-line equality, adjust line index only
+            elif first_kind == "line" or second_kind == "line":
+                result.append(equal)
+            # For circle-circle equality, keep both unchanged
+            else:
+                result.append(equal)
+                
+        return result
 
     def _remap_projected_points(
         self,
@@ -2465,6 +3090,24 @@ class Sketch:
     def is_projected_circle(self, index: int) -> bool:
         """Return whether a sketch circle follows solid geometry."""
         return any(link.circle == index for link in self.projected_circles)
+
+    def is_circle_constrained_by_equality(self, index: int) -> bool:
+        """Return whether a circle is part of an equality constraint."""
+        for equal in self.equals:
+            if equal.first[0] == "circle" and equal.first[1] == index:
+                return True
+            if equal.second[0] == "circle" and equal.second[1] == index:
+                return True
+        return False
+
+    def is_point_constrained_by_coincidence(self, index: int) -> bool:
+        """Return whether a point is part of a coincidence constraint."""
+        for coincidence in self.coincidences:
+            if coincidence.first[0] == "point" and coincidence.first[1] == index:
+                return True
+            if coincidence.second[0] == "point" and coincidence.second[1] == index:
+                return True
+        return False
 
     @staticmethod
     def _remap_removed_edge_ref(
@@ -2599,6 +3242,9 @@ class Sketch:
             "coincidences": [
                 coincidence.to_dict()
                 for coincidence in self.coincidences
+            ],
+            "equals": [
+                equal.to_dict() for equal in self.equals
             ],
             "projected_points": [
                 link.to_dict() for link in self.projected_points
@@ -2749,6 +3395,13 @@ class Sketch:
                 coincidence = Coincident.from_dict(raw)
                 if coincidence is not None:
                     coincidences.append(coincidence)
+        equals: List[Equal] = []
+        raw_equals = data.get("equals", [])
+        if isinstance(raw_equals, (list, tuple)):
+            for raw in raw_equals:
+                equal = Equal.from_dict(raw)
+                if equal is not None:
+                    equals.append(equal)
         projected_points: List[ProjectedPoint] = []
         raw_projected_points = data.get("projected_points", [])
         if isinstance(raw_projected_points, (list, tuple)):
@@ -2787,6 +3440,7 @@ class Sketch:
             circles=circles,
             measurements=measurements,
             coincidences=coincidences,
+            equals=equals,
             projected_points=projected_points,
             projected_edges=projected_edges,
             projected_circles=projected_circles,

@@ -10,6 +10,7 @@ from .document import Document
 from .sketch import (
     BooleanSource,
     Coincident,
+    Equal,
     Extrude,
     ExtrudeSlice,
     Fillet,
@@ -25,6 +26,7 @@ from .sketch import (
     aligned_edge_endpoint,
     normalize_coincident_ref,
     normalize_edge_constraint,
+    normalize_equal_ref,
     normalize_measurement_placement,
     normalize_measurement_value,
     normalize_plane,
@@ -627,6 +629,111 @@ class AddCoincidentCommand(Command):
                 pass
         if self.previous_points is not None:
             self.sketch.apply_point_positions(self.previous_points)
+        self.document.recompute()
+        self.document.dirty = True
+
+
+class AddEqualCommand(Command):
+    """Keep two lines the same length or two circles the same diameter."""
+
+    kind = "equal"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        first: Tuple[str, int],
+        second: Tuple[str, int],
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        normalized_first = normalize_equal_ref(first)
+        normalized_second = normalize_equal_ref(second)
+        self.equal: Optional[Equal] = None
+        if (
+            normalized_first is not None
+            and normalized_second is not None
+            and normalized_first != normalized_second
+            and normalized_first[0] == normalized_second[0]
+        ):
+            self.equal = Equal(normalized_first, normalized_second)
+        self.index: Optional[int] = None
+        self.previous_points: Optional[List[Point]] = None
+        self.next_points: Optional[List[Point]] = None
+        self.previous_diameters: Optional[List[float]] = None
+        self.next_diameters: Optional[List[float]] = None
+        self.has_applied = False
+
+    @property
+    def label(self) -> str:
+        return "Equal"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def _refs_valid(self) -> bool:
+        if self.equal is None:
+            return False
+        kind = self.equal.first[0]
+        if kind != self.equal.second[0]:
+            return False
+        limit = (
+            len(self.sketch.edges) if kind == "line"
+            else len(self.sketch.circles)
+        )
+        return all(
+            0 <= ref[1] < limit
+            for ref in (self.equal.first, self.equal.second)
+        )
+
+    def _snapshot_diameters(self) -> List[float]:
+        return [circle.diameter for circle in self.sketch.circles]
+
+    def _restore_diameters(self, diameters: List[float]) -> None:
+        for circle, diameter in zip(self.sketch.circles, diameters):
+            circle.change_diameter(diameter)
+
+    def do(self) -> None:
+        if not self._refs_valid():
+            return
+        if not self.has_applied:
+            self.previous_points = _copy_points(self.sketch.points)
+            self.previous_diameters = self._snapshot_diameters()
+            self.has_applied = True
+        if self.index is None:
+            self.index = len(self.sketch.equals)
+        self.index = min(self.index, len(self.sketch.equals))
+        self.sketch.equals.insert(self.index, self.equal)
+        if self.next_points is None:
+            next_points = _copy_points(self.sketch.points)
+            self.next_points = self.sketch.enforced_points(next_points)
+            self.next_diameters = self._snapshot_diameters()
+        elif self.next_diameters is not None:
+            self._restore_diameters(self.next_diameters)
+        self.sketch.apply_point_positions(self.next_points)
+        self.document.recompute()
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self.index is None:
+            return
+        equals = self.sketch.equals
+        if (
+            self.index < len(equals)
+            and equals[self.index] == self.equal
+        ):
+            equals.pop(self.index)
+        else:
+            try:
+                equals.remove(self.equal)
+            except ValueError:
+                pass
+        if self.previous_points is not None:
+            self.sketch.apply_point_positions(self.previous_points)
+        if self.previous_diameters is not None:
+            self._restore_diameters(self.previous_diameters)
         self.document.recompute()
         self.document.dirty = True
 
@@ -1472,6 +1579,7 @@ class DeleteSketchEntitiesCommand(Command):
                 self.sketch.circles,
                 self.sketch.measurements,
                 self.sketch.coincidences,
+                self.sketch.equals,
                 self.sketch.projected_points,
                 self.sketch.projected_edges,
                 self.sketch.projected_circles,
@@ -1503,7 +1611,7 @@ class DeleteSketchEntitiesCommand(Command):
             return
         (
             points, edges, constraints, bulges, circles, measurements,
-            coincidences, projected_points, projected_edges,
+            coincidences, equals, projected_points, projected_edges,
             projected_circles,
         ) = copy.deepcopy(self._before)
         sketch = self.sketch
@@ -1514,6 +1622,7 @@ class DeleteSketchEntitiesCommand(Command):
         sketch.circles = circles
         sketch.measurements = measurements
         sketch.coincidences = coincidences
+        sketch.equals = equals
         sketch.projected_points = projected_points
         sketch.projected_edges = projected_edges
         sketch.projected_circles = projected_circles

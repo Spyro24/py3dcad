@@ -10,6 +10,7 @@ import pygame
 from .commands import (
     AddCircleCommand,
     AddCoincidentCommand,
+    AddEqualCommand,
     AddExtrudeCommand,
     AddFilletCommand,
     AddLineCommand,
@@ -47,6 +48,7 @@ from .sketch import (
     Point,
     Sketch,
     normalize_coincident_ref,
+    normalize_equal_ref,
     normalize_measurement_placement,
     normalize_measurement_value,
 )
@@ -263,6 +265,7 @@ class Application:
             on_move_edge=self.move_edge,
             on_set_edge_constraint=self.set_edge_constraint,
             on_add_coincident=self.add_coincident,
+            on_add_equal=self.add_equal,
             on_select_sketch=self.select_sketch,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
@@ -746,6 +749,55 @@ class Application:
             return
         stack.execute(
             AddCoincidentCommand(
+                document, sketch, normalized_first, normalized_second
+            )
+        )
+
+    def add_equal(
+        self,
+        first: tuple[str, int],
+        second: tuple[str, int],
+    ) -> None:
+        """Constrain two lines to equal length or two circles to equal size."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return
+        normalized_first = normalize_equal_ref(first)
+        normalized_second = normalize_equal_ref(second)
+        if normalized_first is None or normalized_second is None:
+            return
+        if normalized_first == normalized_second:
+            return
+        if normalized_first[0] != normalized_second[0]:
+            return
+        kind = normalized_first[0]
+        limit = (
+            len(sketch.edges) if kind == "line"
+            else len(sketch.circles)
+        )
+        for _, index in (normalized_first, normalized_second):
+            if not 0 <= index < limit:
+                return
+        first_value = sketch.equal_value(normalized_first)
+        second_value = sketch.equal_value(normalized_second)
+        if (
+            first_value is None or second_value is None
+            or first_value <= 1e-9 or second_value <= 1e-9
+        ):
+            return
+        fixed = sketch._equal_fixed_refs()
+        if normalized_first in fixed and normalized_second in fixed:
+            return
+        key = tuple(sorted((normalized_first, normalized_second)))
+        if any(equal.key() == key for equal in sketch.equals):
+            return
+        stack.execute(
+            AddEqualCommand(
                 document, sketch, normalized_first, normalized_second
             )
         )

@@ -1,6 +1,6 @@
 """Interactive orbitable sketch viewport for PY3DCAD."""
 
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import pygame
 
@@ -77,6 +77,10 @@ class Viewport:
     def set_origin_visible(self, visible: bool) -> None:
         self.show_origin = bool(visible)
         self.renderer.show_origin = self.show_origin
+
+    def set_constraint_options(self, options: Dict[str, bool]) -> None:
+        """Set constraint display options for the renderer."""
+        self.renderer.constraint_options.update(options)
 
     def set_scale(self, scale: float) -> None:
         if abs(scale - self.ui_scale) < 1e-6:
