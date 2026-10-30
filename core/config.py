@@ -32,6 +32,7 @@ class Config:
         self.path = self.directory / "config.json"
         self.ui_scale: float = 1.0
         self.show_orientation_cube: bool = True
+        self.use_opengl: bool = True
         self.recent: List[Dict[str, Any]] = []
         self.load()
 
@@ -57,6 +58,8 @@ class Config:
             self.ui_scale = 1.0
         value = data.get("show_orientation_cube", True)
         self.show_orientation_cube = value if isinstance(value, bool) else True
+        value = data.get("use_opengl", True)
+        self.use_opengl = value if isinstance(value, bool) else True
         entries = data.get("recent", [])
         if isinstance(entries, list):
             self.recent = [entry for entry in entries if isinstance(entry, dict)]
@@ -66,6 +69,7 @@ class Config:
             "format": 1,
             "ui_scale": self.ui_scale,
             "show_orientation_cube": self.show_orientation_cube,
+            "use_opengl": self.use_opengl,
             "recent": self.recent[:20],
         }
         try:

@@ -2,7 +2,9 @@
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple,
+)
 
 import pygame
 
@@ -16,10 +18,14 @@ from ..sketch import (
     Circle, PlaneFrame, Sketch, circle_polygon, plane_frame, point_on_plane,
 )
 from .camera import OrbitCamera, Point2, PROJECTION_SCALE
+from .edges import FaceEdgeCache, FaceEdgeEntry
 from .orientation_cube import OrientationCube
 
-FaceEdgeKey = Tuple[Tuple[float, ...], Tuple[float, ...]]
-FaceEdgeEntry = Optional[Tuple[FaceEdgeKey, bool]]
+# Draws the solid layer and returns whether it did so (the OpenGL path).
+SolidDrawer = Callable[
+    [pygame.Surface, pygame.Rect, Document, OrbitCamera, Sequence[int]],
+    bool,
+]
 
 GRID_STEP = 10.0
 ORIGIN_GIZMO_SCALE = 0.9
@@ -99,9 +105,7 @@ class SceneRenderer:
         self._font_small: Optional[pygame.font.Font] = None
         self._label_cache: Dict[Tuple[str, Color], pygame.Surface] = {}
         self._ghost_surface: Optional[pygame.Surface] = None
-        self._edge_key_cache: Dict[
-            int, Tuple[Face, List[FaceEdgeEntry]]
-        ] = {}
+        self.edge_cache = FaceEdgeCache()
         self._constraint_cache: Dict[
             int, Tuple[Sketch, Tuple[Set[int], Set[int], Set[int]]]
         ] = {}
@@ -184,6 +188,7 @@ class SceneRenderer:
         ghost_faces: Sequence[Face] = (),
         highlight_features: Sequence[int] = (),
         draw_solids: bool = True,
+        solid_drawer: Optional[SolidDrawer] = None,
     ) -> None:
         self._init_fonts()
         self._constraint_cache.clear()
@@ -201,9 +206,9 @@ class SceneRenderer:
             self._draw_origin_marker(surface, rect, camera)
         self._draw_sketch_lines(surface, rect, document, camera)
         if draw_solids:
-            self._draw_solids(
+            self._draw_solid_layer(
                 surface, rect, preview_document or document, camera,
-                highlight_features,
+                highlight_features, solid_drawer,
             )
         if draw_solids and ghost_faces:
             self._draw_ghost_solids(
@@ -615,6 +620,68 @@ class SceneRenderer:
             round(color[2] * 0.3 + base[2] * 0.7),
         )
 
+    def _draw_solid_layer(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        document: Document,
+        camera: OrbitCamera,
+        highlight_features: Sequence[int],
+        solid_drawer: Optional[SolidDrawer],
+    ) -> None:
+        """Draw solids through the hardware path, else in software."""
+        if solid_drawer is not None and solid_drawer(
+            surface, rect, document, camera, highlight_features
+        ):
+            self._draw_solid_overlays(surface, rect, document, camera)
+            return
+        self._draw_solids(
+            surface, rect, document, camera, highlight_features
+        )
+
+    def _draw_solid_overlays(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        document: Document,
+        camera: OrbitCamera,
+    ) -> None:
+        """Draw selection highlights on top of a hardware solid layer."""
+        active = document.sketch(document.active_sketch_id)
+        if active is not None and active.is_custom_plane:
+            return
+        center = rect.center
+        view = camera.view_direction()
+        selected = set(document.selected_faces)
+        if selected:
+            polygons: List[Tuple[List[Point2], List[List[Point2]]]] = []
+            for feature_id, face_index, face in iter_solid_faces(document):
+                if (feature_id, face_index) not in selected:
+                    continue
+                if sum(
+                    face.normal[index] * view[index] for index in range(3)
+                ) <= 0:
+                    continue
+                polygons.append((
+                    [
+                        camera.project(vertex, center)
+                        for vertex in face.vertices
+                    ],
+                    [
+                        [
+                            camera.project(vertex, center)
+                            for vertex in hole
+                        ]
+                        for hole in face.holes
+                    ],
+                ))
+            if polygons:
+                self._draw_face_selection(surface, rect, polygons)
+        for reference in document.selected_edges:
+            edge = edge_for_ref(document, reference)
+            if edge is not None:
+                self._draw_edge_selection(surface, rect, camera, edge)
+
     def _draw_solids(
         self,
         surface: pygame.Surface,
@@ -854,15 +921,6 @@ class SceneRenderer:
             polygon.append((x - rect.x, y - rect.y))
         return polygon
 
-    @staticmethod
-    def _edge_key(
-        start: Sequence[float], end: Sequence[float]
-    ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
-        """Return a direction-independent key for one mesh edge."""
-        first = tuple(round(value, 6) for value in start)
-        second = tuple(round(value, 6) for value in end)
-        return (first, second) if first <= second else (second, first)
-
     def _collect_edge_sides(
         self,
         face: Face,
@@ -884,37 +942,8 @@ class SceneRenderer:
                 smooth.add(key)
 
     def _face_edge_keys(self, face: Face) -> List[FaceEdgeEntry]:
-        """Return one rounded mesh key per face edge, built once per face.
-
-        Rounding every endpoint of a tessellated body on every frame is the
-        single most expensive step of drawing a sliced body, so the keys
-        travel with the face.  Entries are aligned with ``face.vertices``;
-        degenerate edges map to ``None``.  Faces are rebuilt whenever their
-        slices change, so a cached list always matches its face.
-        """
-        cached = self._edge_key_cache.get(id(face))
-        if cached is not None and cached[0] is face:
-            return cached[1]
-        count = len(face.vertices)
-        sharp = face.sharp_edges
-        entries: List[FaceEdgeEntry] = []
-        for index in range(count):
-            start = face.vertices[index]
-            end = face.vertices[(index + 1) % count]
-            if start == end:
-                entries.append(None)
-                continue
-            is_smooth = (
-                sharp is not None
-                and index < len(sharp)
-                and not sharp[index]
-            )
-            entries.append((self._edge_key(start, end), is_smooth))
-        if len(self._edge_key_cache) > 4096:
-            self._edge_key_cache.clear()
-        # Holding the face keeps its id unique for as long as the entry lives.
-        self._edge_key_cache[id(face)] = (face, entries)
-        return entries
+        """Return one rounded mesh key per face edge, built once per face."""
+        return self.edge_cache.edges(face)
 
     def _silhouette_edges(
         self,

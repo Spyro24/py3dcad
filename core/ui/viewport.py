@@ -6,7 +6,7 @@ import pygame
 
 from ..document import Document
 from ..faces import Face, edge_for_ref, face_for_ref
-from ..render import OrbitCamera, SceneRenderer
+from ..render import OpenGLRenderer, OrbitCamera, SceneRenderer
 from ..sketch import PlaneLike, Point
 from .layout import Rect
 
@@ -18,6 +18,9 @@ class Viewport:
         self.ui_scale = 1.0
         self.camera = OrbitCamera()
         self.renderer = SceneRenderer()
+        self.opengl = OpenGLRenderer(
+            self.renderer.palette, self.renderer.edge_cache
+        )
         self.show_origin = True
         self.show_orientation_cube = True
         self._panning = False
@@ -82,6 +85,7 @@ class Viewport:
         self._font = None
         self._font_small = None
         self.renderer.set_scale(scale)
+        self.opengl.set_scale(scale)
 
     def _s(self, value: float) -> int:
         return max(1, int(round(value * self.ui_scale)))
@@ -141,6 +145,10 @@ class Viewport:
             preview_document=preview_document,
             ghost_faces=ghost_faces,
             highlight_features=highlight_features,
+            solid_drawer=(
+                self._draw_solids_opengl
+                if self.opengl.available else None
+            ),
         )
         if self.show_orientation_cube:
             self.renderer.draw_orientation_cube(
@@ -151,6 +159,19 @@ class Viewport:
         )
 
         surface.set_clip(previous_clip)
+
+    def _draw_solids_opengl(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        document: Document,
+        camera: OrbitCamera,
+        highlight_features: Sequence[int],
+    ) -> bool:
+        """Draw the solid layer through PyOpenGL, if it is available."""
+        return self.opengl.draw(
+            surface, rect, document, camera, highlight_features
+        )
 
     def _draw_hud(
         self, surface: pygame.Surface, region: Rect, document: Document,

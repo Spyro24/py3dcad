@@ -11,13 +11,18 @@ class SettingsDialog:
     """A small modal panel for application display settings."""
 
     def __init__(
-        self, on_show_orientation_cube: Callable[[bool], None]
+        self,
+        on_show_orientation_cube: Callable[[bool], None],
+        on_use_opengl: Callable[[bool], None],
     ) -> None:
         self.on_show_orientation_cube = on_show_orientation_cube
+        self.on_use_opengl = on_use_opengl
         self.active = False
         self.show_orientation_cube = True
+        self.use_opengl = True
         self.scale = 1.0
         self._hover_checkbox = False
+        self._hover_opengl = False
         self._hover_close = False
 
         self._font_title: Optional[pygame.font.Font] = None
@@ -52,10 +57,14 @@ class SettingsDialog:
         self._font_label = pygame.font.SysFont("Segoe UI", self._s(13))
         self._font_small = pygame.font.SysFont("Segoe UI", self._s(11))
 
-    def open(self, show_orientation_cube: bool) -> None:
+    def open(
+        self, show_orientation_cube: bool, use_opengl: bool = True
+    ) -> None:
         self.active = True
         self.show_orientation_cube = show_orientation_cube
+        self.use_opengl = use_opengl
         self._hover_checkbox = False
+        self._hover_opengl = False
         self._hover_close = False
 
     def close(self) -> None:
@@ -67,7 +76,7 @@ class SettingsDialog:
 
     def _panel_rect(self, region: Rect) -> pygame.Rect:
         width = min(self._s(440), region.w - self._s(40))
-        height = self._s(196)
+        height = self._s(240)
         panel = pygame.Rect(0, 0, width, height)
         panel.center = region.center
         return panel
@@ -77,6 +86,15 @@ class SettingsDialog:
         return pygame.Rect(
             panel.x + self._s(24),
             panel.y + self._s(84),
+            size,
+            size,
+        )
+
+    def _opengl_rect(self, panel: pygame.Rect) -> pygame.Rect:
+        size = self._s(18)
+        return pygame.Rect(
+            panel.x + self._s(24),
+            panel.y + self._s(146),
             size,
             size,
         )
@@ -102,6 +120,7 @@ class SettingsDialog:
 
         panel = self._panel_rect(region)
         checkbox = self._checkbox_rect(panel)
+        opengl = self._opengl_rect(panel)
         close = self._close_rect(panel)
 
         if event.type == pygame.KEYDOWN:
@@ -113,12 +132,15 @@ class SettingsDialog:
 
         if event.type == pygame.MOUSEMOTION:
             self._hover_checkbox = checkbox.collidepoint(event.pos)
+            self._hover_opengl = opengl.collidepoint(event.pos)
             self._hover_close = close.collidepoint(event.pos)
             return True
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if checkbox.collidepoint(event.pos):
                 self._toggle()
+            elif opengl.collidepoint(event.pos):
+                self._toggle_opengl()
             elif close.collidepoint(event.pos) or not panel.collidepoint(event.pos):
                 self.close()
             return True
@@ -131,6 +153,10 @@ class SettingsDialog:
     def _toggle(self) -> None:
         self.show_orientation_cube = not self.show_orientation_cube
         self.on_show_orientation_cube(self.show_orientation_cube)
+
+    def _toggle_opengl(self) -> None:
+        self.use_opengl = not self.use_opengl
+        self.on_use_opengl(self.use_opengl)
 
     # ------------------------------------------------------------------
     # Drawing
@@ -162,17 +188,10 @@ class SettingsDialog:
         self._draw_close_icon(surface, close, self.text_muted)
 
         checkbox = self._checkbox_rect(panel)
-        pygame.draw.rect(
-            surface, self.checkbox_bg, checkbox,
-            border_radius=self._s(3),
+        self._draw_checkbox(
+            surface, checkbox, self.show_orientation_cube,
+            self._hover_checkbox,
         )
-        border = self.accent if self._hover_checkbox else self.border_color
-        pygame.draw.rect(
-            surface, border, checkbox, width=1, border_radius=self._s(3)
-        )
-        if self.show_orientation_cube:
-            self._draw_check(surface, checkbox)
-
         label = self._font_label.render(
             "Show orientation cube", True, self.text_primary
         )
@@ -180,7 +199,6 @@ class SettingsDialog:
             label,
             (checkbox.right + self._s(12), checkbox.y - self._s(1)),
         )
-
         description = self._font_small.render(
             "Display the axis cube in the top-right corner of the viewport.",
             True, self.text_muted,
@@ -190,6 +208,26 @@ class SettingsDialog:
             (checkbox.x, checkbox.bottom + self._s(12)),
         )
 
+        opengl = self._opengl_rect(panel)
+        self._draw_checkbox(
+            surface, opengl, self.use_opengl, self._hover_opengl
+        )
+        label = self._font_label.render(
+            "Hardware rendering (OpenGL)", True, self.text_primary
+        )
+        surface.blit(
+            label,
+            (opengl.right + self._s(12), opengl.y - self._s(1)),
+        )
+        description = self._font_small.render(
+            "Takes effect after restart. Falls back to software if unavailable.",
+            True, self.text_muted,
+        )
+        surface.blit(
+            description,
+            (opengl.x, opengl.bottom + self._s(12)),
+        )
+
         hint = self._font_small.render(
             "Esc or click outside to close", True, self.text_muted
         )
@@ -197,6 +235,24 @@ class SettingsDialog:
             hint,
             (panel.x + self._s(24), panel.bottom - self._s(28)),
         )
+
+    def _draw_checkbox(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        checked: bool,
+        hovered: bool,
+    ) -> None:
+        pygame.draw.rect(
+            surface, self.checkbox_bg, rect,
+            border_radius=self._s(3),
+        )
+        border = self.accent if hovered else self.border_color
+        pygame.draw.rect(
+            surface, border, rect, width=1, border_radius=self._s(3)
+        )
+        if checked:
+            self._draw_check(surface, rect)
 
     def _draw_check(
         self, surface: pygame.Surface, rect: pygame.Rect

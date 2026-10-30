@@ -237,9 +237,9 @@ def _resolve_fillets(document: Document, radius: float) -> Tuple[Optional[str], 
 
 class Application:
     """Owns the window, documents, UI components and event loop."""
-    def __init__(self, window: Window) -> None:
+    def __init__(self, window: Window, config: Optional[Config] = None) -> None:
         self.window = window
-        self.config = Config()
+        self.config = config or Config()
 
         self.layout = UILayout()
         self.start_page = StartPage(
@@ -275,7 +275,9 @@ class Application:
             on_delete_sketch=self.delete_sketch_entities,
         )
         self.save_dialog = SaveDialog(self._save_to)
-        self.settings_dialog = SettingsDialog(self._set_orientation_cube)
+        self.settings_dialog = SettingsDialog(
+            self._set_orientation_cube, self._set_use_opengl
+        )
 
         self.documents: List[Document] = []
         self.active_id: Optional[int] = None
@@ -330,12 +332,18 @@ class Application:
     def open_settings(self) -> None:
         if self.save_dialog.active:
             return
-        self.settings_dialog.open(self.config.show_orientation_cube)
+        self.settings_dialog.open(
+            self.config.show_orientation_cube, self.config.use_opengl
+        )
 
     def _set_orientation_cube(self, visible: bool) -> None:
         self.config.show_orientation_cube = bool(visible)
         self.config.save()
         self.workspace.set_orientation_cube_visible(visible)
+
+    def _set_use_opengl(self, enabled: bool) -> None:
+        self.config.use_opengl = bool(enabled)
+        self.config.save()
 
     # ------------------------------------------------------------------
     # Documents
