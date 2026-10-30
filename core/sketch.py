@@ -1708,6 +1708,27 @@ class Sketch:
                 original.set_pos(points[index])
                 points[index] = original
 
+    def coincident_anchor(self, index: int) -> Optional[int]:
+        """Return the point that anchors ``index`` in a coincidence, if any.
+
+        A coincidence is directed: its first reference is the anchor and the
+        second reference follows it.  When ``index`` is the follower of a
+        point/point coincidence this returns the anchor's index so callers can
+        keep the anchor fixed while the follower snaps onto it.  Coincidences
+        with the document origin are handled by the origin pinning rules, so
+        they return ``None`` here.
+        """
+        for coincidence in self.coincidences:
+            first, second = coincidence.first, coincidence.second
+            if (
+                second[0] == "point"
+                and second[1] == index
+                and first[0] == "point"
+                and 0 <= first[1] < len(self.points)
+            ):
+                return first[1]
+        return None
+
     def enforced_points(self, points: List[Point]) -> List[Point]:
         """Return a copy of points with measurement constraints applied."""
         result = [point2d(point) for point in points]

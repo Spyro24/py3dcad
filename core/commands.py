@@ -358,7 +358,12 @@ class MovePointCommand(Command):
             self.previous_points = _copy_points(sketch.points)
             next_points = _copy_points(sketch.points)
             next_points[index] = self.point
-            sketch.constrain_axis_changes(next_points, [index])
+            # A coincidence is directed: the first point is the anchor and
+            # the second follows it.  Moving the follower must not drag the
+            # anchor along, so lock the anchor instead of the moved point.
+            anchor = sketch.coincident_anchor(index)
+            locked = [index] if anchor is None else [anchor]
+            sketch.constrain_axis_changes(next_points, [index], locked)
             self.next_points = sketch.enforced_points(next_points)
 
     @property
