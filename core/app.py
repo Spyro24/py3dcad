@@ -26,6 +26,7 @@ from .commands import (
     DeleteSketchEntitiesCommand,
     MoveEdgeCommand,
     MovePointCommand,
+    RemoveConstraintCommand,
     SetEdgeConstraintCommand,
     SetMeasurementPlacementCommand,
     SetMeasurementValueCommand,
@@ -266,6 +267,7 @@ class Application:
             on_set_edge_constraint=self.set_edge_constraint,
             on_add_coincident=self.add_coincident,
             on_add_equal=self.add_equal,
+            on_remove_constraint=self.remove_constraint,
             on_select_sketch=self.select_sketch,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
@@ -866,6 +868,21 @@ class Application:
                 value,
             )
         )
+
+    def remove_constraint(self, target: tuple[str, int]) -> bool:
+        """Delete a selected sketch constraint annotation as one action."""
+        self._playing = False
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return False
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is None:
+            return False
+        if not RemoveConstraintCommand.is_valid(sketch, target):
+            return False
+        stack.execute(RemoveConstraintCommand(document, sketch, target))
+        return True
 
     def set_measurement_placement(
         self, index: int, placement: float

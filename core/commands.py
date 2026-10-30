@@ -997,6 +997,102 @@ class SetMeasurementValueCommand(Command):
             circle.change_diameter(diameter)
 
 
+class RemoveConstraintCommand(Command):
+    """Remove one sketch constraint annotation.
+
+    ``target`` names the annotation kind and its index: ``("edge", i)`` for a
+    horizontal/vertical edge constraint, ``("coincident", i)``, ``("equal", i)``
+    or ``("measurement", i)``.  The constraint state is snapshotted as a whole
+    so deleting and undoing stay consistent across every affected list.
+    """
+
+    kind = "constraint"
+    timeline_visible = False
+
+    def __init__(
+        self,
+        document: Document,
+        sketch: Sketch,
+        target: Tuple[str, int],
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.target = target
+        self._before = None
+
+    @property
+    def label(self) -> str:
+        return "Delete Constraint"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    @staticmethod
+    def is_valid(sketch: Sketch, target: Tuple[str, int]) -> bool:
+        """Return whether ``target`` names a live constraint annotation."""
+        kind, index = target
+        if kind == "edge":
+            return (
+                0 <= index < len(sketch.edges)
+                and sketch.edge_constraint(index) is not None
+            )
+        if kind == "coincident":
+            return 0 <= index < len(sketch.coincidences)
+        if kind == "equal":
+            return 0 <= index < len(sketch.equals)
+        if kind == "measurement":
+            return 0 <= index < len(sketch.measurements)
+        return False
+
+    def _snapshot(self) -> Tuple[object, ...]:
+        """Deep-copy the constraint state, keeping circle/point links intact."""
+        return copy.deepcopy((
+            self.sketch.points,
+            self.sketch.edge_constraints,
+            self.sketch.coincidences,
+            self.sketch.equals,
+            self.sketch.measurements,
+            self.sketch.circles,
+        ))
+
+    def _remove(self) -> None:
+        kind, index = self.target
+        sketch = self.sketch
+        if kind == "edge" and 0 <= index < len(sketch.edge_constraints):
+            sketch.edge_constraints[index] = None
+        elif kind == "coincident" and 0 <= index < len(sketch.coincidences):
+            del sketch.coincidences[index]
+        elif kind == "equal" and 0 <= index < len(sketch.equals):
+            del sketch.equals[index]
+        elif kind == "measurement" and 0 <= index < len(sketch.measurements):
+            del sketch.measurements[index]
+
+    def do(self) -> None:
+        if self._before is None:
+            self._before = self._snapshot()
+        self._remove()
+        self.document.recompute()
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        if self._before is None:
+            return
+        (
+            points, edge_constraints, coincidences, equals, measurements,
+            circles,
+        ) = copy.deepcopy(self._before)
+        sketch = self.sketch
+        sketch.points = points
+        sketch.edge_constraints = edge_constraints
+        sketch.coincidences = coincidences
+        sketch.equals = equals
+        sketch.measurements = measurements
+        sketch.circles = circles
+        self.document.recompute()
+        self.document.dirty = True
+
+
 class AddLineCommand(Command):
     """Add a straight line segment to a sketch."""
 

@@ -273,6 +273,9 @@ class Workspace:
         on_add_equal: Optional[
             Callable[[Tuple[str, int], Tuple[str, int]], None]
         ] = None,
+        on_remove_constraint: Optional[
+            Callable[[Tuple[str, int]], bool]
+        ] = None,
     ) -> None:
         self.on_new_sketch = on_new_sketch
         self.on_extrude = on_extrude
@@ -300,6 +303,7 @@ class Workspace:
         self.on_project_edge = on_project_edge
         self.on_align_sketch_x = on_align_sketch_x
         self.on_add_equal = on_add_equal
+        self.on_remove_constraint = on_remove_constraint
 
         self.scale = 1.0
         self.viewport = Viewport()
@@ -344,6 +348,16 @@ class Workspace:
         self._measurement_edit_pristine = False
         self._selected_sketch_entity: Optional[Tuple[str, int]] = None
         self._hover_sketch_entity: Optional[Tuple[str, int]] = None
+        # Constraint annotations (H/V glyphs, coincidence and equal badges,
+        # and dimension labels) are selectable through the marker rectangles
+        # recorded while drawing them.
+        self._selected_constraint: Optional[Tuple[str, int]] = None
+        self._hover_constraint: Optional[Tuple[str, int]] = None
+        self._constraint_marker_rects: List[
+            Tuple[Tuple[str, int], pygame.Rect]
+        ] = []
+        self._measurement_label_click_time = 0
+        self._measurement_label_click_index: Optional[int] = None
         # Solid reference geometry previewed by the projection tool.
         self._hover_project_vertex: Optional[
             Tuple[int, Tuple[float, float, float]]
@@ -422,6 +436,8 @@ class Workspace:
         self._hover_origin_eye = False
         self._hover_sketches_folder = False
         self._hover_sketch_entity = None
+        self._hover_constraint = None
+        self._constraint_marker_rects.clear()
         self._measurement_label_rects.clear()
         self._hover_measurement_index = None
         self._drag_measurement_index = None
@@ -562,10 +578,14 @@ class Workspace:
         self._measurement_edit_error = ""
         self._measurement_edit_rect = None
         self._measurement_edit_pristine = False
+        self._measurement_label_click_time = 0
+        self._measurement_label_click_index = None
 
     def _clear_sketch_selection(self) -> None:
         self._selected_sketch_entity = None
         self._hover_sketch_entity = None
+        self._selected_constraint = None
+        self._hover_constraint = None
         self._selected_regions.clear()
         self._hover_region = None
         self._drag_point_index = None
@@ -577,10 +597,12 @@ class Workspace:
         self._drag_edge_current = None
 
     def delete_sketch_selection(self, document: Document) -> bool:
-        """Delete the selected point, edge, circle or closed profile."""
+        """Delete the selected constraint, point, edge, circle or profile."""
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
             return False
+        if self._selected_constraint is not None:
+            return self._delete_selected_constraint(sketch)
         entity = self._selected_sketch_entity
         if entity is not None:
             kind, index = entity
@@ -914,6 +936,13 @@ class Workspace:
             limit = self._sketch_entity_limit(sketch, kind)
             if limit is None or not 0 <= index < limit:
                 self._hover_sketch_entity = None
+        if (
+            self._selected_constraint is not None
+            and not self._constraint_target_valid(
+                sketch, self._selected_constraint
+            )
+        ):
+            self._selected_constraint = None
         if (
             self._drag_point_index is not None
             and not 0 <= self._drag_point_index < len(sketch.points)
@@ -2901,6 +2930,7 @@ class Workspace:
     def _draw_sketch_selection(
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
+        self._constraint_marker_rects = []
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None or not self._sketch_toolbar_visible(document):
             return
@@ -2987,24 +3017,9 @@ class Workspace:
                     midpoint[0] + self._s(14), midpoint[1]
                 )
                 glyph = "V"
-            if not region.collidepoint(anchor):
-                continue
-            label = self._font_small.render(
-                glyph, True, self.accent
+            self._draw_constraint_badge(
+                surface, region, anchor, glyph, ("edge", index)
             )
-            box = label.get_rect(center=(
-                round(anchor[0]), round(anchor[1])
-            ))
-            box.inflate_ip(self._s(6), self._s(2))
-            pygame.draw.rect(
-                surface, self.header_bg, box,
-                border_radius=self._s(3),
-            )
-            pygame.draw.rect(
-                surface, self.border_color, box,
-                width=1, border_radius=self._s(3),
-            )
-            surface.blit(label, label.get_rect(center=box.center))
 
     def _draw_sketch_coincidences(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -3015,7 +3030,7 @@ class Workspace:
         ):
             return
         seen: set = set()
-        for coincidence in sketch.coincidences:
+        for index, coincidence in enumerate(sketch.coincidences):
             for ref in (coincidence.first, coincidence.second):
                 if ref in seen:
                     continue
@@ -3035,23 +3050,9 @@ class Workspace:
                     screen[0] + self._s(11),
                     screen[1] - self._s(11),
                 )
-                if not region.collidepoint(anchor):
-                    continue
-                label = self._font_small.render("C", True, self.accent)
-                box = label.get_rect(center=(
-                    round(anchor[0]), round(anchor[1])
-                ))
-                box.inflate_ip(self._s(6), self._s(2))
-                pygame.draw.rect(
-                    surface, self.header_bg, box,
-                    border_radius=self._s(3),
-                )
-                pygame.draw.rect(
-                    surface, self.border_color, box,
-                    width=1, border_radius=self._s(3),
-                )
-                surface.blit(
-                    label, label.get_rect(center=box.center)
+                self._draw_constraint_badge(
+                    surface, region, anchor, "C",
+                    ("coincident", index),
                 )
 
     def _draw_origin_pick_highlight(
@@ -3132,7 +3133,7 @@ class Workspace:
             "constraints", True
         ):
             return
-        for equal in sketch.equals:
+        for index, equal in enumerate(sketch.equals):
             first = self._sketch_entity_anchor(sketch, equal.first)
             second = self._sketch_entity_anchor(sketch, equal.second)
             if first is None or second is None:
@@ -3147,22 +3148,9 @@ class Workspace:
                 (first_screen[0] + second_screen[0]) * 0.5,
                 (first_screen[1] + second_screen[1]) * 0.5,
             )
-            if not region.collidepoint(anchor):
-                continue
-            label = self._font_small.render("=", True, self.accent)
-            box = label.get_rect(center=(
-                round(anchor[0]), round(anchor[1])
-            ))
-            box.inflate_ip(self._s(6), self._s(2))
-            pygame.draw.rect(
-                surface, self.header_bg, box,
-                border_radius=self._s(3),
+            self._draw_constraint_badge(
+                surface, region, anchor, "=", ("equal", index)
             )
-            pygame.draw.rect(
-                surface, self.border_color, box,
-                width=1, border_radius=self._s(3),
-            )
-            surface.blit(label, label.get_rect(center=box.center))
 
     def _draw_sketch_measurements(
         self, surface: pygame.Surface, sketch: Sketch, region: Rect
@@ -3194,6 +3182,9 @@ class Workspace:
                     surface, anchor, text, index
                 )
             self._measurement_label_rects.append((index, box))
+            self._constraint_marker_rects.append(
+                (("measurement", index), box)
+            )
 
     def _draw_distance_measurement(
         self,
@@ -3469,6 +3460,7 @@ class Workspace:
         active = (
             self._hover_measurement_index == index
             or self._drag_measurement_index == index
+            or self._selected_constraint == ("measurement", index)
         )
         pygame.draw.rect(
             surface,
@@ -3562,6 +3554,99 @@ class Workspace:
             if rect.collidepoint(pos):
                 return index
         return None
+
+    def _measurement_label_is_double_click(self, index: int) -> bool:
+        """Track dimension label clicks so one click selects, two edit."""
+        now = pygame.time.get_ticks()
+        double = (
+            self._measurement_label_click_index == index
+            and now - self._measurement_label_click_time
+            <= MEASURE_DOUBLE_CLICK_MS
+        )
+        self._measurement_label_click_index = index
+        self._measurement_label_click_time = now
+        return double
+
+    def _constraint_target_valid(
+        self, sketch: Sketch, target: Tuple[str, int]
+    ) -> bool:
+        """Return whether a constraint selection still points at live data."""
+        kind, index = target
+        if kind == "edge":
+            return (
+                0 <= index < len(sketch.edges)
+                and sketch.edge_constraint(index) is not None
+            )
+        if kind == "coincident":
+            return 0 <= index < len(sketch.coincidences)
+        if kind == "equal":
+            return 0 <= index < len(sketch.equals)
+        if kind == "measurement":
+            return 0 <= index < len(sketch.measurements)
+        return False
+
+    def _constraint_marker_at(
+        self, pos: Tuple[int, int]
+    ) -> Optional[Tuple[str, int]]:
+        """Return the constraint annotation under the cursor, if any."""
+        for ref, rect in reversed(self._constraint_marker_rects):
+            if rect.collidepoint(pos):
+                return ref
+        return None
+
+    def _select_constraint(self, ref: Tuple[str, int]) -> None:
+        """Select one constraint annotation and drop geometry selections."""
+        self._selected_constraint = ref
+        self._selected_sketch_entity = None
+        self._hover_sketch_entity = None
+        self._selected_regions.clear()
+        self._reset_line_state()
+
+    def _delete_selected_constraint(self, sketch: Sketch) -> bool:
+        """Remove the selected constraint annotation through the app."""
+        ref = self._selected_constraint
+        if ref is None or self.on_remove_constraint is None:
+            return False
+        if not self._constraint_target_valid(sketch, ref):
+            self._selected_constraint = None
+            return False
+        if not self.on_remove_constraint(ref):
+            return False
+        self._selected_constraint = None
+        return True
+
+    def _draw_constraint_badge(
+        self,
+        surface: pygame.Surface,
+        region: Rect,
+        anchor: Tuple[float, float],
+        glyph: str,
+        ref: Tuple[str, int],
+    ) -> None:
+        """Draw a constraint glyph badge and remember it for hit testing."""
+        if not region.collidepoint(anchor):
+            return
+        label = self._font_small.render(glyph, True, self.accent)
+        box = label.get_rect(center=(
+            round(anchor[0]), round(anchor[1])
+        ))
+        box.inflate_ip(self._s(6), self._s(2))
+        active = ref == self._selected_constraint
+        border = (
+            self.accent
+            if active or ref == self._hover_constraint
+            else self.border_color
+        )
+        pygame.draw.rect(
+            surface, self.header_bg, box, border_radius=self._s(3)
+        )
+        pygame.draw.rect(
+            surface, border, box,
+            width=max(1, self._s(2)) if active else 1,
+            border_radius=self._s(3),
+        )
+        surface.blit(label, label.get_rect(center=box.center))
+        self._constraint_marker_rects.append((ref, box))
 
     def _start_measurement_drag(
         self,
@@ -5390,8 +5475,14 @@ class Workspace:
             moved = self._finish_measurement_drag()
             if not moved and index is not None:
                 sketch = document.sketch(document.active_sketch_id)
-                if sketch is not None:
-                    self._begin_measurement_edit(index, sketch)
+                if (
+                    sketch is not None
+                    and 0 <= index < len(sketch.measurements)
+                ):
+                    if self._measurement_label_is_double_click(index):
+                        self._begin_measurement_edit(index, sketch)
+                    else:
+                        self._select_constraint(("measurement", index))
             return True
         if (
             event.type == pygame.MOUSEBUTTONUP
@@ -5646,6 +5737,20 @@ class Workspace:
                                 self.on_add_circle(center, diameter)
                                 self._circle_center = None
                                 self._circle_preview = None
+                    return True
+                constraint_hit = self._constraint_marker_at(event.pos)
+                if (
+                    constraint_hit is not None
+                    and self._selected_tool != "line"
+                    and self._constraint_tool is None
+                    and self._measure_tool is None
+                ):
+                    if constraint_hit[0] == "measurement":
+                        self._start_measurement_drag(
+                            constraint_hit[1], sketch, event.pos,
+                            layout.viewport,
+                        )
+                    self._select_constraint(constraint_hit)
                     return True
                 label_index = self._measurement_label_at(event.pos)
                 if label_index is not None:
@@ -6219,6 +6324,7 @@ class Workspace:
         self._hover_sketches_folder = False
         self._hover_sketch_entity = None
         self._hover_region = None
+        self._hover_constraint = None
         self._hover_measurement_index = None
         self._hover_project_vertex = None
         self._hover_project_edge = None
@@ -6273,6 +6379,7 @@ class Workspace:
             return
         if layout.viewport.collidepoint(pos):
             self._hover_measurement_index = self._measurement_label_at(pos)
+            self._hover_constraint = self._constraint_marker_at(pos)
         if self._drag_point_index is not None and sketch is not None:
             if layout.viewport.collidepoint(pos):
                 world = self.viewport.unproject_on_plane(
@@ -6442,6 +6549,7 @@ class Workspace:
             and self._sketch_toolbar_visible(document)
             and layout.viewport.collidepoint(pos)
             and self._hover_measurement_index is None
+            and self._hover_constraint is None
         ):
             self._hover_sketch_entity = self._pick_sketch_entity(
                 pos, layout.viewport, sketch
