@@ -56,13 +56,26 @@ def test_coincident_second_point_follows_the_first() -> None:
         f"p2 did not follow p1: {tuple(sketch.points[1])}",
     )
 
-    # p2 is not movable on its own: it stays on p1 and p1 stays put.
+
+def test_coincident_follower_cannot_move_the_anchor() -> None:
+    """Moving p2 must not move p1, and p2 stays fixed to p1."""
+    document, sketch, stack = _new_sketch()
+    stack.execute(AddPointCommand(document, sketch, (0.0, 0.0)))  # p1
+    stack.execute(AddPointCommand(document, sketch, (5.0, 5.0)))  # p2
+
+    # p1 anchors the coincidence; p2 is the follower.
+    stack.execute(
+        AddCoincidentCommand(document, sketch, ("point", 0), ("point", 1))
+    )
+    anchor_before = tuple(sketch.points[0])
+
+    # Drag p2 away; it must snap back and leave p1 untouched.
     stack.execute(MovePointCommand(document, sketch, 1, (99.0, 99.0)))
     check(
-        sketch.points[0] == (10.0, 10.0),
+        tuple(sketch.points[0]) == anchor_before,
         f"p1 moved while dragging p2: {tuple(sketch.points[0])}",
     )
     check(
         sketch.points[1] == sketch.points[0],
-        f"p2 left its anchor: {tuple(sketch.points[1])}",
+        f"p2 left p1: {tuple(sketch.points[1])}",
     )
