@@ -25,7 +25,7 @@ import tests  # noqa: E402
 from tests import harness  # noqa: E402
 
 
-def _collect_tests() -> List[harness.Test]:
+def collect_tests() -> List[harness.Test]:
     """Import every ``test_*`` module and collect its test functions."""
     collected: List[harness.Test] = []
     seen: set = set()
@@ -45,7 +45,7 @@ def _collect_tests() -> List[harness.Test]:
 
 def main() -> int:
     """Run all discovered tests and return a process exit code."""
-    passed, failed = harness.run_tests(_collect_tests())
+    passed, failed = harness.run_tests(collect_tests())
     print(f"{passed} passed, {failed} failed")
     return 1 if failed else 0
 
