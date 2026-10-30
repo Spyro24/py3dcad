@@ -8,7 +8,8 @@ pygame surface, which keeps the application usable everywhere.
 """
 
 import os
-from typing import Optional, Tuple
+import sys
+from typing import Callable, Optional, Tuple
 
 import pygame
 
@@ -46,6 +47,8 @@ class Window:
         self._present_size = (0, 0)
         self._clock = pygame.time.Clock()
         self._running = False
+        # Notified when the OpenGL path fails so renderers can go software.
+        self.on_opengl_lost: Optional[Callable[[], None]] = None
 
     @staticmethod
     def _opengl_requested() -> bool:
@@ -112,8 +115,42 @@ class Window:
     def flip(self) -> None:
         """Present the canvas and update the display."""
         if self.opengl:
-            self._present_canvas()
+            try:
+                self._present_canvas()
+            except Exception as error:
+                self._fall_back_to_software(error)
         pygame.display.flip()
+
+    def _fall_back_to_software(self, error: BaseException) -> None:
+        """Switch to a plain pygame window when presentation fails.
+
+        The current frame is preserved on the new display surface, and the
+        viewport is told to stop using OpenGL before the next frame.
+        """
+        print(f"OpenGL presentation disabled: {error}", file=sys.stderr)
+        previous = self._surface
+        self.opengl = False
+        self._gl = None
+        self._present_texture = 0
+        self._present_size = (0, 0)
+        size = previous.get_size() if previous is not None else self.size
+        # Never ask for another GL context while recovering from a lost one.
+        flags = self.flags & ~(pygame.OPENGL | pygame.DOUBLEBUF)
+        try:
+            pygame.display.set_mode(size, flags)
+            surface = pygame.display.get_surface()
+            if surface is not None:
+                if previous is not None:
+                    surface.blit(previous, (0, 0))
+                self._surface = surface
+                self.size = surface.get_size()
+        except Exception:
+            self._surface = previous
+        if self.on_opengl_lost is not None:
+            try:
+                self.on_opengl_lost()
+            except Exception:
+                pass
 
     def _present_canvas(self) -> None:
         """Draw the pygame canvas over the whole OpenGL window."""

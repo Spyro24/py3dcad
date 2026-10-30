@@ -294,6 +294,9 @@ class Application:
         self.workspace.set_orientation_cube_visible(
             self.config.show_orientation_cube
         )
+        # Presentation may lose the GL context after startup; the viewport
+        # then has to stop touching OpenGL and draw with the software path.
+        self.window.on_opengl_lost = self._disable_opengl_rendering
         self._refresh_recent()
 
     # ------------------------------------------------------------------
@@ -344,6 +347,10 @@ class Application:
     def _set_use_opengl(self, enabled: bool) -> None:
         self.config.use_opengl = bool(enabled)
         self.config.save()
+
+    def _disable_opengl_rendering(self) -> None:
+        """Drop the viewport's GL renderer when the window loses its context."""
+        self.workspace.viewport.opengl.disable()
 
     # ------------------------------------------------------------------
     # Documents

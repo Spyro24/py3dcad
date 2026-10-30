@@ -86,10 +86,14 @@ class OpenGLRenderer:
             return True
         except Exception as error:
             # A driver reset must not make the CAD application unusable.
-            self.available = False
-            self._release()
             print(f"PyOpenGL renderer disabled: {error}", file=sys.stderr)
+            self.disable()
             return False
+
+    def disable(self) -> None:
+        """Stop using OpenGL and release its framebuffer resources."""
+        self.available = False
+        self._release()
 
     # ------------------------------------------------------------------
     # Framebuffer
