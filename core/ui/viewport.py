@@ -135,6 +135,7 @@ class Viewport:
         preview_document: Optional[Document] = None,
         ghost_faces: Sequence[Face] = (),
         highlight_features: Sequence[int] = (),
+        show_hud: bool = True,
     ) -> None:
         self._init_fonts()
         self.renderer.show_origin = self.show_origin
@@ -158,9 +159,10 @@ class Viewport:
             self.renderer.draw_orientation_cube(
                 surface, region.rect, self.camera
             )
-        self._draw_hud(
-            surface, region, document, active_tool, selected_profiles
-        )
+        if show_hud:
+            self._draw_hud(
+                surface, region, document, active_tool, selected_profiles
+            )
 
         surface.set_clip(previous_clip)
 

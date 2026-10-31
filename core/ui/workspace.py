@@ -154,6 +154,12 @@ class Workspace:
     MODES = ("SOLID", "SURFACE", "MESH", "SHEET METAL", "PLASTIC", "UTILITIES")
     ACTIVE_MODE = "SOLID"
     SKETCH_MODE = "SKETCH"
+    DESIGN_WORKSPACE = "DESIGN"
+    PRINTING_WORKSPACE = "PRINTING"
+    WORKSPACE_MENU_ITEMS = (
+        (DESIGN_WORKSPACE, "Design"),
+        (PRINTING_WORKSPACE, "Printing"),
+    )
     ORIGIN_PLANES = ("XY Plane", "YZ Plane", "ZX Plane")
     ORIGIN_PLANE_KEYS = ("XY", "YZ", "ZX")
 
@@ -305,11 +311,22 @@ class Workspace:
         self.on_add_equal = on_add_equal
         self.on_remove_constraint = on_remove_constraint
 
+        # Imported lazily so the printing package can import the UI layout
+        # without running into the core.ui package initialisation cycle.
+        from ..workspace_protoprinting.ui_integration import (
+            get_printing_ui,
+        )
+
         self.scale = 1.0
         self.viewport = Viewport()
         self._hover_tool: Optional[str] = None
         self._hover_mode: Optional[str] = None
         self._active_mode_name = self.ACTIVE_MODE
+        self.printing_ui = get_printing_ui()
+        self._active_workspace_name = self.DESIGN_WORKSPACE
+        self._workspace_menu_open = False
+        self._workspace_menu_hover = -1
+        self._hover_workspace = False
         self._selected_tool: Optional[str] = None
         self._line_start: Optional[Point] = None
         self._line_preview: Optional[Point] = None
@@ -425,8 +442,12 @@ class Workspace:
             return
         self.scale = scale
         self.viewport.set_scale(scale)
+        self.printing_ui.set_scale(scale)
         self._hover_tool = None
         self._hover_mode = None
+        self._hover_workspace = False
+        self._workspace_menu_open = False
+        self._workspace_menu_hover = -1
         self._hover_sketch = None
         self._hover_plane = None
         self._hover_control = None
@@ -759,6 +780,17 @@ class Workspace:
             fillet_preview.max_radius if fillet_preview else None
         )
         self._draw_toolbar(surface, layout.toolbar, document)
+        if self._active_workspace_name == self.PRINTING_WORKSPACE:
+            self.printing_ui.set_document(document)
+            self.printing_ui.draw(
+                surface,
+                self._workspace_content_rect(layout),
+                viewport_draw=lambda target, region: self.viewport.draw(
+                    target, region, document, show_hud=False
+                ),
+            )
+            self._draw_workspace_menu(surface, layout.toolbar)
+            return
         self._draw_tree(surface, layout.document_tree, document)
         highlight: Tuple[int, ...] = ()
         if extrude_preview is not None:
@@ -813,6 +845,7 @@ class Workspace:
         self._draw_line_menu(surface, layout.toolbar, document)
         self._draw_constraint_menu(surface, layout.toolbar, document)
         self._draw_measure_menu(surface, layout.toolbar, document)
+        self._draw_workspace_menu(surface, layout.toolbar)
 
     def _draw_dropdown_panel(
         self,
@@ -990,6 +1023,92 @@ class Workspace:
             region.y + self._s(8),
             self._s(152),
             region.h - self._s(16),
+        )
+
+    @property
+    def active_workspace(self) -> str:
+        """Return the name of the workspace shown in the toolbar."""
+        return self._active_workspace_name
+
+    def set_workspace(self, name: str) -> bool:
+        """Switch the toolbar and content to a named workspace."""
+        if name not in dict(self.WORKSPACE_MENU_ITEMS):
+            return False
+        self._active_workspace_name = name
+        self._workspace_menu_open = False
+        self._workspace_menu_hover = -1
+        printing = name == self.PRINTING_WORKSPACE
+        self.printing_ui.visible = printing
+        if printing:
+            self.create_sketch_window.close()
+            self.sketch_palette_window.close()
+            self.fillet_window.close()
+            self.extrude_window.close()
+            self._reset_line_state()
+        else:
+            self.printing_ui.close_all_dialogs()
+        return True
+
+    def _workspace_content_rect(self, layout: UILayout) -> Rect:
+        """Return the area below the toolbar used by a full workspace."""
+        top = layout.toolbar.bottom
+        bottom = max(layout.timeline.bottom, top)
+        return Rect(
+            layout.toolbar.x,
+            top,
+            layout.toolbar.w,
+            bottom - top,
+        )
+
+    def _workspace_menu_geometry(
+        self, region: Rect
+    ) -> Tuple[pygame.Rect, List[pygame.Rect], pygame.Rect]:
+        """Lay out the workspace dropdown below the workspace label."""
+        selector = self._workspace_rect(region)
+        padding = self._s(6)
+        row_height = self._s(28)
+        width = max(selector.w, self._s(180))
+        panel = pygame.Rect(
+            selector.x,
+            selector.bottom + self._s(4),
+            width,
+            padding * 2 + row_height * len(self.WORKSPACE_MENU_ITEMS),
+        )
+        panel.x = max(
+            self._s(4),
+            min(panel.x, region.right - panel.w - self._s(4)),
+        )
+        rows = [
+            pygame.Rect(
+                panel.x + padding,
+                panel.y + padding + index * row_height,
+                panel.w - padding * 2,
+                row_height,
+            )
+            for index in range(len(self.WORKSPACE_MENU_ITEMS))
+        ]
+        return panel, rows, selector
+
+    def _workspace_menu_index_at(
+        self, pos: Tuple[int, int], region: Rect
+    ) -> int:
+        _, rows, _ = self._workspace_menu_geometry(region)
+        for index, rect in enumerate(rows):
+            if rect.collidepoint(pos):
+                return index
+        return -1
+
+    def _draw_workspace_menu(
+        self, surface: pygame.Surface, region: Rect
+    ) -> None:
+        if not self._workspace_menu_open:
+            return
+        self._draw_dropdown_panel(
+            surface,
+            self._workspace_menu_geometry(region),
+            self.WORKSPACE_MENU_ITEMS,
+            self._workspace_menu_hover,
+            self._active_workspace_name,
         )
 
     def _content_x(self, region: Rect) -> int:
@@ -2103,6 +2222,10 @@ class Workspace:
             (divider_x, region.y + self._s(12)),
             (divider_x, region.bottom - self._s(12)),
         )
+        if self._active_workspace_name == self.PRINTING_WORKSPACE:
+            self._draw_settings_button(surface, region)
+            self._draw_settings_tooltip(surface, region)
+            return
         self._draw_modes(surface, region, document)
         if self._sketch_toolbar_visible(document):
             self._draw_sketch_toolbar(surface, region, document)
@@ -2116,8 +2239,13 @@ class Workspace:
         self, surface: pygame.Surface, region: Rect
     ) -> None:
         rect = self._workspace_rect(region)
+        fill = (
+            self.panel_bg
+            if self._hover_workspace or self._workspace_menu_open
+            else self.header_bg
+        )
         pygame.draw.rect(
-            surface, self.header_bg, rect, border_radius=self._s(6)
+            surface, fill, rect, border_radius=self._s(6)
         )
         pygame.draw.rect(
             surface, self.border_color, rect, width=1,
@@ -2133,17 +2261,22 @@ class Workspace:
         self._draw_workspace_icon(surface, icon_rect)
 
         text_x = icon_rect.right + self._s(10)
-        design = self._font_label.render("DESIGN", True, self.text_primary)
+        design = self._font_label.render(
+            self._active_workspace_name, True, self.text_primary
+        )
         design_y = rect.centery - self._s(11)
         surface.blit(
             design, design.get_rect(midleft=(text_x, design_y))
         )
         caret_x = text_x + design.get_width() + self._s(6)
-        pygame.draw.polygon(surface, self.text_muted, [
+        caret = [
             (caret_x, design_y - self._s(2)),
             (caret_x + self._s(7), design_y - self._s(2)),
             (caret_x + self._s(3), design_y + self._s(3)),
-        ])
+        ]
+        if self._workspace_menu_open:
+            caret = [(x, 2 * design_y - y) for x, y in caret]
+        pygame.draw.polygon(surface, self.text_muted, caret)
         sublabel = self._font_small.render(
             "workspace", True, self.text_muted
         )
@@ -5327,6 +5460,50 @@ class Workspace:
         self.extrude_window.set_distance_value(abs(signed))
         self.extrude_window.reverse = signed < 0.0
 
+    def _handle_workspace_menu_event(
+        self, event: pygame.event.Event, region: Rect
+    ) -> bool:
+        """Route clicks and hover to the workspace selector dropdown."""
+        if event.type == pygame.MOUSEMOTION:
+            self._hover_workspace = self._workspace_rect(
+                region
+            ).collidepoint(event.pos)
+            self._workspace_menu_hover = (
+                self._workspace_menu_index_at(event.pos, region)
+                if self._workspace_menu_open else -1
+            )
+            return False
+
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            if self._workspace_menu_open:
+                self._workspace_menu_open = False
+                self._workspace_menu_hover = -1
+                return True
+            return False
+
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+
+        selector = self._workspace_rect(region)
+        if selector.collidepoint(event.pos):
+            self._workspace_menu_open = not self._workspace_menu_open
+            self._workspace_menu_hover = -1
+            return True
+
+        if not self._workspace_menu_open:
+            return False
+
+        panel, rows, _ = self._workspace_menu_geometry(region)
+        if panel.collidepoint(event.pos):
+            for index, rect in enumerate(rows):
+                if rect.collidepoint(event.pos):
+                    key, _ = self.WORKSPACE_MENU_ITEMS[index]
+                    self.set_workspace(key)
+                    return True
+        self._workspace_menu_open = False
+        self._workspace_menu_hover = -1
+        return True
+
     def handle_event(
         self,
         event: pygame.event.Event,
@@ -5338,6 +5515,25 @@ class Workspace:
     ) -> bool:
         self._init_fonts()
         self._sync_history_document(document)
+
+        if self._handle_workspace_menu_event(event, layout.toolbar):
+            return True
+        if self._active_workspace_name == self.PRINTING_WORKSPACE:
+            self.printing_ui.set_document(document)
+            content = self._workspace_content_rect(layout)
+            if self.printing_ui.handle_event(event, content):
+                return True
+            if (
+                event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1
+                and self._settings_rect(layout.toolbar).collidepoint(
+                    event.pos
+                )
+            ):
+                if self.on_settings is not None:
+                    self.on_settings()
+                return True
+            return True
 
         active_sketch = document.sketch(document.active_sketch_id)
 

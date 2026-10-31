@@ -1,0 +1,209 @@
+{
+  "printers": [
+    {
+      "id": "fdm_printer_001",
+      "name": "FDM Desktop Printer",
+      "type": "FDM",
+      "status": "ready",
+      "capabilities": {
+        "build_volume": {
+          "width": 210.0,
+          "depth": 210.0,
+          "height": 250.0
+        },
+        "nozzle_diameter": 0.4,
+        "nozzle_count": 1,
+        "nozzle_temperature_range": {
+          "min": 0.0,
+          "max": 300.0
+        },
+        "bed_temperature_range": {
+          "min": 0.0,
+          "max": 120.0
+        },
+        "bed_type": "heated_bed",
+        "bed_surface": "aluminum",
+        "max_print_speed": 180.0,
+        "max_layer_height": 0.5,
+        "min_layer_height": 0.05,
+        "supported_materials": ["PLA", "ABS", "PETG", "Nylon", "TPU"],
+        "filament_sensors": true,
+        "temperature_sensors": 4,
+        "flow_rate_sensors": 2,
+        "vibration_sensors": 2,
+        "auto_leveling": true,
+        "enclosure": false,
+        "air_filtration": false,
+        "dual_extrusion": false
+      },
+      "default_settings": {
+        "layer_height": 0.2,
+        "print_speed": 60.0,
+        "nozzle_temperature": 200.0,
+        "bed_temperature": 60.0,
+        "infill_density": 0.2,
+        "support_enabled": true,
+        "resolution": "normal"
+      },
+      "material_profiles": {
+        "PLA": {
+          "layer_height": 0.2,
+          "bed_temp": 60.0,
+          "nozzle_temp": 200.0,
+          "infill_speed": 60.0,
+          "perimeter_speed": 40.0,
+          "support_temp": 50.0,
+          "support_speed": 30.0
+        },
+        "ABS": {
+          "layer_height": 0.2,
+          "bed_temp": 80.0,
+          "nozzle_temp": 250.0,
+          "infill_speed": 50.0,
+          "perimeter_speed": 35.0,
+          "support_temp": 60.0,
+          "support_speed": 30.0
+        },
+        "PETG": {
+          "layer_height": 0.25,
+          "bed_temp": 75.0,
+          "nozzle_temp": 240.0,
+          "infill_speed": 55.0,
+          "perimeter_speed": 40.0,
+          "support_temp": 70.0,
+          "support_speed": 25.0
+        }
+      },
+      "location": "workshop",
+      "last_maintenance": "2024-01-15",
+      "next_maintenance": "2024-02-15"
+    },
+    {
+      "id": "sla_printer_001",
+      "name": "SLA High Resolution Printer",
+      "type": "SLA",
+      "status": "printing",
+      "capabilities": {
+        "build_volume": {
+          "width": 130.0,
+          "depth": 73.0,
+          "height": 175.0
+        },
+        "nozzle_diameter": 0.025,
+        "nozzle_count": 1,
+        "nozzle_temperature_range": {
+          "min": 0.0,
+          "max": 80.0
+        },
+        "bed_temperature_range": {
+          "min": 0.0,
+          "max": 60.0
+        },
+        "bed_type": "heated_bed",
+        "bed_surface": "steel",
+        "max_print_speed": 50.0,
+        "max_layer_height": 0.025,
+        "min_layer_height": 0.005,
+        "supported_materials": ["PLA", "ABS", "Nylon", "Resin"],
+        "filament_sensors": true,
+        "temperature_sensors": 2,
+        "flow_rate_sensors": 1,
+        "vibration_sensors": 1,
+        "auto_leveling": true,
+        "enclosure": true,
+        "air_filtration": true,
+        "dual_extrusion": false
+      },
+      "default_settings": {
+        "layer_height": 0.025,
+        "print_speed": 25.0,
+        "nozzle_temperature": 50.0,
+        "bed_temperature": 50.0,
+        "infill_density": 0.1,
+        "support_enabled": false,
+        "resolution": "high"
+      },
+      "material_profiles": {
+        "Resin": {
+          "layer_height": 0.025,
+          "bed_temp": 50.0,
+          "nozzle_temp": 50.0,
+          "infill_speed": 25.0,
+          "perimeter_speed": 20.0,
+          "cure_time": 30.0
+        }
+      },
+      "location": "lab",
+      "last_maintenance": "2024-01-10",
+      "next_maintenance": "2024-02-10"
+    },
+    {
+      "id": "sls_printer_001",
+      "name": "SLS Nylon Printer",
+      "type": "SLS",
+      "status": "error",
+      "capabilities": {
+        "build_volume": {
+          "width": 185.0,
+          "depth": 185.0,
+          "height": 300.0
+        },
+        "nozzle_diameter": 0.8,
+        "nozzle_count": 1,
+        "nozzle_temperature_range": {
+          "min": 0.0,
+          "max": 200.0
+        },
+        "bed_temperature_range": {
+          "min": 0.0,
+          "max": 100.0
+        },
+        "bed_type": "powder_bed",
+        "bed_surface": "aluminum",
+        "max_print_speed": 120.0,
+        "max_layer_height": 0.1,
+        "min_layer_height": 0.03,
+        "supported_materials": ["Nylon", "Aluminum", "Steel"],
+        "filament_sensors": false,
+        "temperature_sensors": 3,
+        "flow_rate_sensors": 2,
+        "vibration_sensors": 2,
+        "auto_leveling": false,
+        "enclosure": true,
+        "air_filtration": true,
+        "dual_extrusion": false
+      },
+      "default_settings": {
+        "layer_height": 0.08,
+        "print_speed": 80.0,
+        "nozzle_temperature": 180.0,
+        "bed_temperature": 90.0,
+        "infill_density": 0.3,
+        "support_enabled": false,
+        "resolution": "draft"
+      },
+      "material_profiles": {
+        "Nylon": {
+          "layer_height": 0.08,
+          "bed_temp": 90.0,
+          "nozzle_temp": 180.0,
+          "infill_speed": 80.0,
+          "perimeter_speed": 60.0,
+          "laser_power": 80.0,
+          "laser_speed": 100.0
+        }
+      },
+      "location": "lab",
+      "last_maintenance": "2023-12-20",
+      "next_maintenance": "2024-01-20"
+    }
+  ],
+  "settings": {
+    "default_printer": "fdm_printer_001",
+    "layer_height_warning_threshold": 0.1,
+    "max_preview_layers": 10,
+    "save_directory": "/home/user/prints",
+    "auto_save_enabled": true,
+    "backup_enabled": true
+  }
+}

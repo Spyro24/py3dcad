@@ -1430,6 +1430,8 @@ class Application:
             self.start_page.handle_event(event, self._content_region())
 
     def _handle_edit_key(self, key: int) -> bool:
+        if self.workspace.active_workspace != self.workspace.DESIGN_WORKSPACE:
+            return False
         document = self.active_document()
         if document is None:
             return False
