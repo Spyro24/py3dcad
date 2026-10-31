@@ -2,12 +2,15 @@
 
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
+import math
+
 import pygame
 
 from ..document import Document
 from ..faces import Face, edge_for_ref, face_for_ref
+from ..profiles import point_in_polygon
 from ..render import OpenGLRenderer, OrbitCamera, SceneRenderer
-from ..sketch import PlaneLike, Point
+from ..sketch import PlaneLike, Point, point_on_plane
 from .layout import Rect
 
 
@@ -245,7 +248,7 @@ class Viewport:
                     )
                 else:
                     hint = (
-                        "Closed loop selected  ·  Ctrl+click to add more"
+                        "Closed loop selected  ·  Shift+click to add more"
                         "  ·  E to extrude"
                     )
             elif profile_count == 0:
@@ -268,7 +271,15 @@ class Viewport:
             edge_count = len(document.selected_edges)
             face_count = len(document.selected_faces)
             selected_sketch = document.selected_sketch
-            if selected_sketch is not None:
+            loop_count = len(document.selected_sketch_loops)
+            if loop_count:
+                noun = "loop" if loop_count == 1 else "loops"
+                hint = (
+                    f"{loop_count} closed {noun} selected"
+                    "  ·  Shift+click to add or remove"
+                    "  ·  click empty space to deselect"
+                )
+            elif selected_sketch is not None:
                 hint = (
                     f"{selected_sketch.name} selected"
                     "  ·  double-click it in the tree to edit"
@@ -343,6 +354,95 @@ class Viewport:
             & (pygame.KMOD_CTRL | pygame.KMOD_META | pygame.KMOD_SHIFT)
         )
 
+    @staticmethod
+    def _point_segment_distance(
+        pos: Tuple[float, float],
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+    ) -> float:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-9:
+            return math.hypot(pos[0] - start[0], pos[1] - start[1])
+        t = (
+            (pos[0] - start[0]) * dx
+            + (pos[1] - start[1]) * dy
+        ) / length_sq
+        t = max(0.0, min(1.0, t))
+        return math.hypot(
+            pos[0] - (start[0] + dx * t),
+            pos[1] - (start[1] + dy * t),
+        )
+
+    def _pick_finished_sketch_loop(
+        self,
+        pos: Tuple[int, int],
+        region: Rect,
+        document: Document,
+    ) -> Optional[Tuple[int, int]]:
+        """Return ``(sketch_id, loop_index)`` for a finished profile click.
+
+        Closed loops are filled profiles: an interior click wins, with the
+        smallest containing loop chosen so a circle inside a rectangle picks
+        the circle.  Clicking close to a loop outline is also accepted.
+        """
+        if document.active_sketch_id is not None:
+            return None
+        center = region.center
+        tolerance = float(self._s(7))
+        for sketch in reversed(document.sketches):
+            if not sketch.visible:
+                continue
+            loops = sketch.closed_loops()
+            if not loops:
+                continue
+            frame = sketch.frame()
+            world = self.unproject_on_plane(pos, region, frame)
+            inside: List[int] = []
+            if world is not None:
+                for index, loop in enumerate(loops):
+                    circle = sketch.circle_for_loop(loop)
+                    if circle is not None:
+                        distance = math.hypot(
+                            world[0] - circle.midPoint[0],
+                            world[1] - circle.midPoint[1],
+                        )
+                        if distance <= circle.radius:
+                            inside.append(index)
+                    elif point_in_polygon(
+                        world, sketch.loop_points(loop)
+                    ):
+                        inside.append(index)
+            if inside:
+                # The innermost loop is the object directly under the cursor.
+                return (
+                    sketch.id,
+                    min(
+                        inside,
+                        key=lambda index: sketch.loop_area(loops[index]),
+                    ),
+                )
+            best: Optional[Tuple[float, int]] = None
+            for index, loop in enumerate(loops):
+                screen = [
+                    self.camera.project(
+                        point_on_plane(frame, point), center
+                    )
+                    for point in sketch.loop_points(loop)
+                ]
+                for start, end in zip(screen, screen[1:] + screen[:1]):
+                    distance = self._point_segment_distance(
+                        pos, start, end
+                    )
+                    if distance <= tolerance and (
+                        best is None or distance < best[0]
+                    ):
+                        best = (distance, index)
+            if best is not None:
+                return (sketch.id, best[1])
+        return None
+
     def handle_event(
         self,
         event: pygame.event.Event,
@@ -403,6 +503,15 @@ class Viewport:
                     document.clear_selection()
                     document.selected_plane = plane
                     document.active_sketch_id = None
+                    return True
+                loop_hit = self._pick_finished_sketch_loop(
+                    event.pos, region, document
+                )
+                if loop_hit is not None:
+                    sketch_id, loop_index = loop_hit
+                    document.select_sketch_loop(
+                        sketch_id, loop_index, additive
+                    )
                     return True
                 sketch_id = self.renderer.pick_sketch(
                     event.pos, region.rect, document, self.camera

@@ -10,9 +10,11 @@ import pygame
 
 from core.commands import CommandStack, SetSketchVisibilityCommand
 from core.document import Document
+from core.render.camera import OrbitCamera
 from core.render.scene import SceneRenderer
-from core.sketch import Extrude, Sketch
+from core.sketch import Extrude, Sketch, point_on_plane
 from core.ui.layout import Rect, UILayout
+from core.ui.viewport import Viewport
 from core.ui.workspace import Workspace
 
 from .harness import check
@@ -162,3 +164,124 @@ def test_tree_single_click_selects_and_eye_toggles() -> None:
     )
     workspace.handle_event(click, layout, document, [], [], 0)
     check(visibility == [(1, False)], "eye did not hide the sketch")
+
+
+def _profile_document() -> Document:
+    """Return a finished sketch with two closed loops and one open edge."""
+    document = Document(id=1)
+    sketch = Sketch(id=1, name="Profiles")
+    sketch.points = [
+        (0, 0), (10, 0), (10, 10), (0, 10),
+        (20, 0), (30, 0), (30, 10), (20, 10),
+        (40, 0), (50, 0),
+    ]
+    sketch.edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (8, 9),
+    ]
+    document.sketches = [sketch]
+    return document
+
+
+def test_finished_sketch_loops_can_be_multiselected() -> None:
+    """Shift-click toggles several closed loops on a finished sketch."""
+    document = _profile_document()
+
+    document.select_sketch_loop(1, 0)
+    check(document.selected_sketch_loops == [(1, 0)], "loop was not selected")
+    check(document.selected_sketch_id == 1, "sketch was not selected")
+
+    document.select_sketch_loop(1, 1, additive=True)
+    check(
+        document.selected_sketch_loops == [(1, 0), (1, 1)],
+        "additive loop selection was not kept",
+    )
+
+    document.select_sketch_loop(1, 0, additive=True)
+    check(
+        document.selected_sketch_loops == [(1, 1)],
+        "additive click did not toggle the loop",
+    )
+
+    document.select_sketch(1)
+    check(not document.selected_sketch_loops, "sketch selection kept loops")
+
+
+def test_other_selections_clear_finished_sketch_loops() -> None:
+    """Solid and viewport selections replace the finished loop selection."""
+    document = _profile_document()
+    document.select_sketch_loop(1, 0)
+
+    document.select_face((7, 0))
+    check(not document.selected_sketch_loops, "face click kept the loop")
+
+    document.select_sketch_loop(1, 0)
+    document.clear_selection()
+    check(not document.selected_sketch_loops, "clear kept the loop")
+
+
+def test_finished_sketch_pick_ignores_open_geometry() -> None:
+    """Only closed profiles of a finished sketch can be picked."""
+    pygame.font.init()
+    document = _profile_document()
+    camera = OrbitCamera()
+    rect = Rect(0, 0, 800, 600)
+    viewport = Viewport()
+
+    def screen(point):
+        x, y = camera.project(
+            point_on_plane(document.sketches[0].frame(), point),
+            rect.center,
+        )
+        return round(x), round(y)
+
+    closed_hit = viewport._pick_finished_sketch_loop(
+        screen((5, 5)), rect, document
+    )
+    check(closed_hit == (1, 0), "closed loop was not picked")
+
+    open_pos = screen((45, 0))
+    check(
+        viewport._pick_finished_sketch_loop(open_pos, rect, document)
+        is None,
+        "open edge was picked",
+    )
+    check(
+        viewport.renderer.pick_sketch(
+            open_pos, rect.rect, document, camera
+        )
+        is None,
+        "open edge was picked by the scene renderer",
+    )
+
+
+def test_finished_sketch_draws_only_closed_loops() -> None:
+    """A finished visible sketch draws its profiles, not open edges."""
+    pygame.font.init()
+    document = _profile_document()
+    camera = OrbitCamera()
+    rect = Rect(0, 0, 800, 600)
+    renderer = SceneRenderer()
+    surface = pygame.Surface((rect.w, rect.h))
+    surface.fill(renderer.palette.background)
+
+    renderer._draw_sketch_lines(surface, rect.rect, document, camera)
+
+    def screen(point):
+        x, y = camera.project(
+            point_on_plane(document.sketches[0].frame(), point),
+            rect.center,
+        )
+        return round(x), round(y)
+
+    open_pixel = surface.get_at(screen((45, 0)))
+    check(
+        tuple(open_pixel)[:3] == renderer.palette.background,
+        "open edge was drawn",
+    )
+    closed_pixel = surface.get_at(screen((5, 0)))
+    check(
+        tuple(closed_pixel)[:3] == renderer.palette.sketch,
+        "closed loop was not drawn",
+    )

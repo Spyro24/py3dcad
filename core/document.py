@@ -38,6 +38,12 @@ class Document:
     # read this to consume an existing sketch, while ``active_sketch_id``
     # remains the sketch currently open for drawing.
     selected_sketch_id: Optional[int] = None
+    # Closed loops picked on finished sketches.  Each reference is
+    # ``(sketch_id, loop_index)``; the list preserves click order and may
+    # span sketches so Shift-click can build a multi-profile selection.
+    selected_sketch_loops: List[Tuple[int, int]] = field(
+        default_factory=list
+    )
     # The full multi-selection.  ``selected_face``/``selected_edge`` expose
     # the primary (most recently added) reference for single-target tools.
     selected_faces: List[Tuple[int, int]] = field(default_factory=list)
@@ -75,9 +81,47 @@ class Document:
         if self.sketch(sketch_id) is None:
             return
         self.selected_sketch_id = sketch_id
+        self.selected_sketch_loops = []
         self.selected_faces = []
         self.selected_edges = []
         self.selected_plane = None
+
+    def select_sketch_loop(
+        self,
+        sketch_id: int,
+        loop_index: int,
+        additive: bool = False,
+    ) -> None:
+        """Select one closed loop of a finished sketch.
+
+        Additive clicks toggle loops, matching the face and edge selection
+        behaviour, so Shift-click can pick several profiles for a solid tool.
+        """
+        sketch = self.sketch(sketch_id)
+        if sketch is None:
+            return
+        if not 0 <= loop_index < len(sketch.closed_loops()):
+            return
+        reference = (sketch_id, loop_index)
+        self.selected_sketch_loops = _update_refs(
+            self.selected_sketch_loops, reference, additive
+        )
+        if self.selected_sketch_loops:
+            self.selected_sketch_id = self.selected_sketch_loops[-1][0]
+        else:
+            self.selected_sketch_id = None
+        self.selected_faces = []
+        self.selected_edges = []
+        self.selected_plane = None
+        self.active_sketch_id = None
+
+    def selected_loops_for(self, sketch_id: int) -> List[int]:
+        """Return the selected loop indices belonging to one sketch."""
+        return [
+            loop_index
+            for selected_id, loop_index in self.selected_sketch_loops
+            if selected_id == sketch_id
+        ]
 
     def select_face(
         self, reference: Tuple[int, int], additive: bool = False
@@ -89,6 +133,7 @@ class Document:
         self.selected_edges = []
         self.selected_plane = None
         self.selected_sketch_id = None
+        self.selected_sketch_loops = []
         self.active_sketch_id = None
 
     def select_edge(
@@ -101,6 +146,7 @@ class Document:
         self.selected_faces = []
         self.selected_plane = None
         self.selected_sketch_id = None
+        self.selected_sketch_loops = []
         self.active_sketch_id = None
 
     def clear_selection(self) -> None:
@@ -109,6 +155,7 @@ class Document:
         self.selected_edges = []
         self.selected_plane = None
         self.selected_sketch_id = None
+        self.selected_sketch_loops = []
 
     def new_id(self) -> int:
         value = self.next_id

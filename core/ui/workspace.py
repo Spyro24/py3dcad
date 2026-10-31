@@ -671,8 +671,11 @@ class Workspace:
     def _select_sketch_region(
         self, region: Tuple[int, ...], mods: int
     ) -> None:
-        """Select or Ctrl-toggle an arrangement region of sketch loops."""
-        if mods & pygame.KMOD_CTRL:
+        """Select or Shift/Ctrl-toggle an arrangement region of sketch loops."""
+        additive = mods & (
+            pygame.KMOD_CTRL | pygame.KMOD_META | pygame.KMOD_SHIFT
+        )
+        if additive:
             if region in self._selected_regions:
                 self._selected_regions.remove(region)
             else:
@@ -2867,10 +2870,59 @@ class Workspace:
                 regions.append(filtered)
         return regions
 
+    def _draw_finished_sketch_loops(
+        self, surface: pygame.Surface, region: Rect, document: Document
+    ) -> None:
+        """Highlight closed loops selected on finished sketches."""
+        if not document.selected_sketch_loops:
+            return
+        groups: dict[int, List[Tuple[int, ...]]] = {}
+        for sketch_id, loop_index in document.selected_sketch_loops:
+            if sketch_id == document.active_sketch_id:
+                continue
+            sketch = document.sketch(sketch_id)
+            if sketch is None or not sketch.visible:
+                continue
+            if not 0 <= loop_index < len(sketch.closed_loops()):
+                continue
+            groups.setdefault(sketch_id, []).append((loop_index,))
+        if not groups:
+            return
+        previous_clip = surface.get_clip()
+        surface.set_clip(region.rect.clip(previous_clip))
+        overlay = self._loop_surface
+        if overlay is None or overlay.get_size() != region.rect.size:
+            overlay = pygame.Surface(region.rect.size, pygame.SRCALPHA)
+            self._loop_surface = overlay
+        overlay.fill((0, 0, 0, 0))
+        faces: List[
+            Tuple[Sketch, List[Tuple[List[Point], List[List[Point]]]]]
+        ] = []
+        for sketch_id, regions in groups.items():
+            sketch = document.sketch(sketch_id)
+            if sketch is None:
+                continue
+            regions_faces = self._face_regions(sketch, regions)
+            faces.append((sketch, regions_faces))
+            for outer, holes in regions_faces:
+                self._draw_region_fill(
+                    overlay, sketch, outer, holes, region,
+                    self.geometry_selection, 70,
+                )
+        surface.blit(overlay, region.rect.topleft)
+        for sketch, regions_faces in faces:
+            for outer, holes in regions_faces:
+                self._draw_region_outline(
+                    surface, sketch, outer, holes, region,
+                    self.geometry_selection, 2,
+                )
+        surface.set_clip(previous_clip)
+
     def _draw_sketch_loops(
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
         """Fill selected and hovered sketch faces, cutting out nested holes."""
+        self._draw_finished_sketch_loops(surface, region, document)
         sketch = document.sketch(document.active_sketch_id)
         if sketch is None:
             return
@@ -5873,6 +5925,7 @@ class Workspace:
                             document.selected_face = None
                             document.selected_edge = None
                             document.selected_sketch_id = None
+                            document.selected_sketch_loops = []
                             document.active_sketch_id = None
                             self._selected_tool = None
                             self._constraint_tool = None
@@ -5917,6 +5970,7 @@ class Workspace:
                     document.selected_face = None
                     document.selected_edge = None
                     document.selected_sketch_id = None
+                    document.selected_sketch_loops = []
                     return True
 
         if (

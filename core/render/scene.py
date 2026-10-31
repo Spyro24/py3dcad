@@ -1102,6 +1102,13 @@ class SceneRenderer:
         for sketch in self._visible_sketches(document):
             if only_active and sketch.id != document.active_sketch_id:
                 continue
+            if sketch.id != document.active_sketch_id:
+                # A finished sketch is only a profile source: show its closed
+                # loops and hide the construction/open edges and points.
+                self._draw_closed_sketch_loops(
+                    surface, document, sketch, camera, center
+                )
+                continue
             color = self._sketch_color(document, sketch)
             _, constrained_edges, constrained_circles = self._constraints(sketch)
             frame = sketch.frame()
@@ -1176,6 +1183,36 @@ class SceneRenderer:
                     surface, circle_color, frame, circle, camera, center
                 )
 
+    def _draw_closed_sketch_loops(
+        self,
+        surface: pygame.Surface,
+        document: Document,
+        sketch: Sketch,
+        camera: OrbitCamera,
+        center: Tuple[int, int],
+    ) -> None:
+        """Draw only the closed profiles of a sketch that is not edited."""
+        color = self._sketch_color(document, sketch)
+        frame = sketch.frame()
+        width = max(1, self._s(2))
+        for loop in sketch.closed_loops():
+            points = [
+                camera.project(point_on_plane(frame, point), center)
+                for point in sketch.loop_points(loop)
+            ]
+            if len(points) < 2:
+                continue
+            if sketch.line_type == "normal":
+                pygame.draw.lines(surface, color, True, points, width)
+                continue
+            for start_point, end_point in zip(
+                points, points[1:] + points[:1]
+            ):
+                self._draw_sketch_segment(
+                    surface, color, start_point, end_point,
+                    sketch.line_type,
+                )
+
     def _draw_sketch_circle(self, surface: pygame.Surface, color: Color, frame: PlaneFrame, circle: Circle, camera: OrbitCamera, center: Tuple[int, int]) -> None:
         local_points = circle_polygon(circle)
         if not local_points:
@@ -1216,6 +1253,10 @@ class SceneRenderer:
         center = rect.center
         radius = self._s(3)
         for sketch in self._visible_sketches(document):
+            if sketch.id != document.active_sketch_id:
+                # Finished sketches expose closed profiles only; their
+                # control points belong to the editor.
+                continue
             color = self._sketch_color(document, sketch)
             constrained_points, _, _ = self._constraints(sketch)
             frame = sketch.frame()
@@ -1310,21 +1351,12 @@ class SceneRenderer:
         best: Optional[Tuple[float, int]] = None
         for sketch in self._visible_sketches(document):
             frame = sketch.frame()
-            for index in range(len(sketch.edges)):
+            # Finished sketches only render closed loops, so only those
+            # outlines may be picked.
+            for loop in sketch.closed_loops():
                 screen = [
                     camera.project(point_on_plane(frame, point), center)
-                    for point in sketch.edge_points(index)
-                ]
-                for start, end in zip(screen, screen[1:]):
-                    distance = self._point_segment_distance(pos, start, end)
-                    if distance <= tolerance and (
-                        best is None or distance < best[0]
-                    ):
-                        best = (distance, sketch.id)
-            for circle in sketch.circles:
-                screen = [
-                    camera.project(point_on_plane(frame, point), center)
-                    for point in circle_polygon(circle)
+                    for point in sketch.loop_points(loop)
                 ]
                 for start, end in zip(screen, screen[1:] + screen[:1]):
                     distance = self._point_segment_distance(pos, start, end)
@@ -1332,15 +1364,4 @@ class SceneRenderer:
                         best is None or distance < best[0]
                     ):
                         best = (distance, sketch.id)
-            for point in sketch.points:
-                screen = camera.project(
-                    point_on_plane(frame, point), center
-                )
-                distance = math.hypot(
-                    pos[0] - screen[0], pos[1] - screen[1]
-                )
-                if distance <= tolerance and (
-                    best is None or distance < best[0]
-                ):
-                    best = (distance, sketch.id)
         return best[1] if best is not None else None

@@ -453,6 +453,15 @@ class Application:
             and document.sketch(document.selected_sketch_id) is None
         ):
             document.selected_sketch_id = None
+        if document.selected_sketch_loops:
+            document.selected_sketch_loops = [
+                (sketch_id, loop_index)
+                for sketch_id, loop_index in document.selected_sketch_loops
+                if (
+                    (sketch := document.sketch(sketch_id)) is not None
+                    and 0 <= loop_index < len(sketch.closed_loops())
+                )
+            ]
         if document.selected_faces:
             document.selected_faces = [reference for reference in document.selected_faces if face_for_ref(document, reference) is not None]
         if document.selected_edges:
@@ -1266,6 +1275,14 @@ class Application:
         sketch = document.sketch(sketch_id)
         if sketch is None or sketch.visible == bool(visible):
             return
+        if not visible:
+            document.selected_sketch_loops = [
+                reference
+                for reference in document.selected_sketch_loops
+                if reference[0] != sketch_id
+            ]
+            if document.selected_sketch_id == sketch_id:
+                document.selected_sketch_id = None
         stack.execute(
             SetSketchVisibilityCommand(document, sketch, visible)
         )
