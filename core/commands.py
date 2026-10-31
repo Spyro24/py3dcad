@@ -239,6 +239,37 @@ class AddSketchCommand(Command):
         self.document.dirty = True
 
 
+class SetSketchVisibilityCommand(Command):
+    """Show or hide a sketch without leaving the document tree."""
+
+    kind = "sketch_visibility"
+    timeline_visible = False
+
+    def __init__(
+        self, document: Document, sketch: Sketch, visible: bool
+    ) -> None:
+        self.document = document
+        self.sketch = sketch
+        self.visible = bool(visible)
+        self.before = bool(sketch.visible)
+
+    @property
+    def label(self) -> str:
+        return f"{'Show' if self.visible else 'Hide'} {self.sketch.name}"
+
+    @property
+    def sketch_id(self) -> Optional[int]:
+        return self.sketch.id
+
+    def do(self) -> None:
+        self.sketch.visible = self.visible
+        self.document.dirty = True
+
+    def undo(self) -> None:
+        self.sketch.visible = self.before
+        self.document.dirty = True
+
+
 class AlignSketchXCommand(Command):
     """Rotate a sketch's local X axis to follow an existing solid edge."""
 

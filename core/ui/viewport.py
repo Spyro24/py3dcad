@@ -267,7 +267,14 @@ class Viewport:
             status = document.name
             edge_count = len(document.selected_edges)
             face_count = len(document.selected_faces)
-            if edge_count > 1:
+            selected_sketch = document.selected_sketch
+            if selected_sketch is not None:
+                hint = (
+                    f"{selected_sketch.name} selected"
+                    "  ·  double-click it in the tree to edit"
+                    "  ·  click empty space to deselect"
+                )
+            elif edge_count > 1:
                 hint = (
                     f"{edge_count} edges selected"
                     "  ·  Ctrl+click to add or remove"
@@ -396,6 +403,12 @@ class Viewport:
                     document.clear_selection()
                     document.selected_plane = plane
                     document.active_sketch_id = None
+                    return True
+                sketch_id = self.renderer.pick_sketch(
+                    event.pos, region.rect, document, self.camera
+                )
+                if sketch_id is not None:
+                    document.select_sketch(sketch_id)
                     return True
                 document.clear_selection()
                 return False

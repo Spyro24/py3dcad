@@ -47,6 +47,7 @@ class HistoryEntry:
 ARROW_SNAP_PIXELS = 3.0
 MEASURE_DOUBLE_CLICK_MS = 400
 MEASURE_DOUBLE_CLICK_PIXELS = 6.0
+SKETCH_DOUBLE_CLICK_MS = 400
 
 
 def _arrow_snap_step(world_per_pixel: float) -> float:
@@ -242,6 +243,10 @@ class Workspace:
         on_history_jump: Callable[[int], None],
         on_history_delete: Callable[[int], None],
         on_history_play: Callable[[], None],
+        on_edit_sketch: Optional[Callable[[int], None]] = None,
+        on_set_sketch_visibility: Optional[
+            Callable[[int, bool], None]
+        ] = None,
         on_settings: Optional[Callable[[], None]] = None,
         on_add_measurement: Optional[
             Callable[
@@ -297,6 +302,8 @@ class Workspace:
         self.on_history_jump = on_history_jump
         self.on_history_delete = on_history_delete
         self.on_history_play = on_history_play
+        self.on_edit_sketch = on_edit_sketch
+        self.on_set_sketch_visibility = on_set_sketch_visibility
         self.on_settings = on_settings
         self.on_add_measurement = on_add_measurement
         self.on_set_measurement_placement = (
@@ -394,6 +401,9 @@ class Workspace:
         self._drag_edge_anchor: Optional[Point] = None
         self._drag_edge_current: Optional[Tuple[Point, Point]] = None
         self._hover_sketch: Optional[int] = None
+        self._hover_sketch_eye: Optional[int] = None
+        self._sketch_click_time = 0
+        self._sketch_click_id: Optional[int] = None
         self._hover_plane: Optional[int] = None
         self._hover_control: Optional[str] = None
         self._hover_action: Optional[int] = None
@@ -449,6 +459,7 @@ class Workspace:
         self._workspace_menu_open = False
         self._workspace_menu_hover = -1
         self._hover_sketch = None
+        self._hover_sketch_eye = None
         self._hover_plane = None
         self._hover_control = None
         self._hover_action = None
@@ -932,6 +943,8 @@ class Workspace:
             self._hover_control = None
             self._hover_sketches_folder = False
             self._sketches_expanded = True
+            self._sketch_click_time = 0
+            self._sketch_click_id = None
             self._constraint_tool = None
             self._clear_measure_state()
             self._reset_line_state()
@@ -1652,13 +1665,7 @@ class Workspace:
     ) -> bool:
         for group in self._sketch_toolbar_groups(region, document):
             if group.finish and group.rect.collidepoint(pos):
-                document.active_sketch_id = None
-                self._selected_tool = None
-                self._constraint_tool = None
-                self._clear_measure_state()
-                self._reset_line_state()
-                self._clear_sketch_selection()
-                self.sketch_palette_window.close()
+                self._finish_sketch(document)
                 return True
             for item in group.items:
                 if item.action == "constraint_auto":
@@ -4348,6 +4355,10 @@ class Workspace:
             row.height - self._s(6),
         )
 
+    def _sketch_eye_rect(self, row: pygame.Rect) -> pygame.Rect:
+        """Return the clickable visibility-toggle area on a sketch row."""
+        return self._origin_eye_rect(row)
+
     def _draw_tree(
         self, surface: pygame.Surface, region: Rect, document: Document
     ) -> None:
@@ -4363,6 +4374,10 @@ class Workspace:
         kind: str, item_id: int, document: Document,
     ) -> None:
         active = kind == "sketch" and item_id == document.active_sketch_id
+        selected_sketch = (
+            kind == "sketch"
+            and item_id == document.selected_sketch_id
+        )
         selected_plane = (
             kind == "origin_plane"
             and document.selected_plane
@@ -4374,15 +4389,16 @@ class Workspace:
             or (kind == "origin" and self._hover_origin)
             or (kind == "sketches" and self._hover_sketches_folder)
         )
+        highlighted = selected_plane or (selected_sketch and not active)
         if kind == "document":
             pygame.draw.rect(
                 surface, self.tree_selection, rect,
                 border_radius=self._s(3),
             )
-        elif active or selected_plane:
+        elif active or highlighted:
             pygame.draw.rect(
                 surface,
-                self.tree_selection if selected_plane
+                self.tree_selection if highlighted
                 else pygame.Color(45, 45, 54),
                 rect,
                 border_radius=self._s(3),
@@ -4396,11 +4412,11 @@ class Workspace:
         root = kind == "document"
         text_x, label = self._tree_entry(
             surface, rect, kind, item_id, document,
-            active or selected_plane or root,
+            active or highlighted or root,
         )
         color = (
             self.text_primary
-            if active or selected_plane or root
+            if active or highlighted or root
             else self.text_secondary
         )
         available = rect.right - text_x - self._s(8)
@@ -4482,16 +4498,27 @@ class Workspace:
         if kind == "sketch":
             sketch = document.sketch(item_id)
             label = sketch.name if sketch else "Sketch"
+            visible = sketch.visible if sketch is not None else True
             if sketch is not None:
                 label += f"  ({len(sketch.points)} pts)"
+            eye_color = (
+                self.text_primary
+                if self._hover_sketch_eye == item_id
+                else (icon_color if visible else self.text_muted)
+            )
+            self._draw_eye_icon(
+                surface, (icon_x, rect.centery), eye_color,
+                visible=visible,
+            )
+            square_x = icon_x + self._s(22)
             pygame.draw.rect(
                 surface,
                 self.accent if selected else pygame.Color(100, 150, 190),
-                (icon_x - self._s(4), rect.centery - self._s(4),
+                (square_x - self._s(4), rect.centery - self._s(4),
                  self._s(8), self._s(8)),
                 border_radius=self._s(2),
             )
-            return rect.x + self._s(74), label
+            return rect.x + self._s(96), label
 
         return rect.x + self._s(74), ""
 
@@ -5703,13 +5730,7 @@ class Workspace:
                 if action == SketchPaletteAction.LOOK_AT:
                     self.viewport.camera.align_to_plane(active_sketch.frame())
                 elif action == SketchPaletteAction.FINISH_SKETCH:
-                    document.active_sketch_id = None
-                    self._selected_tool = None
-                    self._constraint_tool = None
-                    self._clear_measure_state()
-                    self._reset_line_state()
-                    self._clear_sketch_selection()
-                    self.sketch_palette_window.close()
+                    self._finish_sketch(document)
                 elif action == SketchPaletteAction.LINETYPE_CHANGED:
                     if active_sketch is not None:
                         active_sketch.line_type = self.sketch_palette_window.current_line_type
@@ -5851,6 +5872,7 @@ class Workspace:
                             document.selected_plane = plane
                             document.selected_face = None
                             document.selected_edge = None
+                            document.selected_sketch_id = None
                             document.active_sketch_id = None
                             self._selected_tool = None
                             self._constraint_tool = None
@@ -5859,12 +5881,42 @@ class Workspace:
                             self._clear_sketch_selection()
                         return True
                     if kind == "sketch":
-                        self.on_select_sketch(item_id)
+                        if self._sketch_eye_rect(rect).collidepoint(
+                            event.pos
+                        ):
+                            self._sketch_click_time = 0
+                            self._sketch_click_id = None
+                            sketch = document.sketch(item_id)
+                            if (
+                                sketch is not None
+                                and self.on_set_sketch_visibility is not None
+                            ):
+                                self.on_set_sketch_visibility(
+                                    item_id, not sketch.visible
+                                )
+                            return True
+                        now = pygame.time.get_ticks()
+                        if (
+                            self._sketch_click_id == item_id
+                            and now - self._sketch_click_time
+                            <= SKETCH_DOUBLE_CLICK_MS
+                        ):
+                            self._sketch_click_time = 0
+                            self._sketch_click_id = None
+                            if self.on_edit_sketch is not None:
+                                self.on_edit_sketch(item_id)
+                            else:
+                                self.on_select_sketch(item_id)
+                        else:
+                            self._sketch_click_time = now
+                            self._sketch_click_id = item_id
+                            self.on_select_sketch(item_id)
                         return True
                 if not hit_row:
                     document.selected_plane = None
                     document.selected_face = None
                     document.selected_edge = None
+                    document.selected_sketch_id = None
                     return True
 
         if (
@@ -6481,6 +6533,19 @@ class Workspace:
             self._clear_sketch_selection()
             self.on_align_sketch_x(edge[0], edge[1])
 
+    def _finish_sketch(self, document: Document) -> None:
+        """Close the sketch editor and leave the sketch selected for tools."""
+        sketch = document.sketch(document.active_sketch_id)
+        if sketch is not None:
+            document.select_sketch(sketch.id)
+        document.active_sketch_id = None
+        self._selected_tool = None
+        self._constraint_tool = None
+        self._clear_measure_state()
+        self._reset_line_state()
+        self._clear_sketch_selection()
+        self.sketch_palette_window.close()
+
     def _run_tool(self, action: str, document: Document) -> None:
         if action == "sketch":
             self.on_new_sketch()
@@ -6495,13 +6560,7 @@ class Workspace:
         elif action == "measure":
             self._activate_measure_tool("auto", document)
         elif action == "finish_sketch":
-            document.active_sketch_id = None
-            self._selected_tool = None
-            self._constraint_tool = None
-            self._clear_measure_state()
-            self._reset_line_state()
-            self._clear_sketch_selection()
-            self.sketch_palette_window.close()
+            self._finish_sketch(document)
 
     def _update_hover(
         self, pos: Tuple[int, int], layout: UILayout,
@@ -6511,6 +6570,7 @@ class Workspace:
         self._hover_tool = None
         self._hover_mode = None
         self._hover_sketch = None
+        self._hover_sketch_eye = None
         self._hover_plane = None
         self._hover_control = None
         self._hover_action = None
@@ -6729,6 +6789,8 @@ class Workspace:
                 continue
             if kind == "sketch":
                 self._hover_sketch = item_id
+                if self._sketch_eye_rect(rect).collidepoint(pos):
+                    self._hover_sketch_eye = item_id
             elif kind == "origin_plane":
                 self._hover_plane = item_id
             elif kind == "sketches":

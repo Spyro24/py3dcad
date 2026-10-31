@@ -1102,11 +1102,7 @@ class SceneRenderer:
         for sketch in self._visible_sketches(document):
             if only_active and sketch.id != document.active_sketch_id:
                 continue
-            color = (
-                self.palette.active
-                if sketch.id == document.active_sketch_id
-                else self.palette.sketch
-            )
+            color = self._sketch_color(document, sketch)
             _, constrained_edges, constrained_circles = self._constraints(sketch)
             frame = sketch.frame()
             show_equal = self.constraint_options.get(
@@ -1220,11 +1216,7 @@ class SceneRenderer:
         center = rect.center
         radius = self._s(3)
         for sketch in self._visible_sketches(document):
-            color = (
-                self.palette.active
-                if sketch.id == document.active_sketch_id
-                else self.palette.sketch
-            )
+            color = self._sketch_color(document, sketch)
             constrained_points, _, _ = self._constraints(sketch)
             frame = sketch.frame()
             
@@ -1285,14 +1277,70 @@ class SceneRenderer:
         self._constraint_cache[id(sketch)] = (sketch, signature, status)
         return status
 
+    def _sketch_color(
+        self, document: Document, sketch: Sketch
+    ) -> Color:
+        """Return the colour for an active or merely selected sketch."""
+        if sketch.id in (
+            document.active_sketch_id,
+            document.selected_sketch_id,
+        ):
+            return self.palette.active
+        return self.palette.sketch
+
     @staticmethod
     def _visible_sketches(document: Document) -> Iterator[Sketch]:
-        """Hide sketches consumed by a feature unless they are being edited."""
-        consumed = {feature.sketch_id for feature in document.features}
+        """Yield sketches that are visible or currently being edited."""
         for sketch in document.sketches:
-            if (
-                sketch.id in consumed
-                and sketch.id != document.active_sketch_id
-            ):
-                continue
-            yield sketch
+            if sketch.visible or sketch.id == document.active_sketch_id:
+                yield sketch
+
+    def pick_sketch(
+        self,
+        pos: Point2,
+        rect: pygame.Rect,
+        document: Document,
+        camera: OrbitCamera,
+    ) -> Optional[int]:
+        """Return the visible sketch nearest to a screen position."""
+        if document.active_sketch_id is not None:
+            return None
+        center = rect.center
+        tolerance = float(self._s(7))
+        best: Optional[Tuple[float, int]] = None
+        for sketch in self._visible_sketches(document):
+            frame = sketch.frame()
+            for index in range(len(sketch.edges)):
+                screen = [
+                    camera.project(point_on_plane(frame, point), center)
+                    for point in sketch.edge_points(index)
+                ]
+                for start, end in zip(screen, screen[1:]):
+                    distance = self._point_segment_distance(pos, start, end)
+                    if distance <= tolerance and (
+                        best is None or distance < best[0]
+                    ):
+                        best = (distance, sketch.id)
+            for circle in sketch.circles:
+                screen = [
+                    camera.project(point_on_plane(frame, point), center)
+                    for point in circle_polygon(circle)
+                ]
+                for start, end in zip(screen, screen[1:] + screen[:1]):
+                    distance = self._point_segment_distance(pos, start, end)
+                    if distance <= tolerance and (
+                        best is None or distance < best[0]
+                    ):
+                        best = (distance, sketch.id)
+            for point in sketch.points:
+                screen = camera.project(
+                    point_on_plane(frame, point), center
+                )
+                distance = math.hypot(
+                    pos[0] - screen[0], pos[1] - screen[1]
+                )
+                if distance <= tolerance and (
+                    best is None or distance < best[0]
+                ):
+                    best = (distance, sketch.id)
+        return best[1] if best is not None else None

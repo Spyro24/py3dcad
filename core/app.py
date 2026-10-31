@@ -30,6 +30,7 @@ from .commands import (
     SetEdgeConstraintCommand,
     SetMeasurementPlacementCommand,
     SetMeasurementValueCommand,
+    SetSketchVisibilityCommand,
 )
 from .booleans import build_tool_stack, plan_boolean
 from .config import Config, format_opened
@@ -269,6 +270,8 @@ class Application:
             on_add_equal=self.add_equal,
             on_remove_constraint=self.remove_constraint,
             on_select_sketch=self.select_sketch,
+            on_edit_sketch=self.edit_sketch,
+            on_set_sketch_visibility=self.set_sketch_visibility,
             on_history_jump=self.history_jump,
             on_history_delete=self.history_delete,
             on_history_play=self.toggle_playback,
@@ -445,6 +448,11 @@ class Application:
         if (document.active_sketch_id is not None and document.sketch(document.active_sketch_id) is None):
             document.active_sketch_id = None
             self.workspace.sketch_palette_window.close()
+        if (
+            document.selected_sketch_id is not None
+            and document.sketch(document.selected_sketch_id) is None
+        ):
+            document.selected_sketch_id = None
         if document.selected_faces:
             document.selected_faces = [reference for reference in document.selected_faces if face_for_ref(document, reference) is not None]
         if document.selected_edges:
@@ -457,6 +465,7 @@ class Application:
         consumed = {feature.sketch_id for feature in document.features}
         editable = [sketch for sketch in document.sketches if sketch.id not in consumed]
         if editable:
+            document.select_sketch(editable[-1].id)
             document.active_sketch_id = editable[-1].id
             self._align_camera_to_active_sketch(document)
             sketch = document.sketch(document.active_sketch_id)
@@ -487,6 +496,7 @@ class Application:
         stack.execute(command)
         self.workspace.close_create_sketch_dialog()
         if command.sketch is not None:
+            document.select_sketch(command.sketch.id)
             document.active_sketch_id = command.sketch.id
             self._align_camera_to_active_sketch(document)
             self.workspace.begin_sketch_edit()
@@ -998,7 +1008,9 @@ class Application:
             )
             if error is not None:
                 return error
-        # The sketch is now consumed by the feature; hide it until selected again.
+        # The sketch is now consumed by the feature; leave it selected so a
+        # following solid tool can pick it up from the tree.
+        document.select_sketch(sketch.id)
         document.active_sketch_id = None
         document.selected_edge = None
         document.selected_face = None
@@ -1210,19 +1222,53 @@ class Application:
         )
 
     def select_sketch(self, sketch_id: int) -> None:
+        """Select a finished sketch without reopening its editor."""
         document = self.active_document()
-        if document is not None:
-            sketch = document.sketch(sketch_id)
-            if sketch is not None:
-                document.active_sketch_id = sketch_id
-                document.selected_face = None
-                document.selected_edge = None
-                document.selected_plane = (
-                    None if sketch.is_custom_plane else sketch.plane
-                )
-                self._align_camera_to_active_sketch(document)
-                self.workspace.begin_sketch_edit()
-                self.workspace.sketch_palette_window.open(sketch.line_type)
+        if document is None:
+            return
+        sketch = document.sketch(sketch_id)
+        if sketch is None:
+            return
+        document.select_sketch(sketch_id)
+        if document.active_sketch_id not in (None, sketch_id):
+            document.active_sketch_id = None
+            self.workspace.sketch_palette_window.close()
+
+    def edit_sketch(self, sketch_id: int) -> None:
+        """Open a sketch for drawing, making it visible first."""
+        document = self.active_document()
+        if document is None:
+            return
+        sketch = document.sketch(sketch_id)
+        if sketch is None:
+            return
+        if not sketch.visible:
+            self.set_sketch_visibility(sketch_id, True)
+        document.select_sketch(sketch_id)
+        document.active_sketch_id = sketch_id
+        document.selected_face = None
+        document.selected_edge = None
+        document.selected_plane = (
+            None if sketch.is_custom_plane else sketch.plane
+        )
+        self._align_camera_to_active_sketch(document)
+        self.workspace.begin_sketch_edit()
+        self.workspace.sketch_palette_window.open(sketch.line_type)
+
+    def set_sketch_visibility(
+        self, sketch_id: int, visible: bool
+    ) -> None:
+        """Show or hide one sketch as an undoable document edit."""
+        document = self.active_document()
+        stack = self._active_stack()
+        if document is None or stack is None:
+            return
+        sketch = document.sketch(sketch_id)
+        if sketch is None or sketch.visible == bool(visible):
+            return
+        stack.execute(
+            SetSketchVisibilityCommand(document, sketch, visible)
+        )
 
     def _align_camera_to_active_sketch(self, document: Document) -> None:
         sketch = document.sketch(document.active_sketch_id)

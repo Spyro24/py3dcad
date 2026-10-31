@@ -732,6 +732,9 @@ class Sketch:
     plane_v: Optional[Point3] = None
     plane_normal: Optional[Point3] = None
     line_type: str = "normal"
+    # Visibility is a document setting, so a sketch can stay in the tree
+    # after it has been consumed by a feature without cluttering the view.
+    visible: bool = True
     edges: List[Tuple[int, int]] = field(default_factory=list)
     edge_constraints: List[Optional[str]] = field(default_factory=list)
     # A bulge is tan(sweep / 4) for an exact circular arc.  Straight edges
@@ -759,6 +762,7 @@ class Sketch:
 
     def __post_init__(self) -> None:
         self.points = [point2d(point) for point in self.points]
+        self.visible = bool(self.visible)
         circles = [
             circle
             for circle in (
@@ -3352,6 +3356,7 @@ class Sketch:
                 link.to_dict() for link in self.projected_circles
             ],
             "line_type": self.line_type,
+            "visible": bool(self.visible),
             # Kept for older readers; edges are the source of truth.
             "lines": [
                 [[start[0], start[1]], [end[0], end[1]]]
@@ -3530,6 +3535,7 @@ class Sketch:
             plane_v=plane_v,
             plane_normal=plane_normal,
             line_type=line_type,
+            visible=bool(data.get("visible", True)),
             edges=edges,
             edge_constraints=constraints[:len(edges)],
             edge_bulges=bulges,

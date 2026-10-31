@@ -34,6 +34,10 @@ class Document:
     next_id: int = 1
     active_sketch_id: Optional[int] = None
     selected_plane: Optional[str] = None
+    # A finished sketch can stay selected without being edited.  Solid tools
+    # read this to consume an existing sketch, while ``active_sketch_id``
+    # remains the sketch currently open for drawing.
+    selected_sketch_id: Optional[int] = None
     # The full multi-selection.  ``selected_face``/``selected_edge`` expose
     # the primary (most recently added) reference for single-target tools.
     selected_faces: List[Tuple[int, int]] = field(default_factory=list)
@@ -61,6 +65,20 @@ class Document:
     def selected_edge(self, reference: Optional[Tuple[int, int]]) -> None:
         self.selected_edges = [] if reference is None else [reference]
 
+    @property
+    def selected_sketch(self) -> Optional[Sketch]:
+        """Return the sketch selected for a solid tool, if any."""
+        return self.sketch(self.selected_sketch_id)
+
+    def select_sketch(self, sketch_id: int) -> None:
+        """Select a sketch without opening it for editing."""
+        if self.sketch(sketch_id) is None:
+            return
+        self.selected_sketch_id = sketch_id
+        self.selected_faces = []
+        self.selected_edges = []
+        self.selected_plane = None
+
     def select_face(
         self, reference: Tuple[int, int], additive: bool = False
     ) -> None:
@@ -70,6 +88,7 @@ class Document:
         )
         self.selected_edges = []
         self.selected_plane = None
+        self.selected_sketch_id = None
         self.active_sketch_id = None
 
     def select_edge(
@@ -81,6 +100,7 @@ class Document:
         )
         self.selected_faces = []
         self.selected_plane = None
+        self.selected_sketch_id = None
         self.active_sketch_id = None
 
     def clear_selection(self) -> None:
@@ -88,6 +108,7 @@ class Document:
         self.selected_faces = []
         self.selected_edges = []
         self.selected_plane = None
+        self.selected_sketch_id = None
 
     def new_id(self) -> int:
         value = self.next_id
@@ -218,6 +239,7 @@ class Document:
             dirty=False,
             next_id=highest + 1,
             active_sketch_id=active,
+            selected_sketch_id=active,
             selected_plane=(
                 normalize_plane(payload["selected_plane"])
                 if payload.get("selected_plane") else None
